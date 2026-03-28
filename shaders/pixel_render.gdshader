@@ -4,6 +4,16 @@ shader_type canvas_item;
 uniform sampler2D seed_tex : filter_nearest, repeat_disable;
 uniform int frame;
 
+// Gravity gun
+uniform vec2 grav_gun_uv;     // UV-koordinaatti (0-1)
+uniform int grav_gun_active;   // 0 tai 1
+uniform float grav_gun_radius; // Säde UV-tilassa
+
+// Räjähdysflash
+uniform vec2 flash_uv;
+uniform float flash_radius;
+uniform float flash_intensity;
+
 // TEXTURE = grid data (R8, materiaali-ID per pikseli)
 // Materiaalien värit
 const vec3 MAT_COLORS[10] = {
@@ -56,6 +66,32 @@ void fragment() {
 	// Höyryn häive
 	if (mat_id == 7) {
 		color = mix(MAT_COLORS[0], color, 0.5 + seed_val * 0.4);
+	}
+
+	// Räjähdysflash: valkoinen radiaalinen häive
+	if (flash_intensity > 0.0) {
+		vec2 flash_diff = UV - flash_uv;
+		flash_diff.x *= 1.778;
+		float flash_dist = length(flash_diff);
+		if (flash_dist < flash_radius) {
+			float fi = (1.0 - flash_dist / flash_radius) * flash_intensity;
+			color = mix(color, vec3(1.0, 0.95, 0.8), fi * 0.8);
+		}
+	}
+
+	// Gravity gun -efekti: himmeä radiaalinen voimakenttä
+	if (grav_gun_active == 1) {
+		vec2 diff = UV - grav_gun_uv;
+		// Korjaa aspektisuhdetta (320/180 ≈ 1.78)
+		diff.x *= 1.778;
+		float dist = length(diff);
+		float r = grav_gun_radius;
+		if (dist < r) {
+			float intensity = (1.0 - dist / r) * 0.25;
+			// Sykkivä efekti
+			float pulse = 0.8 + 0.2 * sin(float(frame) * 0.3);
+			color += vec3(0.15, 0.3, 0.8) * intensity * pulse;
+		}
 	}
 
 	COLOR = vec4(color, 1.0);

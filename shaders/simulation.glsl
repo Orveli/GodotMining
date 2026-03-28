@@ -13,6 +13,10 @@ layout(push_constant, std430) uniform Params {
     uint frame;
     uint pass_id;   // eri passi per dispatch
     uint pad0;
+    uint grav_gun_x;      // Gravity gun kohde X (grid-koordinaatti)
+    uint grav_gun_y;      // Gravity gun kohde Y
+    uint grav_gun_mode;   // 0 = pois, 1 = veto
+    uint grav_gun_radius; // Vetovoiman säde pikseleinä
 } p;
 
 const uint EMPTY = 0u;
@@ -50,14 +54,18 @@ bool is_powder(uint mat) {
 }
 
 // Yritä siirtää solu src_idx -> dst_idx atomisesti
-// Palauttaa true jos onnistui
+// Pyyhitään lähde ENSIN → estää duplikaation (vain yksi thread voi "poimia" solun)
 bool try_atomic_move(uint src_idx, uint dst_idx, uint my_cell, uint expected_dst) {
-    uint old = atomicCompSwap(grid.cells[dst_idx], expected_dst, my_cell);
-    if (old == expected_dst) {
-        // Onnistui — tyhjennä lähde atomisesti
-        atomicCompSwap(grid.cells[src_idx], my_cell, expected_dst);
-        return true;
-    }
+    // 1. Poista lähteestä (varaa omistajuus)
+    uint old_src = atomicCompSwap(grid.cells[src_idx], my_cell, expected_dst);
+    if (old_src != my_cell) return false;  // Joku muu otti sen jo
+
+    // 2. Kirjoita kohteeseen
+    uint old_dst = atomicCompSwap(grid.cells[dst_idx], expected_dst, my_cell);
+    if (old_dst == expected_dst) return true;  // Onnistui
+
+    // 3. Kohde varattu — palauta lähde
+    atomicCompSwap(grid.cells[src_idx], expected_dst, my_cell);
     return false;
 }
 
@@ -69,6 +77,57 @@ bool try_atomic_swap(uint src_idx, uint dst_idx, uint src_cell, uint dst_cell) {
         // dst onnistui — kirjoita dst:n arvo src:hen
         atomicCompSwap(grid.cells[src_idx], src_cell, dst_cell);
         return true;
+    }
+    return false;
+}
+
+// Gravity gun: veto (mode=1)
+bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
+    int gx = int(p.grav_gun_x);
+    int gy = int(p.grav_gun_y);
+    int dx = gx - int(x);
+    int dy = gy - int(y);
+    int dist2 = dx * dx + dy * dy;
+    int r = int(p.grav_gun_radius);
+
+    if (dist2 > r * r || dist2 == 0) return false;
+
+    // Kokeile pääsuunta + diagonaalit (3 yritystä)
+    int dirs[6]; // 3 paria (x, y)
+    int num_dirs = 0;
+
+    // Pääsuunta: kohti (tai poispäin) kohdetta
+    if (abs(dx) >= abs(dy)) {
+        dirs[0] = dx > 0 ? 1 : -1; dirs[1] = 0;
+        dirs[2] = dx > 0 ? 1 : -1; dirs[3] = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+        dirs[4] = 0; dirs[5] = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+        num_dirs = (dy != 0) ? 3 : 1;
+    } else {
+        dirs[0] = 0; dirs[1] = dy > 0 ? 1 : -1;
+        dirs[2] = dx > 0 ? 1 : (dx < 0 ? -1 : 0); dirs[3] = dy > 0 ? 1 : -1;
+        dirs[4] = dx > 0 ? 1 : (dx < 0 ? -1 : 0); dirs[5] = 0;
+        num_dirs = (dx != 0) ? 3 : 1;
+    }
+
+    uint my_mat = get_mat(my_cell);
+
+    for (int i = 0; i < num_dirs; i++) {
+        int nx = int(x) + dirs[i * 2];
+        int ny = int(y) + dirs[i * 2 + 1];
+        if (nx < 0 || uint(nx) >= p.width || ny < 0 || uint(ny) >= p.height) continue;
+
+        uint dst_idx = uint(ny) * p.width + uint(nx);
+        uint dst_cell = grid.cells[dst_idx];
+        uint dst_mat = get_mat(dst_cell);
+
+        // Tyhjään: aina OK
+        if (dst_mat == EMPTY) {
+            return try_atomic_move(idx, dst_idx, my_cell, dst_cell);
+        }
+        // Jauhe voi työntyä nesteen läpi
+        if (is_powder(my_mat) && is_liquid(dst_mat)) {
+            return try_atomic_swap(idx, dst_idx, my_cell, dst_cell);
+        }
     }
     return false;
 }
@@ -92,6 +151,11 @@ void main() {
 
     uint max_x = p.width - 1u;
     uint max_y = p.height - 1u;
+
+    // Gravity gun veto GPU:lla (try_atomic_move korjattu: ei duplikaatiota)
+    if (p.grav_gun_mode == 1u && (falls(mat) || mat == FIRE || mat == STEAM)) {
+        if (try_gravity_gun(idx, x, y, my_cell)) return;
+    }
 
     // ========== JAUHE (hiekka, tuhka) ==========
     if (is_powder(mat)) {

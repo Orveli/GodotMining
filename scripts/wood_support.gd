@@ -23,29 +23,29 @@ static func check_support(grid: PackedByteArray, width: int, height: int) -> boo
 			if mat != 4:  # MAT_WOOD = 4
 				continue
 
-			# Onko tama puu tuen vieressa?
+			# Onko tämä puu tuen vieressä?
 			var has_support := false
 
 			# Maanpohja
 			if y == height - 1:
 				has_support = true
 
-			# Tarkista naapurit (4-suuntainen)
+			# Tarkista naapurit (4-suuntainen) — tuki = STONE tai SAND
 			if not has_support and x > 0:
 				var n := grid[idx - 1]
-				if n == 3:  # STONE
+				if n == 3 or n == 1:  # STONE tai SAND
 					has_support = true
 			if not has_support and x < width - 1:
 				var n := grid[idx + 1]
-				if n == 3:
+				if n == 3 or n == 1:
 					has_support = true
 			if not has_support and y > 0:
 				var n := grid[idx - width]
-				if n == 3:
+				if n == 3 or n == 1:
 					has_support = true
 			if not has_support and y < height - 1:
 				var n := grid[idx + width]
-				if n == 3:
+				if n == 3 or n == 1:
 					has_support = true
 
 			if has_support:

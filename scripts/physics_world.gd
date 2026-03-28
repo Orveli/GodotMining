@@ -16,6 +16,7 @@ var next_body_id: int = 1
 var body_map: PackedInt32Array  # cell → body_id (0 = ei kappaletta)
 var map_w: int = 0
 var map_h: int = 0
+var force_damage_check := false  # Pakota vauriotarkistus (räjähdyksen jälkeen)
 
 
 func _ensure_body_map(w: int, h: int) -> void:
@@ -41,6 +42,62 @@ func create_body(world_pixels: Array[Vector2i], seeds: PackedByteArray, mat: int
 
 func remove_body(body_id: int) -> void:
 	bodies.erase(body_id)
+
+
+# === RÄJÄHDYSIMPULSSIT ===
+
+func apply_explosion_impulse(center: Vector2, radius: float, force: float) -> void:
+	force_damage_check = true  # Pakota vauriotarkistus seuraavalla framella
+	var effect_radius := radius * 2.0
+	for body_id in bodies:
+		var body: RigidBodyData = bodies[body_id]
+		if body.is_static:
+			continue
+		var dir := body.position - center
+		var dist := dir.length()
+		if dist > effect_radius or dist < 0.01:
+			continue
+		dir = dir.normalized()
+		# Voimakkuus laskee etäisyyden mukaan
+		var strength := force * (1.0 - dist / effect_radius) / maxf(body.mass, 1.0)
+		strength = minf(strength, MAX_VELOCITY * 0.8)
+		body.velocity += dir * strength
+		# Pyöritys
+		body.angular_velocity += randf_range(-0.15, 0.15) * strength
+		body.wake_up()
+
+
+# === GRAVITY GUN ===
+
+func apply_attraction(target: Vector2, radius: float, strength: float) -> void:
+	for body_id in bodies:
+		var body: RigidBodyData = bodies[body_id]
+		if body.is_static:
+			continue
+		var dir := target - body.position
+		var dist := dir.length()
+		if dist > radius or dist < 1.0:
+			continue
+		dir = dir.normalized()
+		# Vetovoima laskee etäisyyden mukaan, massan mukaan
+		var pull := strength * (1.0 - dist / radius) / maxf(body.mass, 1.0) * 2.0
+		pull = minf(pull, MAX_VELOCITY * 0.5)
+		body.velocity += dir * pull
+		body.wake_up()
+
+
+func apply_throw(origin: Vector2, radius: float, throw_velocity: Vector2) -> void:
+	for body_id in bodies:
+		var body: RigidBodyData = bodies[body_id]
+		if body.is_static:
+			continue
+		var dist := (body.position - origin).length()
+		if dist > radius:
+			continue
+		var strength := (1.0 - dist / radius) / maxf(body.mass, 1.0) * 10.0
+		body.velocity += throw_velocity * strength
+		body.angular_velocity += randf_range(-0.1, 0.1) * strength
+		body.wake_up()
 
 
 # === PÄÄSILMUKKA ===
@@ -495,13 +552,10 @@ func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: in
 
 		var body := create_body(pixels, seeds, 3)
 		if body:
-			var touches_ground := false
-			for p in pixels:
-				if p.y >= h - 1:
-					touches_ground = true
-					break
-			if touches_ground:
-				body.is_static = true
+			# Kaikki alussa skannatut kappaleet ovat staattisia (osa maailmaa)
+			# Ne muuttuvat dynaamisiksi vasta kun räjähdys/leikkaus irrottaa palan
+			body.is_static = true
+			body.is_sleeping = true
 			# Kirjoita body_map
 			for p in pixels:
 				body_map[p.y * w + p.x] = body.body_id
@@ -509,12 +563,13 @@ func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: in
 
 func check_damage(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) -> void:
 	_ensure_body_map(w, h)
+	var check_static := force_damage_check  # Staattiset vain räjähdyksen jälkeen
 	var bodies_to_check: Array[int] = []
 
 	for body_id in bodies:
 		var body: RigidBodyData = bodies[body_id]
-		if body.is_static:
-			continue  # Staattiset kappaleet (maapohja) eivät vaurioidu
+		if body.is_static and not check_static:
+			continue  # Ohita staattiset normaalilla tarkistuksella
 		var world_pixels := body.get_world_pixels()
 		var intact := true
 
@@ -581,9 +636,19 @@ func _split_if_needed(body_id: int, grid: PackedByteArray, color_seed: PackedByt
 		if comp_pixels.size() >= MIN_BODY_SIZE:
 			var new_body := create_body(comp_pixels, comp_seeds, body.material)
 			if new_body:
-				new_body.velocity = body.velocity
-				new_body.angular_velocity = body.angular_velocity
-				new_body.wake_up()
+				# Reunaa koskettavat palat pysyvät staattisina (vasen/oikea/ala — ei ylä)
+				var touches_edge := false
+				for p in comp_pixels:
+					if p.x <= 0 or p.x >= w - 1 or p.y >= h - 1:
+						touches_edge = true
+						break
+				if touches_edge:
+					new_body.is_static = true
+					new_body.is_sleeping = true
+				else:
+					new_body.velocity = body.velocity
+					new_body.angular_velocity = body.angular_velocity
+					new_body.wake_up()
 				for p in comp_pixels:
 					body_map[p.y * w + p.x] = new_body.body_id
 		else:

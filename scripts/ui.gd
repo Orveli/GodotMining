@@ -15,11 +15,19 @@ func _ready() -> void:
 	$VBox/BtnOil.pressed.connect(_on_material.bind(6))    # Mat.OIL
 	$VBox/BtnErase.pressed.connect(_on_material.bind(0))  # Mat.EMPTY
 	$VBox/BtnClear.pressed.connect(_on_clear)
+	$VBox/BtnReset.pressed.connect(_on_reset)
 	brush_slider.value_changed.connect(_on_brush_changed)
 
 
 func _process(_delta: float) -> void:
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+	var mode_str := ""
+	if pixel_world.grav_gun_mode > 0:
+		mode_str = " | GRAVITY GUN"
+	elif pixel_world.cut_mode:
+		mode_str = " | LEIKKAUS"
+	var explosion_names: Array[String] = ["Pieni", "Keski", "Iso", "Mega"]
+	var exp_str := explosion_names[pixel_world.explosion_size]
+	fps_label.text = "FPS: %d | Räjähdys: %s%s" % [Engine.get_frames_per_second(), exp_str, mode_str]
 
 
 func _on_material(mat: int) -> void:
@@ -28,6 +36,10 @@ func _on_material(mat: int) -> void:
 
 func _on_clear() -> void:
 	pixel_world.clear_world()
+
+
+func _on_reset() -> void:
+	pixel_world.regenerate_world()
 
 
 func _on_brush_changed(value: float) -> void:

@@ -82,6 +82,11 @@ layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "Tyhjennä [C]"
 
+[node name="BtnReset" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Uusi maailma [R]"
+
 [node name="Sep" type="HSeparator" parent="UI/Panel/VBox"]
 layout_mode = 2
 
