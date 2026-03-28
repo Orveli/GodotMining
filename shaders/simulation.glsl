@@ -81,7 +81,7 @@ bool try_atomic_swap(uint src_idx, uint dst_idx, uint src_cell, uint dst_cell) {
     return false;
 }
 
-// Gravity gun: veto (mode=1)
+// Gravity gun: veto kohti kohdetta
 bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
     int gx = int(p.grav_gun_x);
     int gy = int(p.grav_gun_y);
@@ -92,41 +92,50 @@ bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
 
     if (dist2 > r * r || dist2 == 0) return false;
 
-    // Kokeile pääsuunta + diagonaalit (3 yritystä)
-    int dirs[6]; // 3 paria (x, y)
-    int num_dirs = 0;
-
-    // Pääsuunta: kohti (tai poispäin) kohdetta
-    if (abs(dx) >= abs(dy)) {
-        dirs[0] = dx > 0 ? 1 : -1; dirs[1] = 0;
-        dirs[2] = dx > 0 ? 1 : -1; dirs[3] = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
-        dirs[4] = 0; dirs[5] = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
-        num_dirs = (dy != 0) ? 3 : 1;
-    } else {
-        dirs[0] = 0; dirs[1] = dy > 0 ? 1 : -1;
-        dirs[2] = dx > 0 ? 1 : (dx < 0 ? -1 : 0); dirs[3] = dy > 0 ? 1 : -1;
-        dirs[4] = dx > 0 ? 1 : (dx < 0 ? -1 : 0); dirs[5] = 0;
-        num_dirs = (dx != 0) ? 3 : 1;
-    }
+    // Pääsuunta + vaihtoehto
+    int sx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    int sy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
 
     uint my_mat = get_mat(my_cell);
 
-    for (int i = 0; i < num_dirs; i++) {
-        int nx = int(x) + dirs[i * 2];
-        int ny = int(y) + dirs[i * 2 + 1];
-        if (nx < 0 || uint(nx) >= p.width || ny < 0 || uint(ny) >= p.height) continue;
-
-        uint dst_idx = uint(ny) * p.width + uint(nx);
-        uint dst_cell = grid.cells[dst_idx];
-        uint dst_mat = get_mat(dst_cell);
-
-        // Tyhjään: aina OK
-        if (dst_mat == EMPTY) {
-            return try_atomic_move(idx, dst_idx, my_cell, dst_cell);
+    // Yritys 1: pääsuunta (pisin akseli)
+    int mx = 0, my_ = 0;
+    if (abs(dx) >= abs(dy)) { mx = sx; } else { my_ = sy; }
+    {
+        int nx = int(x) + mx;
+        int ny = int(y) + my_;
+        if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+            uint di = uint(ny) * p.width + uint(nx);
+            uint dc = grid.cells[di];
+            uint dm = get_mat(dc);
+            if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
         }
-        // Jauhe voi työntyä nesteen läpi
-        if (is_powder(my_mat) && is_liquid(dst_mat)) {
-            return try_atomic_swap(idx, dst_idx, my_cell, dst_cell);
+    }
+    // Yritys 2: diagonaali
+    if (sx != 0 && sy != 0) {
+        int nx = int(x) + sx;
+        int ny = int(y) + sy;
+        if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+            uint di = uint(ny) * p.width + uint(nx);
+            uint dc = grid.cells[di];
+            uint dm = get_mat(dc);
+            if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
+        }
+    }
+    // Yritys 3: sivuakseli
+    {
+        int ax = 0, ay = 0;
+        if (abs(dx) >= abs(dy)) { ay = sy; } else { ax = sx; }
+        if (ax != 0 || ay != 0) {
+            int nx = int(x) + ax;
+            int ny = int(y) + ay;
+            if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+                uint di = uint(ny) * p.width + uint(nx);
+                uint dc = grid.cells[di];
+                if (get_mat(dc) == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            }
         }
     }
     return false;
@@ -152,7 +161,7 @@ void main() {
     uint max_x = p.width - 1u;
     uint max_y = p.height - 1u;
 
-    // Gravity gun veto GPU:lla (try_atomic_move korjattu: ei duplikaatiota)
+    // Gravity gun: veto — try_atomic_move korjattu, ei duplikaatiota
     if (p.grav_gun_mode == 1u && (falls(mat) || mat == FIRE || mat == STEAM)) {
         if (try_gravity_gun(idx, x, y, my_cell)) return;
     }

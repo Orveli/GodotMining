@@ -241,10 +241,9 @@ func _handle_input() -> void:
 				Vector2(coords), float(GRAV_GUN_RADIUS), GRAV_GUN_BODY_STRENGTH
 			)
 	elif grav_gun_mode == 1:
-		# Oikea hiiri päästetty — heitä CPU:lla (yksi operaatio)
+		# Oikea hiiri päästetty — heitä CPU:lla suuntaan
 		if mouse_velocity.length() > 0.5:
-			_throw_pixels(grav_gun_pos, GRAV_GUN_RADIUS, mouse_velocity * 2.5)
-			# Rigid body -heitto
+			_throw_pixels(grav_gun_pos, GRAV_GUN_RADIUS, mouse_velocity * 4.0)
 			physics_world.apply_throw(
 				Vector2(grav_gun_pos), float(GRAV_GUN_RADIUS),
 				mouse_velocity * 3.0
