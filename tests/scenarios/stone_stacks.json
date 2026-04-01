@@ -1,0 +1,12 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 235, "w": 416, "h": 5, "mat": 3 },
+    { "cmd": "fill_rect", "x": 180, "y": 10, "w": 30, "h": 20, "mat": 3 },
+    { "cmd": "fill_rect", "x": 185, "y": 60, "w": 20, "h": 20, "mat": 3 },
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "dump_stats" },
+    { "cmd": "assert_rect", "x": 150, "y": 200, "w": 116, "h": 35, "mat": 3, "min_pct": 3, "label": "kiviä on pinoassa" }
+  ]
+}

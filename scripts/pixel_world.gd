@@ -2008,6 +2008,15 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 				"materials": mat_counts,
 				"bodies": body_count
 			}))
+		"screenshot":
+			# Tallenna nykyinen viewport PNG-tiedostoon
+			var spath: String = step.get("path", "user://screenshot.png")
+			_scenario_screenshot(spath)
+		"load_scene":
+			# Generoi valmiiksi tehty testiscene
+			var scene_name: String = step.get("scene", "empty")
+			TestSceneGenerator.generate(scene_name, self)
+			print("ScenarioRunner: load_scene '%s'" % scene_name)
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false
@@ -2026,6 +2035,19 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 			grid[idx] = mat
 			color_seed[idx] = randi() % 256
 	paint_pending = true
+
+
+func _scenario_screenshot(path: String) -> void:
+	# Tallenna viewport kuvakaappauksena PNG-tiedostoon
+	var img: Image = get_viewport().get_texture().get_image()
+	if img == null:
+		push_error("ScenarioRunner: viewport-tekstuuri null, screenshot epäonnistui")
+		return
+	var err := img.save_png(path)
+	if err == OK:
+		print("SCREENSHOT: ", path)
+	else:
+		push_error("ScenarioRunner: screenshot-tallennus epäonnistui (%d): %s" % [err, path])
 
 
 func _notification(what: int) -> void:

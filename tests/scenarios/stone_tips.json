@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 235, "w": 416, "h": 5, "mat": 3 },
+    { "cmd": "fill_rect", "x": 100, "y": 80, "w": 120, "h": 10, "mat": 3 },
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "dump_stats" },
+    { "cmd": "assert_count", "mat": 3, "min": 100, "label": "kivi on tallella" }
+  ]
+}

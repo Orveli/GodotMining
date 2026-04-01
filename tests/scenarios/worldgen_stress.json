@@ -1,0 +1,9 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "load_scene", "scene": "material_soup" },
+    { "cmd": "run_frames", "n": 600 },
+    { "cmd": "dump_stats" },
+    { "cmd": "assert_count", "mat": 0, "min": 1, "label": "edes jotain tyhjää on" }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 235, "w": 416, "h": 5, "mat": 3 },
+    { "cmd": "fill_rect", "x": 170, "y": 80, "w": 80, "h": 80, "mat": 3 },
+    { "cmd": "run_frames", "n": 30 },
+    { "cmd": "fill_rect", "x": 165, "y": 100, "w": 6, "h": 6, "mat": 5 },
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "dump_stats" }
+  ]
+}
