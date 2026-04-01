@@ -92,6 +92,7 @@ var prev_mouse_grid: Vector2 = Vector2.ZERO
 
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
+var physics_initialized := false  # Onko kivi-kappaleet skannattu
 var is_painting_stone := false  # Maalataan kiveä parhaillaan — fysiikka tauolla
 var stroke_stone_pixels: Dictionary = {}  # Tämän vedon kivipikselit (deduplikoitu)
 var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
@@ -355,6 +356,11 @@ func _process(delta: float) -> void:
 		# Lataa tulos takaisin CPU:lle
 		_download_from_gpu()
 
+		# Vaihe 2b: Skannaa kivi-kappaleet ensimmäisellä framella (tai resetin jälkeen)
+		if not physics_initialized:
+			physics_world.scan_stone_bodies(grid, color_seed, W, SIM_HEIGHT)
+			physics_initialized = true
+
 		# Vaihe 3: Rigid body -fysiikka (vain aktiivisille kappaleille)
 		var grid_modified := false
 		if not physics_world.bodies.is_empty():
@@ -583,6 +589,7 @@ func clear_world() -> void:
 	paint_pending = true
 	# Nollaa fysiikkamaailma
 	physics_world = PhysicsWorld.new()
+	physics_initialized = false
 	_clear_chickens()
 	_clear_conveyors()
 	_clear_buildings()
@@ -851,6 +858,7 @@ func regenerate_world() -> void:
 	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
 	paint_pending = true
 	physics_world = PhysicsWorld.new()
+	physics_initialized = false
 	_clear_chickens()
 	_clear_conveyors()
 	_clear_buildings()
@@ -2019,6 +2027,15 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			var scene_name: String = step.get("scene", "empty")
 			TestSceneGenerator.generate(scene_name, self)
 			print("ScenarioRunner: load_scene '%s'" % scene_name)
+		"place_body":
+			# Luo dynaaminen fysiikkakappale suorakulmiosta (mat=3 kivi oletuksena)
+			var bx: int = step.get("x", 0)
+			var by: int = step.get("y", 0)
+			var bw: int = step.get("w", 10)
+			var bh: int = step.get("h", 10)
+			var bmat: int = step.get("mat", MAT_STONE)
+			_scenario_place_body(bx, by, bw, bh, bmat)
+			print("ScenarioRunner: place_body x=%d y=%d w=%d h=%d mat=%d" % [bx, by, bw, bh, bmat])
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false
@@ -2037,6 +2054,43 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 			grid[idx] = mat
 			color_seed[idx] = randi() % 256
 	paint_pending = true
+
+
+func _scenario_place_body(x: int, y: int, w: int, h: int, mat: int) -> void:
+	# Kirjoita pikselit gridiin ja luo dynaaminen fysiikkakappale
+	var pixels: Array[Vector2i] = []
+	for dy in h:
+		var gy := y + dy
+		if gy < 0 or gy >= SIM_HEIGHT:
+			continue
+		for dx in w:
+			var gx := x + dx
+			if gx < 0 or gx >= W:
+				continue
+			var idx := gy * W + gx
+			grid[idx] = mat
+			color_seed[idx] = randi() % 256
+			pixels.append(Vector2i(gx, gy))
+	paint_pending = true
+
+	if pixels.size() < 4:
+		return
+
+	var seeds := PackedByteArray()
+	seeds.resize(pixels.size())
+	for i in pixels.size():
+		var p: Vector2i = pixels[i]
+		seeds[i] = color_seed[p.y * W + p.x]
+
+	physics_world._ensure_body_map(W, SIM_HEIGHT)
+	var body := physics_world.create_body(pixels, seeds, mat)
+	if body:
+		body.is_static = false
+		body.is_sleeping = false
+		for p in pixels:
+			physics_world.body_map[p.y * W + p.x] = body.body_id
+	# Estä scan_stone_bodies ylikirjoittamasta tätä dynaamisena luotua kappaletta
+	physics_initialized = true
 
 
 func _scenario_screenshot(path: String) -> void:
