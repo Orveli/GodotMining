@@ -1715,13 +1715,18 @@ func _handle_launcher_click(world_pos: Vector2) -> void:
 func _update_launchers_and_flying(delta: float) -> bool:
 	var modified := false
 
-	# Hissilinkot: kerää laukaistavat pikselit
+	# Hissilinkot: imu kuiluun + kuiluanimaatio + laukaisu
 	var alive_launchers: Array = []
 	for launcher in launchers:
-		var launched: Array[Dictionary] = launcher.update_launcher(grid, W, delta)
+		# Imu: kerää pikselit intake-alueelta kuiluun
+		launcher.update_launcher(grid, W, delta)
+		# Kuilu: liikuta pikselit ylöspäin, kerää laukaistavat
+		var launched: Array[Dictionary] = launcher.update_shaft(grid, W, SIM_HEIGHT, delta)
 		for fp: Dictionary in launched:
 			if flying_pixels.size() < FLYING_MAX_COUNT:
 				flying_pixels.append(fp)
+		# Merkitse muokatuksi myös kuiluanimaation aikana (shaft liikutti pikseliä)
+		if not launched.is_empty() or not launcher.shaft_pixels.is_empty():
 			modified = true
 		alive_launchers.append(launcher)
 	launchers = alive_launchers
