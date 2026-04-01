@@ -24,10 +24,14 @@ var is_sleeping: bool = false
 var sleep_counter: int = 0
 var is_static: bool = false
 
+# Rotaatiocache — lasketaan uudelleen vain kun kulma muuttuu
+var _rot_cache: Array[Vector2i] = []
+var _rot_angle: float = INF
+
 # Johdetut (lasketaan tarvittaessa)
 var bbox: Rect2i = Rect2i()
 
-const SLEEP_THRESHOLD_FRAMES := 90  # Pidempi odotus ennen nukahtamista
+const SLEEP_THRESHOLD_FRAMES := 30  # Nopeampi nukahtaminen suorituskyvyn parantamiseksi
 const MIN_VELOCITY := 0.08
 const MIN_ANGULAR_VELOCITY := 0.001
 
@@ -56,20 +60,13 @@ func calculate_from_world_pixels(world_pixels: Array[Vector2i], seeds: PackedByt
 
 # Palauta pikselien maailmakoordinaatit huomioiden sijainti ja kiertymä
 func get_world_pixels() -> Array[Vector2i]:
+	_ensure_rot_cache()
 	var result: Array[Vector2i] = []
-	var cos_a := cos(angle)
-	var sin_a := sin(angle)
-
-	for lp in local_pixels:
-		# Kierrä lokaalipikseli painopisteen ympäri
-		var rx := lp.x * cos_a - lp.y * sin_a
-		var ry := lp.x * sin_a + lp.y * cos_a
-		# Lisää painopisteen sijainti
-		result.append(Vector2i(
-			roundi(position.x + rx),
-			roundi(position.y + ry)
-		))
-
+	result.resize(_rot_cache.size())
+	var px := roundi(position.x)
+	var py := roundi(position.y)
+	for i in _rot_cache.size():
+		result[i] = Vector2i(_rot_cache[i].x + px, _rot_cache[i].y + py)
 	return result
 
 
@@ -115,6 +112,21 @@ func remove_pixel(local_index: int) -> bool:
 	return true
 
 
+func _ensure_rot_cache() -> void:
+	if absf(_rot_angle - angle) < 0.0005 and not _rot_cache.is_empty():
+		return
+	var cos_a := cos(angle)
+	var sin_a := sin(angle)
+	_rot_cache.resize(local_pixels.size())
+	for i in local_pixels.size():
+		var lp := local_pixels[i]
+		_rot_cache[i] = Vector2i(
+			roundi(lp.x * cos_a - lp.y * sin_a),
+			roundi(lp.x * sin_a + lp.y * cos_a)
+		)
+	_rot_angle = angle
+
+
 # Sisäinen: laske painopiste uudelleen lokaalipikseleiden perusteella
 func _recalculate_center_of_mass() -> void:
 	var sum := Vector2.ZERO
@@ -152,3 +164,4 @@ func _update_bbox() -> void:
 		max_p.y = maxi(max_p.y, lp.y)
 
 	bbox = Rect2i(min_p, max_p - min_p + Vector2i.ONE)
+	_rot_angle = INF  # Pakota rotaatiocachen uudelleenlaskenta

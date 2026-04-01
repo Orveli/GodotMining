@@ -15,7 +15,7 @@ layout(push_constant, std430) uniform Params {
     uint pad0;
     uint grav_gun_x;      // Gravity gun kohde X (grid-koordinaatti)
     uint grav_gun_y;      // Gravity gun kohde Y
-    uint grav_gun_mode;   // 0 = pois, 1 = veto
+    uint grav_gun_mode;   // 0 = pois, 1 = normaali veto, 2 = vakuumi
     uint grav_gun_radius; // Vetovoiman säde pikseleinä
 } p;
 
@@ -29,6 +29,7 @@ const uint OIL   = 6u;
 const uint STEAM = 7u;
 const uint ASH   = 8u;
 const uint WOOD_FALLING = 9u;
+const uint GLASS = 10u;
 
 uint get_mat(uint cell) { return cell & 0xFFu; }
 
@@ -81,7 +82,8 @@ bool try_atomic_swap(uint src_idx, uint dst_idx, uint src_cell, uint dst_cell) {
     return false;
 }
 
-// Gravity gun: veto kohti kohdetta
+// Gravity gun: veto kohti kohdetta (moodi 1=normaali, 2=vakuumi)
+// Vakuumimoodissa pikseli yrittää ensin 2 pikselin hyppyä, sitten 1 pikselin
 bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
     int gx = int(p.grav_gun_x);
     int gy = int(p.grav_gun_y);
@@ -92,9 +94,11 @@ bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
 
     if (dist2 > r * r || dist2 == 0) return false;
 
-    // Pääsuunta + vaihtoehto
-    int sx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
-    int sy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+    // Vakuumimoodissa pikseli hyppää 2 pikseliä kerralla
+    int step = (p.grav_gun_mode == 2u) ? 2 : 1;
+
+    int sx = (dx > 0) ? step : (dx < 0) ? -step : 0;
+    int sy = (dy > 0) ? step : (dy < 0) ? -step : 0;
 
     uint my_mat = get_mat(my_cell);
 
@@ -138,6 +142,38 @@ bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
             }
         }
     }
+
+    // Vakuumimoodissa: jos 2-askeleen hyppy epäonnistui, yritä normaali 1-askel
+    if (p.grav_gun_mode == 2u) {
+        int sx1 = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+        int sy1 = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+        int mx1 = 0, my1 = 0;
+        if (abs(dx) >= abs(dy)) { mx1 = sx1; } else { my1 = sy1; }
+        {
+            int nx = int(x) + mx1;
+            int ny = int(y) + my1;
+            if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+                uint di = uint(ny) * p.width + uint(nx);
+                uint dc = grid.cells[di];
+                uint dm = get_mat(dc);
+                if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+                if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
+            }
+        }
+        // Diagonaali 1-askelella
+        if (sx1 != 0 && sy1 != 0) {
+            int nx = int(x) + sx1;
+            int ny = int(y) + sy1;
+            if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+                uint di = uint(ny) * p.width + uint(nx);
+                uint dc = grid.cells[di];
+                uint dm = get_mat(dc);
+                if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+                if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
+            }
+        }
+    }
+
     return false;
 }
 
@@ -161,8 +197,8 @@ void main() {
     uint max_x = p.width - 1u;
     uint max_y = p.height - 1u;
 
-    // Gravity gun: veto — try_atomic_move korjattu, ei duplikaatiota
-    if (p.grav_gun_mode == 1u && (falls(mat) || mat == FIRE || mat == STEAM)) {
+    // Gravity gun: veto — normaali (1) ja vakuumi (2)
+    if (p.grav_gun_mode >= 1u && (falls(mat) || mat == FIRE || mat == STEAM)) {
         if (try_gravity_gun(idx, x, y, my_cell)) return;
     }
 

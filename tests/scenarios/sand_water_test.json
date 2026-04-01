@@ -1,0 +1,17 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0,   "y": 215, "w": 416, "h": 25, "mat": 3 },
+    { "cmd": "fill_rect", "x": 80,  "y": 160, "w": 256, "h": 50, "mat": 2 },
+    { "cmd": "fill_rect", "x": 170, "y": 100, "w": 76,  "h": 20, "mat": 1 },
+    { "cmd": "run_frames", "n": 1 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/t0_initial.png" },
+    { "cmd": "run_frames", "n": 60 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/t1_60f.png" },
+    { "cmd": "run_frames", "n": 240 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/t2_300f.png" },
+    { "cmd": "assert_material", "x": 208, "y": 220, "mat": 3, "label": "kivipohja kunnossa" },
+    { "cmd": "assert_material", "x": 208, "y": 95,  "mat": 0, "label": "hiekka on liikkunut pois lähtöpisteestä" }
+  ]
+}

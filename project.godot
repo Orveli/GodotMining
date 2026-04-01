@@ -20,9 +20,8 @@ config/features=PackedStringArray("4.6")
 
 [display]
 
-window/size/viewport_width=2560
-window/size/viewport_height=1440
-window/stretch/mode="canvas_items"
+window/size/viewport_width=1664
+window/size/viewport_height=960
 
 [rendering]
 

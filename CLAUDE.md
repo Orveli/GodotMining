@@ -24,6 +24,8 @@ Käyttäjä kertoo mitä haluaa tehdä. Sinä orkestroit työn automaattisesti o
 | "Mikä on vialla?" / analyysi | debugger |
 | Arkkitehtuurikysymys / suunnittelu | architect |
 | Koodimuutos + GPU-shader | programmer → debugger → reviewer |
+| Uusi grafiikka / sprite | artist |
+| Feature joka vaatii uuden assetin | architect → artist → programmer |
 
 ### Rinnakkaisuus
 

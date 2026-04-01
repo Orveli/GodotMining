@@ -12,6 +12,7 @@ const ANGULAR_DAMPING := 0.92  # Enemmän vaimennusta = vakaampi pysähdys
 const MAX_VELOCITY := 8.0  # Maksiminopeus
 
 var bodies: Dictionary = {}  # body_id → RigidBodyData
+const MAX_BODY_ID := 65535  # Kierrätetään ID:t ylivuodon estämiseksi
 var next_body_id: int = 1
 var body_map: PackedInt32Array  # cell → body_id (0 = ei kappaletta)
 var map_w: int = 0
@@ -36,7 +37,14 @@ func create_body(world_pixels: Array[Vector2i], seeds: PackedByteArray, mat: int
 	body.material = mat
 	body.calculate_from_world_pixels(world_pixels, seeds)
 	bodies[next_body_id] = body
+	# Kierrätä ID:t — etsi seuraava vapaa
 	next_body_id += 1
+	if next_body_id > MAX_BODY_ID:
+		next_body_id = 1
+	while bodies.has(next_body_id) and next_body_id <= MAX_BODY_ID:
+		next_body_id += 1
+		if next_body_id > MAX_BODY_ID:
+			next_body_id = 1
 	return body
 
 
@@ -208,21 +216,19 @@ func step(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) ->
 # Palauttaa Dictionary[Vector2i, int]: maailmapos → lokaali-indeksi (-1 = aukontäyttö)
 
 func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
-	var cos_a := cos(body.angle)
-	var sin_a := sin(body.angle)
+	body._ensure_rot_cache()
 	var result := {}
 	var local_to_world := {}
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
 
-	# Forward transform: jokainen lokaalipikseli → maailma
 	for i in body.local_pixels.size():
-		var lp := body.local_pixels[i]
-		var rx := lp.x * cos_a - lp.y * sin_a
-		var ry := lp.x * sin_a + lp.y * cos_a
-		var wp := Vector2i(roundi(body.position.x + rx), roundi(body.position.y + ry))
+		var rot := body._rot_cache[i]
+		var wp := Vector2i(rot.x + px, rot.y + py)
 		result[wp] = i
-		local_to_world[lp] = wp
+		local_to_world[body.local_pixels[i]] = wp
 
-	# Aukontäyttö: vierekkäiset lokaalipikselit joiden maailmapositiot eivät ole vierekkäin
+	# Aukontäyttö — sama kuin ennen, käyttää local_to_world-mappingia
 	var local_set := {}
 	for lp in body.local_pixels:
 		local_set[lp] = true
@@ -238,7 +244,6 @@ func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
 			var wp_b: Vector2i = local_to_world[neighbor]
 			var mdist := absi(wp_b.x - wp_a.x) + absi(wp_b.y - wp_a.y)
 			if mdist > 1:
-				# Aukko — täytä välipikselit (molemmat diagonaalin välit)
 				var mid1 := Vector2i(wp_a.x, wp_b.y)
 				var mid2 := Vector2i(wp_b.x, wp_a.y)
 				if not result.has(mid1):
@@ -247,6 +252,12 @@ func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
 					result[mid2] = -1
 
 	return result
+
+
+# === APUFUNKTIOT ===
+
+func _is_liquid(mat: int) -> bool:
+	return mat == 2 or mat == 6 or mat == 7  # MAT_WATER, MAT_OIL, MAT_STEAM
 
 
 # === ERASE / WRITE ===
@@ -270,7 +281,19 @@ func _write_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArr
 		var wp: Vector2i = wp_key
 		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
 			var idx: int = wp.y * w + wp.x
-			if grid[idx] == 0:
+			if grid[idx] == 0 or _is_liquid(grid[idx]):
+				# Syrjäytä neste viereiseen tyhjään soluun
+				if _is_liquid(grid[idx]):
+					var liq_mat := grid[idx]
+					var liq_seed := seed[idx]
+					for disp in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, -1), Vector2i(1, -1)]:
+						var np := Vector2i(wp.x + disp.x, wp.y + disp.y)
+						if np.x >= 0 and np.x < w and np.y >= 0 and np.y < h:
+							var nidx := np.y * w + np.x
+							if grid[nidx] == 0 and body_map[nidx] == 0:
+								grid[nidx] = liq_mat
+								seed[nidx] = liq_seed
+								break
 				grid[idx] = body.material
 				body_map[idx] = body.body_id
 				var pi: int = filled[wp]
@@ -297,7 +320,8 @@ func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h:
 	for wp in world_pixels:
 		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
 			return true
-		if grid[wp.y * w + wp.x] != 0:
+		var mat := grid[wp.y * w + wp.x]
+		if mat != 0 and not _is_liquid(mat):
 			return true
 	return false
 
@@ -319,7 +343,8 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 			elif wp.y >= h: accumulated_normal += Vector2(0, -1)
 		else:
 			var idx := wp.y * w + wp.x
-			if grid[idx] != 0:
+			var hit_mat := grid[idx]
+			if hit_mat != 0 and not _is_liquid(hit_mat):
 				colliding = true
 				# Tunnista osuiko nukkuvaan kappaleeseen
 				if body_map[idx] != 0 and result.hit_body_id == 0:
