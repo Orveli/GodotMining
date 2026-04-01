@@ -1,6 +1,7 @@
 extends TextureRect
 
 const TestSceneGenerator = preload("res://scripts/test_scene_generator.gd")
+const SlingScript = preload("res://scripts/sling.gd")
 
 const MAT_EMPTY := 0
 const MAT_SAND := 1
@@ -110,12 +111,19 @@ const BUILD_CONVEYOR_START := 2
 const BUILD_CONVEYOR_END := 3
 const BUILD_SAND_MINE := 4
 const BUILD_FURNACE := 5
+const BUILD_SLING := 6
+const GRID_SIZE := 8  # Rakennusgridi pikseleinä
 var build_mode: int = BUILD_NONE
 var build_menu_visible := false
 var conveyor_start_pos: Vector2 = Vector2.ZERO
 var conveyors: Array = []
 var furnaces: Array = []
 var sand_mines: Array = []
+var slings: Array = []
+var flying_pixels: Array[Dictionary] = []
+const FLYING_GRAVITY := 140.0   # px/s²
+const FLYING_MAX_AGE := 4.0
+const FLYING_MAX_COUNT := 300
 var build_preview: BuildPreview
 var prev_left_pressed := false
 var prev_right_pressed := false
@@ -395,6 +403,11 @@ func _process(delta: float) -> void:
 		if _update_sand_mines(delta * sim_speed):
 			grid_modified = true
 
+		# Vaihe 5.7: Lingot + lentävät pikselit
+		if not slings.is_empty() or not flying_pixels.is_empty():
+			if _update_slings_and_flying(delta * sim_speed):
+				grid_modified = true
+
 		# Vaihe 6: Lataa CPU:n muutokset GPU:lle vain jos oikeasti muuttui
 		if grid_modified:
 			_upload_paint_to_gpu()
@@ -502,6 +515,9 @@ func _handle_input() -> void:
 				block_paint = true
 			elif build_mode == BUILD_FURNACE:
 				_place_furnace(grid_pos)
+				block_paint = true
+			elif build_mode == BUILD_SLING:
+				_place_sling(Vector2(coords))
 				block_paint = true
 
 	# Laseri — vasen hiiri vetää viivan
@@ -929,6 +945,11 @@ func _input(event: InputEvent) -> void:
 					build_mode = BUILD_FURNACE
 					build_menu_visible = false
 					block_paint = true
+				KEY_5:
+					build_mode = BUILD_SLING
+					build_menu_visible = false
+					block_paint = true
+					print("Rakennustila: LINKO — klikkaa paikkaa")
 				KEY_ESCAPE, KEY_B:
 					build_menu_visible = false
 					build_mode = BUILD_NONE
@@ -961,7 +982,7 @@ func _input(event: InputEvent) -> void:
 			KEY_B:
 				build_menu_visible = not build_menu_visible
 				if build_menu_visible:
-					print("=== RAKENNUSVALIKKO === 1: Spawner | 2: Liukuhihna | B/ESC: Sulje")
+					print("=== RAKENNUSVALIKKO === 1: Spawner | 2: Liukuhihna | 3: Kaivos | 4: Uuni | 5: Linko | B/ESC: Sulje")
 				else:
 					print("Rakennusvalikko suljettu")
 			KEY_F5: save_world()
@@ -1483,6 +1504,10 @@ func _constrain_45(start: Vector2, target: Vector2) -> Vector2:
 	return start + diff
 
 
+func _snap_to_grid(pos: Vector2) -> Vector2:
+	return pos.snapped(Vector2(GRID_SIZE, GRID_SIZE))
+
+
 func _snap_to_belt_end(pos: Vector2) -> Vector2:
 	var best_dist := SNAP_DISTANCE
 	var best_pos := pos
@@ -1516,6 +1541,18 @@ func _update_build_preview() -> void:
 	if build_mode == BUILD_SPAWNER:
 		build_preview.show_spawner = true
 		build_preview.start_marker = mouse_pos
+	elif build_mode == BUILD_SLING:
+		var snapped := _snap_to_grid(mouse_pos)
+		build_preview.show_sling = true
+		build_preview.sling_pos = snapped
+		# Etsi lähimmän hihnan suunta esilkatseluun
+		var preview_dir := 1.0
+		for belt in conveyors:
+			for fp: Vector2i in belt.floor_pixels:
+				if absi(fp.x - int(snapped.x)) <= SlingScript.SLING_W and absi(fp.y - int(snapped.y)) <= SlingScript.SLING_H:
+					preview_dir = belt.belt_dir_x
+					break
+		build_preview.sling_dir = preview_dir
 	elif build_mode == BUILD_CONVEYOR_START:
 		var snapped := _snap_to_belt_end(mouse_pos)
 		build_preview.start_marker = snapped
@@ -1629,6 +1666,133 @@ func _clear_buildings() -> void:
 	for m in sand_mines:
 		m.queue_free()
 	sand_mines.clear()
+	_clear_slings()
+
+
+func _clear_slings() -> void:
+	for s in slings:
+		s.queue_free()
+	slings.clear()
+	flying_pixels.clear()
+
+
+func _place_sling(world_pos: Vector2) -> void:
+	var snapped := _snap_to_grid(world_pos)
+	var gpos := Vector2i(int(snapped.x), int(snapped.y))
+	# Etsi alla oleva hihna suunnan saamiseksi
+	var dir := 1.0
+	for belt in conveyors:
+		var bx: int = gpos.x
+		var by: int = gpos.y
+		# Tarkista onko grid-piste lähellä hihnan lattia-pikseliä
+		for fp: Vector2i in belt.floor_pixels:
+			if absi(fp.x - bx) <= SlingScript.SLING_W and absi(fp.y - by) <= SlingScript.SLING_H:
+				dir = belt.belt_dir_x
+				break
+	var sling := SlingScript.new()
+	sling.build_structure(gpos, dir)
+	sling.write_to_grid(grid, color_seed, W)
+	chicken_layer.add_child(sling)
+	slings.append(sling)
+	paint_pending = true
+	print("Linko asetettu kohtaan %s, suunta %.1f" % [gpos, dir])
+
+
+func _update_slings_and_flying(delta: float) -> bool:
+	var modified := false
+
+	# Lingot: kerää laukaistavat pikselit
+	var alive_slings: Array = []
+	for sling in slings:
+		if not sling.check_intact(grid, W):
+			sling.broken = true
+			sling.queue_free()
+			continue
+		var launched: Array[Dictionary] = sling.update_sling(grid, W, delta)
+		for fp: Dictionary in launched:
+			if flying_pixels.size() < FLYING_MAX_COUNT:
+				flying_pixels.append(fp)
+			modified = true
+		alive_slings.append(sling)
+	slings = alive_slings
+
+	# Lentävät pikselit: Euler-integraatio + törmäys
+	var still_flying: Array[Dictionary] = []
+	for fp: Dictionary in flying_pixels:
+		fp["age"] += delta
+		if fp["age"] > FLYING_MAX_AGE:
+			# Pakkolasku — kirjoita nykyiseen kohtaan jos vapaa
+			var fx := int(fp["pos"].x)
+			var fy := int(fp["pos"].y)
+			_flying_land(fp, fx, fy)
+			modified = true
+			continue
+
+		var old_pos: Vector2 = fp["pos"]
+		fp["vel"] = (fp["vel"] as Vector2) + Vector2(0.0, FLYING_GRAVITY * delta)
+		var new_pos: Vector2 = old_pos + (fp["vel"] as Vector2) * delta
+
+		# Bresenham törmäystarkistus
+		var landed := false
+		var pts := _bresenham(Vector2i(int(old_pos.x), int(old_pos.y)),
+							  Vector2i(int(new_pos.x), int(new_pos.y)))
+		var last_free := Vector2i(int(old_pos.x), int(old_pos.y))
+		for pt: Vector2i in pts:
+			if pt.x < 0 or pt.x >= W or pt.y >= SIM_HEIGHT:
+				_flying_land(fp, last_free.x, last_free.y)
+				landed = true
+				modified = true
+				break
+			if pt.y < 0:
+				last_free = pt
+				continue
+			var idx := pt.y * W + pt.x
+			if grid[idx] != 0:
+				_flying_land(fp, last_free.x, last_free.y)
+				landed = true
+				modified = true
+				break
+			last_free = pt
+
+		if not landed:
+			fp["pos"] = new_pos
+			still_flying.append(fp)
+
+	flying_pixels = still_flying
+	return modified
+
+
+func _flying_land(fp: Dictionary, x: int, y: int) -> void:
+	y = clampi(y, 0, SIM_HEIGHT - 1)
+	x = clampi(x, 0, W - 1)
+	var idx := y * W + x
+	if idx >= 0 and idx < grid.size() and grid[idx] == 0:
+		grid[idx] = fp["mat"]
+		color_seed[idx] = fp["seed"]
+		paint_pending = true
+
+
+func _bresenham(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
+	var pts: Array[Vector2i] = []
+	var dx := absi(b.x - a.x)
+	var dy := absi(b.y - a.y)
+	var sx := 1 if a.x < b.x else -1
+	var sy := 1 if a.y < b.y else -1
+	var err := dx - dy
+	var cx := a.x
+	var cy := a.y
+	for _i in range(dx + dy + 1):
+		pts.append(Vector2i(cx, cy))
+		if cx == b.x and cy == b.y:
+			break
+		var e2 := 2 * err
+		if e2 > -dy:
+			err -= dy
+			cx += sx
+		if e2 < dx:
+			err += dx
+			cy += sy
+	return pts
 
 
 func _sell_nearest_building(sell_pos: Vector2) -> void:
@@ -1666,6 +1830,16 @@ func _sell_nearest_building(sell_pos: Vector2) -> void:
 			best_dist = d
 			best_obj = m
 			best_list = sand_mines
+			best_idx = i
+
+	for i in slings.size():
+		var s = slings[i]
+		var center := Vector2(s.grid_pos) + Vector2(float(SlingScript.SLING_W), float(SlingScript.SLING_H)) * 0.5
+		var d := sell_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = s
+			best_list = slings
 			best_idx = i
 
 	if best_obj == null or best_idx < 0:
@@ -2036,6 +2210,35 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			var bmat: int = step.get("mat", MAT_STONE)
 			_scenario_place_body(bx, by, bw, bh, bmat)
 			print("ScenarioRunner: place_body x=%d y=%d w=%d h=%d mat=%d" % [bx, by, bw, bh, bmat])
+		"place_conveyor":
+			# Luo liukuhihna kahdesta pisteestä. dir-kenttä tulkitaan end-koordinaateiksi:
+			# Vaihtoehto A: anna x1,y1,x2,y2 (absoluuttiset pisteet)
+			# Vaihtoehto B: anna x,y,w,dir jossa dir="right"/"left"/"down_right"/"down_left"
+			var cx1: int = step.get("x1", step.get("x", 0))
+			var cy1: int = step.get("y1", step.get("y", 0))
+			var cx2: int = step.get("x2", -1)
+			var cy2: int = step.get("y2", -1)
+			if cx2 < 0:
+				# Laske end-koordinaatti dir+w avulla
+				var cw: int = step.get("w", 10)
+				var cdir: String = step.get("dir", "right")
+				match cdir:
+					"right":
+						cx2 = cx1 + cw; cy2 = cy1
+					"left":
+						cx2 = cx1 - cw; cy2 = cy1
+					"down_right":
+						cx2 = cx1 + cw; cy2 = cy1 + cw
+					"down_left":
+						cx2 = cx1 - cw; cy2 = cy1 + cw
+					"up_right":
+						cx2 = cx1 + cw; cy2 = cy1 - cw
+					"up_left":
+						cx2 = cx1 - cw; cy2 = cy1 - cw
+					_:
+						cx2 = cx1 + cw; cy2 = cy1
+			_create_conveyor(Vector2(cx1, cy1), Vector2(cx2, cy2))
+			print("ScenarioRunner: place_conveyor (%d,%d) → (%d,%d)" % [cx1, cy1, cx2, cy2])
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false

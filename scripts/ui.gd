@@ -9,6 +9,7 @@ extends PanelContainer
 var build_section: VBoxContainer
 var btn_spawner: Button
 var btn_conveyor: Button
+var btn_sling: Button
 
 # Speed-napit
 var speed_buttons: Array[Button] = []
@@ -130,6 +131,13 @@ func _ready() -> void:
 	btn_furnace.pressed.connect(_on_build_furnace)
 	build_section.add_child(btn_furnace)
 
+	btn_sling = Button.new()
+	btn_sling.text = "Linko [5]"
+	btn_sling.add_theme_font_size_override("font_size", 14)
+	btn_sling.focus_mode = Control.FOCUS_NONE
+	btn_sling.pressed.connect(_on_build_sling)
+	build_section.add_child(btn_sling)
+
 	# Tallenna toggle-nappi jotta voidaan synkronoida B-näppäimen kanssa
 	set_meta("build_toggle_btn", btn_build_toggle)
 
@@ -148,7 +156,7 @@ func _process(_delta: float) -> void:
 	# Tila-teksti
 	var mode_str := ""
 	if pixel_world.build_menu_visible:
-		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni"
+		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko"
 	elif pixel_world.build_mode == pixel_world.BUILD_SPAWNER:
 		mode_str = " | SPAWNER [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_CONVEYOR_START:
@@ -159,6 +167,8 @@ func _process(_delta: float) -> void:
 		mode_str = " | KAIVOS [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_FURNACE:
 		mode_str = " | UUNI [klikkaa]"
+	elif pixel_world.build_mode == pixel_world.BUILD_SLING:
+		mode_str = " | LINKO [klikkaa]"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
 	elif pixel_world.laser_mode:
@@ -175,8 +185,9 @@ func _process(_delta: float) -> void:
 	var belt_str := " | Hihnoja: %d" % pixel_world.conveyors.size() if not pixel_world.conveyors.is_empty() else ""
 	var furnace_str := " | Uuneja: %d" % pixel_world.furnaces.size() if not pixel_world.furnaces.is_empty() else ""
 	var mine_str := " | Kaivoksia: %d" % pixel_world.sand_mines.size() if not pixel_world.sand_mines.is_empty() else ""
+	var sling_str := " | Linkoja: %d" % pixel_world.slings.size() if not pixel_world.slings.is_empty() else ""
 	var speed_str := " | %dx" % int(pixel_world.sim_speed) if pixel_world.sim_speed > 1.0 else ""
-	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, chicken_str, belt_str, furnace_str, mine_str, speed_str, mode_str]
+	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, chicken_str, belt_str, furnace_str, mine_str, sling_str, speed_str, mode_str]
 
 
 func _on_material(mat: int) -> void:
@@ -241,4 +252,9 @@ func _on_build_sand_mine() -> void:
 
 func _on_build_furnace() -> void:
 	pixel_world.build_mode = pixel_world.BUILD_FURNACE
+	pixel_world.block_paint = true
+
+
+func _on_build_sling() -> void:
+	pixel_world.build_mode = pixel_world.BUILD_SLING
 	pixel_world.block_paint = true

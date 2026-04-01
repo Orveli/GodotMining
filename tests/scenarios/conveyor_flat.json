@@ -1,0 +1,25 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+
+    { "cmd": "fill_rect", "x": 0, "y": 225, "w": 416, "h": 15, "mat": 3 },
+
+    { "cmd": "place_conveyor", "x": 50, "y": 150, "w": 300, "dir": "right" },
+
+    { "cmd": "fill_rect", "x": 50, "y": 130, "w": 30, "h": 18, "mat": 1 },
+
+    { "cmd": "run_frames", "n": 1 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_flat_t0.png" },
+
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_flat_t1.png" },
+
+    { "cmd": "assert_rect",
+      "x": 200, "y": 140, "w": 150, "h": 20,
+      "mat": 1, "min_pct": 1.0,
+      "label": "hiekka on kulkeutunut oikealle hihnan loppuosaan" },
+
+    { "cmd": "dump_stats" }
+  ]
+}

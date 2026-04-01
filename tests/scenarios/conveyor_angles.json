@@ -1,0 +1,39 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+
+    { "cmd": "fill_rect", "x": 0, "y": 225, "w": 416, "h": 15, "mat": 3 },
+
+    { "cmd": "place_conveyor", "x": 20,  "y": 160, "w": 100, "dir": "right" },
+    { "cmd": "place_conveyor", "x": 160, "y": 160, "w": 100, "dir": "down_right" },
+    { "cmd": "place_conveyor", "x": 300, "y": 160, "w": 100, "dir": "left" },
+
+    { "cmd": "fill_rect", "x": 20,  "y": 140, "w": 25, "h": 18, "mat": 1 },
+    { "cmd": "fill_rect", "x": 165, "y": 140, "w": 25, "h": 18, "mat": 1 },
+    { "cmd": "fill_rect", "x": 305, "y": 140, "w": 25, "h": 18, "mat": 1 },
+
+    { "cmd": "run_frames", "n": 1 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_angles_t0.png" },
+
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_angles_t1.png" },
+
+    { "cmd": "assert_rect",
+      "x": 80, "y": 145, "w": 60, "h": 25,
+      "mat": 1, "min_pct": 1.0,
+      "label": "hiekka on liikkunut oikealle hihna-1 (vaakasuora oikealle)" },
+
+    { "cmd": "assert_rect",
+      "x": 220, "y": 155, "w": 60, "h": 35,
+      "mat": 1, "min_pct": 1.0,
+      "label": "hiekka on liikkunut eteenpäin hihna-2 (vinohihna alas-oikea)" },
+
+    { "cmd": "assert_rect",
+      "x": 200, "y": 155, "w": 95, "h": 35,
+      "mat": 1, "min_pct": 1.0,
+      "label": "hiekka on liikkunut vasemmalle hihna-3 (vaakasuora vasemmalle)" },
+
+    { "cmd": "dump_stats" }
+  ]
+}

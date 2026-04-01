@@ -1,0 +1,38 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+
+    { "cmd": "fill_rect", "x": 0, "y": 225, "w": 416, "h": 15, "mat": 3 },
+
+    { "cmd": "place_conveyor", "x": 30,  "y": 160, "w": 160, "dir": "right" },
+
+    { "cmd": "place_conveyor", "x": 380, "y": 160, "w": 160, "dir": "left" },
+
+    { "cmd": "fill_rect", "x": 190, "y": 148, "w": 36, "h": 10, "mat": 3 },
+
+    { "cmd": "fill_rect", "x": 30, "y": 130, "w": 50, "h": 28, "mat": 1 },
+
+    { "cmd": "run_frames", "n": 1 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_chain_t0.png" },
+
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_chain_t1.png" },
+
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "export", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/conveyor_chain_t2.png" },
+
+    { "cmd": "assert_rect",
+      "x": 220, "y": 140, "w": 155, "h": 30,
+      "mat": 1, "min_pct": 1.0,
+      "label": "hiekka on siirtynyt toiselle hihnalle (U-muoto, oikea haara)" },
+
+    { "cmd": "assert_count",
+      "mat": 1,
+      "min": 800,
+      "max": 99999,
+      "label": "hiekkaa ei ole kadonnut kuljetuksen aikana" },
+
+    { "cmd": "dump_stats" }
+  ]
+}
