@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 150, "y": 100, "w": 101, "h": 81, "mat": 4 },
+    { "cmd": "fill_rect", "x": 190, "y": 185, "w": 21,  "h": 11, "mat": 5 },
+    { "cmd": "run_frames", "n": 400 },
+    { "cmd": "assert_count", "mat": 4, "min": 0, "max": 500, "label": "puu on palanut suurimmaksi osaksi" },
+    { "cmd": "assert_count", "mat": 8, "min": 50, "max": 9999999, "label": "tuhkaa on syntynyt" }
+  ]
+}

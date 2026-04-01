@@ -1,0 +1,10 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 150, "y": 10, "w": 21, "h": 1, "mat": 1 },
+    { "cmd": "run_frames", "n": 120 },
+    { "cmd": "assert_rect", "x": 140, "y": 100, "w": 41, "h": 140, "mat": 1, "min_pct": 5, "label": "hiekkaa on pudonnut alas" },
+    { "cmd": "assert_count", "mat": 1, "min": 100, "max": 2000, "label": "hiekkaa on tallella" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 150, "y": 180, "w": 101, "h": 41, "mat": 2 },
+    { "cmd": "fill_rect", "x": 150, "y": 221, "w": 101, "h": 10, "mat": 5 },
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "assert_count", "mat": 7, "min": 50, "max": 9999999, "label": "höyryä on syntynyt" },
+    { "cmd": "assert_rect", "x": 100, "y": 0, "w": 201, "h": 101, "mat": 7, "min_pct": 1, "label": "höyryä on noussut ylös" }
+  ]
+}

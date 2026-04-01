@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0,   "y": 230, "w": 416, "h": 10, "mat": 3 },
+    { "cmd": "fill_rect", "x": 180, "y": 50,  "w": 41,  "h": 21, "mat": 2 },
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "assert_rect", "x": 100, "y": 220, "w": 201, "h": 10, "mat": 2, "min_pct": 5, "label": "vesi on valunut leveälle" },
+    { "cmd": "assert_count", "mat": 2, "min": 500, "max": 9999999, "label": "vettä on tallella" }
+  ]
+}

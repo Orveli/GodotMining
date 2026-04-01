@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0,   "y": 230, "w": 416, "h": 10, "mat": 3 },
+    { "cmd": "fill_rect", "x": 100, "y": 150, "w": 201, "h": 80, "mat": 2 },
+    { "cmd": "fill_rect", "x": 180, "y": 130, "w": 41,  "h": 20, "mat": 1 },
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "assert_rect", "x": 100, "y": 220, "w": 201, "h": 10, "mat": 1, "min_pct": 10, "label": "hiekkaa on vajonnut pohjalle" }
+  ]
+}

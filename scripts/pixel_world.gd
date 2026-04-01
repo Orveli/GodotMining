@@ -140,6 +140,7 @@ var _scenario_frames_remaining: int = 0
 var _scenario_active: bool = false
 var _scenario_auto_exit: bool = false
 var _scenario_failures: int = 0
+var _scenario_tests: int = 0
 
 
 func _ready() -> void:
@@ -1856,6 +1857,8 @@ func _load_scenario(path: String) -> void:
 	_scenario_steps = data.get("steps", [])
 	_scenario_index = 0
 	_scenario_frames_remaining = 0
+	_scenario_failures = 0
+	_scenario_tests = 0
 	_scenario_active = true
 	print("ScenarioRunner: ladattu %d askelta tiedostosta %s" % [_scenario_steps.size(), path])
 
@@ -1871,7 +1874,12 @@ func _scenario_tick() -> void:
 		if is_async:
 			return
 	_scenario_active = false
-	print("ScenarioRunner: kaikki askeleet suoritettu. virheitä=%d" % _scenario_failures)
+	# Tulosta yhteenveto jos on assert-komentoja suoritettu
+	var _passed := _scenario_tests - _scenario_failures
+	if _scenario_tests > 0:
+		print("ScenarioRunner: SUMMARY tests=%d passed=%d failed=%d" % [_scenario_tests, _passed, _scenario_failures])
+	else:
+		print("ScenarioRunner: kaikki askeleet suoritettu. virheitä=%d" % _scenario_failures)
 	if _scenario_auto_exit:
 		get_tree().quit(1 if _scenario_failures > 0 else 0)
 
@@ -1915,6 +1923,7 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			else:
 				print("ScenarioRunner: FAIL  [%s] koordinaatit (%d,%d) rajojen ulkopuolella" % [label, ax, ay])
 				_scenario_failures += 1
+			_scenario_tests += 1
 		"place_building":
 			var btype: String = step.get("type", "")
 			var bx: int = step.get("x", 0)
@@ -1934,6 +1943,71 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 		"set_sim_speed":
 			sim_speed = step.get("speed", 1.0)
 			print("ScenarioRunner: set_sim_speed %.1f" % sim_speed)
+		"assert_rect":
+			# Laske kuinka monta % annetun suorakulmion pikseleistä on haluttua materiaalia
+			var rx: int = step.get("x", 0)
+			var ry: int = step.get("y", 0)
+			var rw: int = step.get("w", 1)
+			var rh: int = step.get("h", 1)
+			var rmat: int = step.get("mat", 0)
+			var min_pct: float = step.get("min_pct", 0.0)
+			var rlabel: String = step.get("label", "")
+			var total_pixels := 0
+			var mat_pixels := 0
+			for dy in rh:
+				var gy := ry + dy
+				if gy < 0 or gy >= SIM_HEIGHT:
+					continue
+				for dx in rw:
+					var gx := rx + dx
+					if gx < 0 or gx >= W:
+						continue
+					total_pixels += 1
+					if grid[gy * W + gx] == rmat:
+						mat_pixels += 1
+			var actual_pct := 0.0
+			if total_pixels > 0:
+				actual_pct = 100.0 * mat_pixels / total_pixels
+			if actual_pct >= min_pct:
+				print("ScenarioRunner: PASS  [%s] " % rlabel)
+			else:
+				print("ScenarioRunner: FAIL  [%s] odotettu >=%.0f%% saatiin %.1f%%" % [rlabel, min_pct, actual_pct])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_count":
+			# Laske koko ruudukosta materiaalin pikselimäärä ja vertaa [min, max]-väliin
+			var cmat: int = step.get("mat", 0)
+			var cmin: int = step.get("min", 0)
+			var cmax: int = step.get("max", 99999999)
+			var clabel: String = step.get("label", "")
+			var count := 0
+			for i in grid.size():
+				if grid[i] == cmat:
+					count += 1
+			if count >= cmin and count <= cmax:
+				print("ScenarioRunner: PASS  [%s] " % clabel)
+			else:
+				print("ScenarioRunner: FAIL  [%s] mat=%d count=%d odotettu [%d, %d]" % [clabel, cmat, count, cmin, cmax])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"dump_stats":
+			# Tulosta materiaalitilastot JSON-muodossa
+			var mat_counts: Dictionary = {}
+			for i in grid.size():
+				var m := grid[i]
+				var key := str(m)
+				if mat_counts.has(key):
+					mat_counts[key] += 1
+				else:
+					mat_counts[key] = 1
+			var body_count := 0
+			if physics_world != null:
+				body_count = physics_world.bodies.size()
+			print("STATS: " + JSON.stringify({
+				"frame": frame_count,
+				"materials": mat_counts,
+				"bodies": body_count
+			}))
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false
