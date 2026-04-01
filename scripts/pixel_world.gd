@@ -1,5 +1,7 @@
 extends TextureRect
 
+const TestSceneGenerator = preload("res://scripts/test_scene_generator.gd")
+
 const MAT_EMPTY := 0
 const MAT_SAND := 1
 const MAT_WATER := 2

@@ -4,7 +4,7 @@ extends Control
 
 # Viitteet
 var pixel_world: Node
-var physics_world: Node
+var physics_world: Object
 
 var visible_overlay: bool = false
 var update_interval: float = 0.5  # päivitys 2x/s
@@ -58,7 +58,7 @@ func _ready() -> void:
 	if pixel_world == null:
 		# Varmuuden vuoksi kokeile myös vanhempana
 		pixel_world = get_node_or_null("../../PixelWorld")
-	if pixel_world != null and pixel_world.has_property("physics_world"):
+	if pixel_world != null:
 		physics_world = pixel_world.get("physics_world")
 
 	visible = false
