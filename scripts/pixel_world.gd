@@ -1,7 +1,7 @@
 extends TextureRect
 
 const TestSceneGenerator = preload("res://scripts/test_scene_generator.gd")
-const SlingScript = preload("res://scripts/sling.gd")
+const LauncherScript = preload("res://scripts/launcher.gd")
 
 const MAT_EMPTY := 0
 const MAT_SAND := 1
@@ -119,7 +119,10 @@ var conveyor_start_pos: Vector2 = Vector2.ZERO
 var conveyors: Array = []
 var furnaces: Array = []
 var sand_mines: Array = []
-var slings: Array = []
+var launchers: Array = []
+var launcher_phase: int = 0    # 0=ei aktiivinen, 1=pohja, 2=katto, 3=suunta
+var launcher_start: Vector2i = Vector2i.ZERO
+var launcher_end: Vector2i = Vector2i.ZERO
 var flying_pixels: Array[Dictionary] = []
 const FLYING_GRAVITY := 140.0   # px/s²
 const FLYING_MAX_AGE := 4.0
@@ -403,9 +406,9 @@ func _process(delta: float) -> void:
 		if _update_sand_mines(delta * sim_speed):
 			grid_modified = true
 
-		# Vaihe 5.7: Lingot + lentävät pikselit
-		if not slings.is_empty() or not flying_pixels.is_empty():
-			if _update_slings_and_flying(delta * sim_speed):
+		# Vaihe 5.7: Hissilinkot + lentävät pikselit
+		if not launchers.is_empty() or not flying_pixels.is_empty():
+			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
 
 		# Vaihe 6: Lataa CPU:n muutokset GPU:lle vain jos oikeasti muuttui
@@ -448,8 +451,13 @@ func _handle_input() -> void:
 	var left_just := left_pressed and not prev_left_pressed
 	var right_just := right_pressed and not prev_right_pressed
 
-	# Myynti — oikea klik build-tilassa
-	if right_just and build_mode != BUILD_NONE:
+	# BUILD_SLING: oikea hiiri peruuttaa nykyisen vaiheen
+	if right_just and build_mode == BUILD_SLING and launcher_phase > 1:
+		launcher_phase = 1
+		print("Launcher: peruttu, aloita alusta — klikkaa pohja")
+
+	# Myynti — oikea klik build-tilassa (ei sling-tilassa jossa oikea = peruutus)
+	elif right_just and build_mode != BUILD_NONE and build_mode != BUILD_SLING:
 		var coords := _mouse_to_grid()
 		if coords.x >= 0:
 			_sell_nearest_building(Vector2(coords))
@@ -517,7 +525,7 @@ func _handle_input() -> void:
 				_place_furnace(grid_pos)
 				block_paint = true
 			elif build_mode == BUILD_SLING:
-				_place_sling(Vector2(coords))
+				_handle_launcher_click(Vector2(coords))
 				block_paint = true
 
 	# Laseri — vasen hiiri vetää viivan
@@ -947,12 +955,14 @@ func _input(event: InputEvent) -> void:
 					block_paint = true
 				KEY_5:
 					build_mode = BUILD_SLING
+					launcher_phase = 1
 					build_menu_visible = false
 					block_paint = true
-					print("Rakennustila: LINKO — klikkaa paikkaa")
+					print("Rakennustila: HISSI-LINKO — klikkaa pohja")
 				KEY_ESCAPE, KEY_B:
 					build_menu_visible = false
 					build_mode = BUILD_NONE
+					launcher_phase = 0
 					print("Rakennusvalikko suljettu")
 			return
 
@@ -1542,17 +1552,13 @@ func _update_build_preview() -> void:
 		build_preview.show_spawner = true
 		build_preview.start_marker = mouse_pos
 	elif build_mode == BUILD_SLING:
-		var snapped := _snap_to_grid(mouse_pos)
-		build_preview.show_sling = true
-		build_preview.sling_pos = snapped
-		# Etsi lähimmän hihnan suunta esilkatseluun
-		var preview_dir := 1.0
-		for belt in conveyors:
-			for fp: Vector2i in belt.floor_pixels:
-				if absi(fp.x - int(snapped.x)) <= SlingScript.SLING_W and absi(fp.y - int(snapped.y)) <= SlingScript.SLING_H:
-					preview_dir = belt.belt_dir_x
-					break
-		build_preview.sling_dir = preview_dir
+		# Launcher-esikatselu: kolmivaiheinen — snap käyttää grid-koordinaatteja suoraan
+		build_preview.show_launcher = true
+		build_preview.launcher_phase = launcher_phase
+		build_preview.launcher_start = Vector2(launcher_start)
+		build_preview.launcher_end = Vector2(launcher_end)
+		build_preview.launcher_cursor = _snap_to_grid(mouse_pos)
+		build_preview.launcher_dir = 1.0 if mouse_pos.x >= float(launcher_start.x) else -1.0
 	elif build_mode == BUILD_CONVEYOR_START:
 		var snapped := _snap_to_belt_end(mouse_pos)
 		build_preview.start_marker = snapped
@@ -1666,55 +1672,63 @@ func _clear_buildings() -> void:
 	for m in sand_mines:
 		m.queue_free()
 	sand_mines.clear()
-	_clear_slings()
+	_clear_launchers()
 
 
-func _clear_slings() -> void:
-	for s in slings:
+func _clear_launchers() -> void:
+	# Poistaa kaikki hissilinkot ja lentävät pikselit
+	for s in launchers:
 		s.queue_free()
-	slings.clear()
+	launchers.clear()
 	flying_pixels.clear()
+	launcher_phase = 0
 
 
-func _place_sling(world_pos: Vector2) -> void:
-	var snapped := _snap_to_grid(world_pos)
-	var gpos := Vector2i(int(snapped.x), int(snapped.y))
-	# Etsi alla oleva hihna suunnan saamiseksi
-	var dir := 1.0
-	for belt in conveyors:
-		var bx: int = gpos.x
-		var by: int = gpos.y
-		# Tarkista onko grid-piste lähellä hihnan lattia-pikseliä
-		for fp: Vector2i in belt.floor_pixels:
-			if absi(fp.x - bx) <= SlingScript.SLING_W and absi(fp.y - by) <= SlingScript.SLING_H:
-				dir = belt.belt_dir_x
-				break
-	var sling := SlingScript.new()
-	sling.build_structure(gpos, dir)
-	sling.write_to_grid(grid, color_seed, W)
-	chicken_layer.add_child(sling)
-	slings.append(sling)
-	paint_pending = true
-	print("Linko asetettu kohtaan %s, suunta %.1f" % [gpos, dir])
+func _handle_launcher_click(world_pos: Vector2) -> void:
+	# Kolmivaiheinen hissilinkons rakentaminen: pohja → katto → suunta
+	match launcher_phase:
+		1:  # Vaihe 1: aseta pohja
+			var snapped := _snap_to_grid(world_pos)
+			launcher_start = Vector2i(int(snapped.x), int(snapped.y))
+			launcher_phase = 2
+			print("Launcher: pohja asetettu %s — klikkaa katto" % launcher_start)
+		2:  # Vaihe 2: aseta katto (x lukittu start.x:ään)
+			var snapped := _snap_to_grid(world_pos)
+			launcher_end = Vector2i(launcher_start.x, int(snapped.y))
+			# Varmista että katto on ylempänä kuin pohja (vähintään 16px)
+			if launcher_start.y - launcher_end.y < 16:
+				launcher_end.y = launcher_start.y - 16
+			launcher_phase = 3
+			print("Launcher: katto asetettu %s — klikkaa suunta (vasen/oikea)" % launcher_end)
+		3:  # Vaihe 3: valitse suunta hiiren x-aseman mukaan
+			var dir := 1.0 if world_pos.x >= float(launcher_start.x) else -1.0
+			var launcher := LauncherScript.new()
+			launcher.build_structure(launcher_start, launcher_end, dir)
+			launcher.write_to_grid(grid, color_seed, W)
+			chicken_layer.add_child(launcher)
+			launchers.append(launcher)
+			paint_pending = true
+			launcher_phase = 1  # Takaisin vaiheeseen 1 — voidaan sijoittaa lisää
+			print("Launcher: rakennettu kohtaan %s→%s, suunta %.1f" % [launcher_start, launcher_end, dir])
 
 
-func _update_slings_and_flying(delta: float) -> bool:
+func _update_launchers_and_flying(delta: float) -> bool:
 	var modified := false
 
-	# Lingot: kerää laukaistavat pikselit
-	var alive_slings: Array = []
-	for sling in slings:
-		if not sling.check_intact(grid, W):
-			sling.broken = true
-			sling.queue_free()
+	# Hissilinkot: kerää laukaistavat pikselit
+	var alive_launchers: Array = []
+	for launcher in launchers:
+		if not launcher.check_intact(grid, W):
+			launcher.broken = true
+			launcher.queue_free()
 			continue
-		var launched: Array[Dictionary] = sling.update_sling(grid, W, delta)
+		var launched: Array[Dictionary] = launcher.update_launcher(grid, W, delta)
 		for fp: Dictionary in launched:
 			if flying_pixels.size() < FLYING_MAX_COUNT:
 				flying_pixels.append(fp)
 			modified = true
-		alive_slings.append(sling)
-	slings = alive_slings
+		alive_launchers.append(launcher)
+	launchers = alive_launchers
 
 	# Lentävät pikselit: Euler-integraatio + törmäys
 	var still_flying: Array[Dictionary] = []
@@ -1832,14 +1846,15 @@ func _sell_nearest_building(sell_pos: Vector2) -> void:
 			best_list = sand_mines
 			best_idx = i
 
-	for i in slings.size():
-		var s = slings[i]
-		var center := Vector2(s.grid_pos) + Vector2(float(SlingScript.SLING_W), float(SlingScript.SLING_H)) * 0.5
+	for i in launchers.size():
+		var s = launchers[i]
+		# Launchers: center lasketaan start_pos ja shaft-koon mukaan
+		var center := Vector2(s.start_pos) + Vector2(float(LauncherScript.SHAFT_WIDTH) * 0.5, float(s.start_pos.y - s.end_pos.y) * 0.5)
 		var d := sell_pos.distance_to(center)
 		if d < best_dist:
 			best_dist = d
 			best_obj = s
-			best_list = slings
+			best_list = launchers
 			best_idx = i
 
 	if best_obj == null or best_idx < 0:

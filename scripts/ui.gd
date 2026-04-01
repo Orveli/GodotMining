@@ -168,7 +168,11 @@ func _process(_delta: float) -> void:
 	elif pixel_world.build_mode == pixel_world.BUILD_FURNACE:
 		mode_str = " | UUNI [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_SLING:
-		mode_str = " | LINKO [klikkaa]"
+		match pixel_world.launcher_phase:
+			1: mode_str = " | HISSI-LINKO: klikkaa pohja"
+			2: mode_str = " | HISSI-LINKO: klikkaa katto"
+			3: mode_str = " | HISSI-LINKO: klikkaa suunta (vasen/oikea)"
+			_: mode_str = " | HISSI-LINKO"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
 	elif pixel_world.laser_mode:
@@ -185,7 +189,7 @@ func _process(_delta: float) -> void:
 	var belt_str := " | Hihnoja: %d" % pixel_world.conveyors.size() if not pixel_world.conveyors.is_empty() else ""
 	var furnace_str := " | Uuneja: %d" % pixel_world.furnaces.size() if not pixel_world.furnaces.is_empty() else ""
 	var mine_str := " | Kaivoksia: %d" % pixel_world.sand_mines.size() if not pixel_world.sand_mines.is_empty() else ""
-	var sling_str := " | Linkoja: %d" % pixel_world.slings.size() if not pixel_world.slings.is_empty() else ""
+	var sling_str := " | Linkoja: %d" % pixel_world.launchers.size() if not pixel_world.launchers.is_empty() else ""
 	var speed_str := " | %dx" % int(pixel_world.sim_speed) if pixel_world.sim_speed > 1.0 else ""
 	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, chicken_str, belt_str, furnace_str, mine_str, sling_str, speed_str, mode_str]
 
@@ -257,4 +261,5 @@ func _on_build_furnace() -> void:
 
 func _on_build_sling() -> void:
 	pixel_world.build_mode = pixel_world.BUILD_SLING
+	pixel_world.launcher_phase = 1
 	pixel_world.block_paint = true
