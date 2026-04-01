@@ -1718,10 +1718,6 @@ func _update_launchers_and_flying(delta: float) -> bool:
 	# Hissilinkot: kerää laukaistavat pikselit
 	var alive_launchers: Array = []
 	for launcher in launchers:
-		if not launcher.check_intact(grid, W):
-			launcher.broken = true
-			launcher.queue_free()
-			continue
 		var launched: Array[Dictionary] = launcher.update_launcher(grid, W, delta)
 		for fp: Dictionary in launched:
 			if flying_pixels.size() < FLYING_MAX_COUNT:
@@ -2254,6 +2250,21 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 						cx2 = cx1 + cw; cy2 = cy1
 			_create_conveyor(Vector2(cx1, cy1), Vector2(cx2, cy2))
 			print("ScenarioRunner: place_conveyor (%d,%d) → (%d,%d)" % [cx1, cy1, cx2, cy2])
+		"place_launcher":
+			# Luo launcher suoraan: {"cmd":"place_launcher","start_x":200,"start_y":180,"end_y":120,"dir":1}
+			var lx: int = step.get("start_x", 200)
+			var ly: int = step.get("start_y", 180)
+			var ey: int = step.get("end_y", 120)
+			var ldir: float = step.get("dir", 1.0)
+			var lstart := Vector2i(_snap_to_grid(Vector2(lx, ly)))
+			var lend := Vector2i(lstart.x, int(_snap_to_grid(Vector2(lx, ey)).y))
+			var ln := LauncherScript.new()
+			ln.build_structure(lstart, lend, ldir)
+			ln.write_to_grid(grid, color_seed, W)
+			launchers.append(ln)
+			physics_initialized = true
+			paint_pending = true
+			print("ScenarioRunner: place_launcher start=%s end=%s dir=%.1f" % [lstart, lend, ldir])
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false

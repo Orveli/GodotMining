@@ -15,7 +15,8 @@ const FLOOR_MAT := 3           # MAT_STONE
 var start_pos: Vector2i = Vector2i.ZERO   # Pohja (hihnan kohdalla)
 var end_pos: Vector2i = Vector2i.ZERO     # Katto (suoraan ylhäällä)
 var launch_dir: float = 1.0              # 1.0=oikealle, -1.0=vasemmalle
-var structure_pixels: Array[Vector2i] = []
+var structure_pixels: Array[Vector2i] = []  # Kuilun reunat + tykki (check_intact seuraa näitä)
+var _jalusta_pixels: Array[Vector2i] = []   # Jalusta erikseen — ei check_intact:ssa (osuu hihnaan)
 var intake_pixels: Array[Vector2i] = []  # Pohjan pikselit joista imetään
 var barrel_tip: Vector2i = Vector2i.ZERO  # Tykkiputken kärki
 var broken: bool = false
@@ -42,9 +43,11 @@ func build_structure(start: Vector2i, end: Vector2i, dir: float) -> void:
 			# Sisäpikselit jätetään tyhjäksi — ei lisätä structure_pixels
 
 	# Jalusta: 2 alinta riviä, koko leveys — tuki kuille
+	# Ei lisätä structure_pixels-listaan koska ne osuvat hihnan omiin pikseleihin
+	# ja check_intact tulisi rikki — jalusta kirjoitetaan gridiin write_to_grid:ssa erikseen
 	for y in range(start.y, start.y + 2):
 		for x in range(start.x, start.x + SHAFT_WIDTH):
-			structure_pixels.append(Vector2i(x, y))
+			_jalusta_pixels.append(Vector2i(x, y))
 
 	# Tykkiputki: 1 pikseli korkea, BARREL_LENGTH pitkä
 	# Lähtee kuilun yläreunasta oikealle tai vasemmalle
@@ -52,26 +55,30 @@ func build_structure(start: Vector2i, end: Vector2i, dir: float) -> void:
 	if dir > 0:
 		# Tykkiputki oikealle — alkaa kuilun oikeasta reunasta
 		barrel_start_x = end.x + SHAFT_WIDTH
-		barrel_tip = Vector2i(barrel_start_x + BARREL_LENGTH - 1, end.y)
+		barrel_tip = Vector2i(barrel_start_x + BARREL_LENGTH, end.y)  # yksi ohi viimeisen kivipikselerin
 	else:
 		# Tykkiputki vasemmalle — alkaa kuilun vasemmasta reunasta - 1
 		barrel_start_x = end.x - BARREL_LENGTH
-		barrel_tip = Vector2i(barrel_start_x, end.y)
+		barrel_tip = Vector2i(barrel_start_x - 1, end.y)  # yksi ohi viimeisen kivipikselerin
 	for bx in range(barrel_start_x, barrel_start_x + BARREL_LENGTH):
 		structure_pixels.append(Vector2i(bx, end.y))
 		structure_pixels.append(Vector2i(bx, end.y + 1))  # 2px korkea
 
-	# Intake-pikselit: pohjan ylin rivi (start.y) — tästä imetään materiaali
-	for x in range(start.x, start.x + SHAFT_WIDTH):
+	# Intake-pikselit: kuilun vieressä hihnan tasolla — imetään hihnan päältä
+	# Skannaa laajempi alue kuilun kummallakin puolella jotta hihnalta tuleva
+	# materiaali löytyy vaikka se ei osu suoraan kuilun kohdalle
+	const INTAKE_REACH := 6  # pikseliä kummaltakin sivulta
+	for x in range(start.x - INTAKE_REACH, start.x + SHAFT_WIDTH + INTAKE_REACH):
 		intake_pixels.append(Vector2i(x, start.y - 1))
+		intake_pixels.append(Vector2i(x, start.y - 2))
 
 	position = Vector2.ZERO
 	queue_redraw()
 
 
 func write_to_grid(grid: PackedByteArray, color_seed: PackedByteArray, w: int) -> void:
-	# Kirjoittaa rakennuksen kivipikselit gridiin
-	for p in structure_pixels:
+	# Kirjoittaa rakennuksen kivipikselit gridiin (kuilu + tykki + jalusta)
+	for p in structure_pixels + _jalusta_pixels:
 		var idx := p.y * w + p.x
 		if idx >= 0 and idx < grid.size():
 			grid[idx] = FLOOR_MAT
