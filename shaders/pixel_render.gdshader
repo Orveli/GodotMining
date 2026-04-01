@@ -27,7 +27,7 @@ uniform int player_in_water;     // 1 = vedessä
 
 // TEXTURE = grid data (R8, materiaali-ID per pikseli)
 // Materiaalien värit
-const vec3 MAT_COLORS[11] = {
+const vec3 MAT_COLORS[16] = {
 	vec3(0.08, 0.08, 0.12),   // 0 EMPTY
 	vec3(0.86, 0.78, 0.45),   // 1 SAND
 	vec3(0.2, 0.4, 0.85),     // 2 WATER
@@ -38,17 +38,23 @@ const vec3 MAT_COLORS[11] = {
 	vec3(0.8, 0.85, 0.9),     // 7 STEAM
 	vec3(0.35, 0.33, 0.3),    // 8 ASH
 	vec3(0.45, 0.28, 0.12),   // 9 WOOD_FALLING (sama väri kuin WOOD)
-	vec3(0.65, 0.88, 0.84)    // 10 GLASS
+	vec3(0.65, 0.88, 0.84),   // 10 GLASS
+	vec3(0.45, 0.32, 0.18),   // 11 DIRT (tumma ruskea)
+	vec3(0.55, 0.42, 0.38),   // 12 IRON_ORE (ruosteenpunainen)
+	vec3(0.72, 0.65, 0.25),   // 13 GOLD_ORE (kellertava)
+	vec3(0.68, 0.68, 0.72),   // 14 IRON (hopea)
+	vec3(0.90, 0.78, 0.20)    // 15 GOLD (kultainen)
 };
 
-const float MAT_VAR[11] = {
-	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03
+const float MAT_VAR[16] = {
+	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03,
+	0.03, 0.04, 0.04, 0.02, 0.02
 };
 
 void fragment() {
 	// Lue materiaali-ID tekstuurista
 	float mat_raw = texture(TEXTURE, UV).r;
-	int mat_id = clamp(int(mat_raw * 255.0 + 0.5), 0, 10);
+	int mat_id = clamp(int(mat_raw * 255.0 + 0.5), 0, 15);
 
 	float seed_val = texture(seed_tex, UV).r;
 	vec3 color = MAT_COLORS[mat_id];

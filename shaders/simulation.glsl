@@ -29,7 +29,12 @@ const uint OIL   = 6u;
 const uint STEAM = 7u;
 const uint ASH   = 8u;
 const uint WOOD_FALLING = 9u;
-const uint GLASS = 10u;
+const uint GLASS     = 10u;
+const uint DIRT      = 11u;
+const uint IRON_ORE  = 12u;
+const uint GOLD_ORE  = 13u;
+const uint IRON      = 14u;
+const uint GOLD      = 15u;
 
 uint get_mat(uint cell) { return cell & 0xFFu; }
 
@@ -43,7 +48,7 @@ uint hash(uint x) {
 }
 
 bool falls(uint mat) {
-    return mat == SAND || mat == WATER || mat == OIL || mat == ASH || mat == WOOD_FALLING;
+    return mat == SAND || mat == WATER || mat == OIL || mat == ASH || mat == WOOD_FALLING || mat == DIRT;
 }
 
 bool is_liquid(uint mat) {
@@ -51,7 +56,7 @@ bool is_liquid(uint mat) {
 }
 
 bool is_powder(uint mat) {
-    return mat == SAND || mat == ASH;
+    return mat == SAND || mat == ASH || mat == DIRT;
 }
 
 // Yritä siirtää solu src_idx -> dst_idx atomisesti
@@ -189,6 +194,7 @@ void main() {
 
     // Staattiset ja tyhjät skipataan
     if (mat == EMPTY || mat == STONE || mat == WOOD) return;
+    if (mat == GLASS || mat == IRON_ORE || mat == GOLD_ORE || mat == IRON || mat == GOLD) return;
 
     uint rng = hash(x * 374761393u + y * 668265263u + p.frame * 48271u + p.pass_id * 16807u);
     bool coin = (rng & 1u) != 0u;

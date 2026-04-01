@@ -7,12 +7,15 @@ const LAUNCHER_SW := 4      # Vastaa launcher.gd:n SHAFT_WIDTH
 const LAUNCHER_BL := 6      # Vastaa launcher.gd:n BARREL_LENGTH
 
 var preview_pixels: Array[Vector2i] = []
+var preview_color: Color = Color(0.6, 0.5, 0.2, 0.35)  # Oletusväri: konveyori-keltainen
+var is_valid: bool = true  # Tosi = sijoitus kelpaa (vihreä), epätosi = ei kelpa (punainen)
 var start_marker: Vector2 = Vector2(-100.0, -100.0)
 var end_marker: Vector2 = Vector2(-100.0, -100.0)
 var snap_point: Vector2 = Vector2(-100.0, -100.0)
 var show_snap: bool = false
 var show_spawner: bool = false   # Näytä spawner-esikatselu
 var show_launcher: bool = false  # Näytä hissilinko-esikatselu
+var is_wall: bool = false        # Piirretäänkö seinä-esikatselu (harmaa, ei pinta-viivaa)
 var launcher_phase: int = 0
 var launcher_start: Vector2 = Vector2(-100.0, -100.0)
 var launcher_end: Vector2 = Vector2(-100.0, -100.0)
@@ -27,15 +30,27 @@ func clear() -> void:
 	show_snap = false
 	show_spawner = false
 	show_launcher = false
+	is_wall = false
+	is_valid = true
+	preview_color = Color(0.6, 0.5, 0.2, 0.35)
 	queue_redraw()
 
 
 func _draw() -> void:
-	# Liukuhihnan lattia-esikatselu (1px paksu)
+	# Pikseliesikatselut — väri riippuu is_valid-tilasta ja rakennustyypistä
+	var pixel_color: Color
+	if is_wall:
+		# Seinä: harmaa validin mukaan
+		pixel_color = Color(0.2, 0.9, 0.2, 0.45) if is_valid else Color(0.9, 0.2, 0.2, 0.45)
+	else:
+		# Konveyori ja muut: vihreä/punainen is_valid mukaan
+		pixel_color = Color(0.2, 0.9, 0.2, 0.4) if is_valid else Color(0.9, 0.2, 0.2, 0.4)
+
 	for p in preview_pixels:
-		draw_rect(Rect2(Vector2(p), Vector2(1.0, 1.0)), Color(0.6, 0.5, 0.2, 0.35))
-		# Pinta-esikatselu (ohut viiva yläpuolella)
-		draw_rect(Rect2(Vector2(p.x + 0.1, p.y - 0.7), Vector2(0.8, 0.4)), Color(0.8, 0.7, 0.3, 0.2))
+		draw_rect(Rect2(Vector2(p), Vector2(1.0, 1.0)), pixel_color)
+		if not is_wall:
+			# Konveyori: pinta-esikatselu (ohut viiva yläpuolella)
+			draw_rect(Rect2(Vector2(p.x + 0.1, p.y - 0.7), Vector2(0.8, 0.4)), Color(0.8, 0.7, 0.3, 0.2))
 
 	# Aloituspiste (vihreä)
 	if start_marker.x >= 0.0:

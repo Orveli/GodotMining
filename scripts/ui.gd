@@ -10,11 +10,16 @@ var build_section: VBoxContainer
 var btn_spawner: Button
 var btn_conveyor: Button
 var btn_sling: Button
+var btn_wall: Button
 
 # Speed-napit
 var speed_buttons: Array[Button] = []
 const SPEED_VALUES: Array[float] = [1.0, 4.0, 8.0, 16.0]
 const SPEED_LABELS: Array[String] = ["1x", "4x", "8x", "16x"]
+
+# Asenapit
+var weapon_buttons: Array[Button] = []
+const WEAPON_LABELS: Array[String] = ["Hakku", "Megapora", "Laseri", "Raketti", "GravGun"]
 
 
 func _ready() -> void:
@@ -138,6 +143,32 @@ func _ready() -> void:
 	btn_sling.pressed.connect(_on_build_sling)
 	build_section.add_child(btn_sling)
 
+	btn_wall = Button.new()
+	btn_wall.text = "Seinä [W]"
+	btn_wall.add_theme_font_size_override("font_size", 14)
+	btn_wall.focus_mode = Control.FOCUS_NONE
+	btn_wall.pressed.connect(_on_build_wall)
+	build_section.add_child(btn_wall)
+
+	# Ase-osio
+	var sep_weapon := HSeparator.new()
+	$VBox.add_child(sep_weapon)
+
+	var weapon_title := Label.new()
+	weapon_title.text = "Ase [Q]"
+	weapon_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	weapon_title.add_theme_font_size_override("font_size", 16)
+	$VBox.add_child(weapon_title)
+
+	for i in WEAPON_LABELS.size():
+		var btn := Button.new()
+		btn.text = WEAPON_LABELS[i]
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.add_theme_font_size_override("font_size", 14)
+		btn.pressed.connect(func(): pixel_world.current_weapon = i)
+		$VBox.add_child(btn)
+		weapon_buttons.append(btn)
+
 	# Tallenna toggle-nappi jotta voidaan synkronoida B-näppäimen kanssa
 	set_meta("build_toggle_btn", btn_build_toggle)
 
@@ -153,10 +184,14 @@ func _process(_delta: float) -> void:
 	for i in speed_buttons.size():
 		speed_buttons[i].modulate = Color(1.5, 1.5, 0.5) if SPEED_VALUES[i] == pixel_world.sim_speed else Color.WHITE
 
+	# Korosta aktiivinen ase
+	for i in weapon_buttons.size():
+		weapon_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == pixel_world.current_weapon else Color.WHITE
+
 	# Tila-teksti
 	var mode_str := ""
 	if pixel_world.build_menu_visible:
-		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko"
+		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko [6] Seinä | MAT: [7] Multa [8] RautaMalmi [9] KultaMalmi"
 	elif pixel_world.build_mode == pixel_world.BUILD_SPAWNER:
 		mode_str = " | SPAWNER [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_CONVEYOR_START:
@@ -173,6 +208,10 @@ func _process(_delta: float) -> void:
 			2: mode_str = " | HISSI-LINKO: klikkaa katto"
 			3: mode_str = " | HISSI-LINKO: klikkaa suunta (vasen/oikea)"
 			_: mode_str = " | HISSI-LINKO"
+	elif pixel_world.build_mode == pixel_world.BUILD_WALL_START:
+		mode_str = " | SEINÄ: klikkaa alku"
+	elif pixel_world.build_mode == pixel_world.BUILD_WALL_END:
+		mode_str = " | SEINÄ: klikkaa loppu"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
 	elif pixel_world.laser_mode:
@@ -180,8 +219,6 @@ func _process(_delta: float) -> void:
 			mode_str = " | LASERI [vedä]"
 		else:
 			mode_str = " | LASERI [L]"
-	elif pixel_world.cut_mode:
-		mode_str = " | LEIKKAUS"
 	var explosion_names: Array[String] = ["Pieni", "Keski", "Iso", "Mega"]
 	var exp_str := explosion_names[pixel_world.explosion_size]
 	var chicken_count: int = pixel_world.get_chicken_count()
@@ -262,4 +299,9 @@ func _on_build_furnace() -> void:
 func _on_build_sling() -> void:
 	pixel_world.build_mode = pixel_world.BUILD_SLING
 	pixel_world.launcher_phase = 1
+	pixel_world.block_paint = true
+
+
+func _on_build_wall() -> void:
+	pixel_world.build_mode = pixel_world.BUILD_WALL_START
 	pixel_world.block_paint = true

@@ -13,11 +13,24 @@ const MAX_VELOCITY := 8.0  # Maksiminopeus
 
 var bodies: Dictionary = {}  # body_id → RigidBodyData
 const MAX_BODY_ID := 65535  # Kierrätetään ID:t ylivuodon estämiseksi
+const MAX_DYNAMIC_BODIES := 40  # Enintään 40 aktiivista rigid bodyä
 var next_body_id: int = 1
 var body_map: PackedInt32Array  # cell → body_id (0 = ei kappaletta)
 var map_w: int = 0
 var map_h: int = 0
 var force_damage_check := false  # Pakota vauriotarkistus (räjähdyksen jälkeen)
+
+# Dirty rect — rajoittaa check_damage():n vain muuttuneelle alueelle
+var damage_dirty_rect: Rect2i = Rect2i()
+var has_damage_dirty_rect: bool = false
+# Tallennettu dirty rect _split_if_needed()-kutsuja varten check_damage()-kutsun aikana
+# (has_damage_dirty_rect nollataan ennen jonon käsittelyä, joten tarvitaan erillinen kopio)
+var _active_split_dirty_rect: Rect2i = Rect2i()
+var _has_active_split_dirty_rect: bool = false
+
+# Vaurioitumisjono — hajautetaan splittaukset useammalle framelle
+var damage_check_queue: Array = []
+const MAX_SPLITS_PER_FRAME: int = 3
 
 
 func _ensure_body_map(w: int, h: int) -> void:
@@ -31,6 +44,13 @@ func _ensure_body_map(w: int, h: int) -> void:
 
 func create_body(world_pixels: Array[Vector2i], seeds: PackedByteArray, mat: int) -> RigidBodyData:
 	if world_pixels.size() < MIN_BODY_SIZE:
+		return null
+	# Laske ei-staattiset kappaleet — hylkää uusi jos kapasiteetti täynnä
+	var dynamic_count := 0
+	for bid in bodies:
+		if not bodies[bid].is_static:
+			dynamic_count += 1
+	if dynamic_count >= MAX_DYNAMIC_BODIES:
 		return null
 	var body := RigidBodyData.new()
 	body.body_id = next_body_id
@@ -56,6 +76,17 @@ func remove_body(body_id: int) -> void:
 
 func apply_explosion_impulse(center: Vector2, radius: float, force: float) -> void:
 	force_damage_check = true  # Pakota vauriotarkistus seuraavalla framella
+
+	# Aseta dirty rect räjähdysalueelle — check_damage ohittaa kaukaisia kappaleita
+	var blast_r := int(radius) + 20  # Marginaali kappaleiden liikkumiselle
+	var rect_pos := Vector2i(int(center.x) - blast_r, int(center.y) - blast_r)
+	var rect_size := Vector2i(blast_r * 2, blast_r * 2)
+	if has_damage_dirty_rect:
+		# Laajenna olemassa olevaa rekttiä
+		damage_dirty_rect = damage_dirty_rect.merge(Rect2i(rect_pos, rect_size))
+	else:
+		damage_dirty_rect = Rect2i(rect_pos, rect_size)
+		has_damage_dirty_rect = true
 	var effect_radius := radius * 2.0
 	for body_id in bodies:
 		var body: RigidBodyData = bodies[body_id]
@@ -562,7 +593,7 @@ func _apply_tipping_torque(body: RigidBodyData, grid: PackedByteArray, w: int, h
 
 func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) -> void:
 	_ensure_body_map(w, h)
-	var components := CCL.find_components(grid, w, h, 3)  # MAT_STONE = 3
+	var components := CCL.find_components_fast(grid, w, h, 3)  # MAT_STONE = 3, BFS-versio nopeampi
 
 	for root in components:
 		var pixels: Array[Vector2i] = components[root]
@@ -586,31 +617,79 @@ func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: in
 				body_map[p.y * w + p.x] = body.body_id
 
 
+# Tarkistaa onko kappale vaurioitunut iteroimalla kappaleen pikselilistaa suoraan.
+# Paljon nopeampi kuin bbox-skannaus — O(N_pikseleissä) eikä O(bbox²).
+# Early-exit: palaa heti kun ensimmäinen puuttuva pikseli löytyy.
+func is_body_damaged(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
+	var world_pixels := body.get_world_pixels()
+	for wp in world_pixels:
+		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+			continue
+		var idx := wp.y * w + wp.x
+		if grid[idx] != body.material:
+			return true  # Vaurioitunut — early-exit
+	return false
+
+
 func check_damage(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) -> void:
 	_ensure_body_map(w, h)
 	var check_static := force_damage_check  # Staattiset vain räjähdyksen jälkeen
-	var bodies_to_check: Array[int] = []
 
-	for body_id in bodies:
-		var body: RigidBodyData = bodies[body_id]
-		if body.is_static and not check_static:
-			continue  # Ohita staattiset normaalilla tarkistuksella
-		var world_pixels := body.get_world_pixels()
-		var intact := true
+	if not has_damage_dirty_rect:
+		# Normaali frame: tarkista vain dynaamiset / herätetyt kappaleet vanhalla tavalla
+		if check_static:
+			# force_damage_check ilman dirty rect — tarkista kaikki (harvinainen tapaus)
+			for body_id in bodies:
+				var body: RigidBodyData = bodies[body_id]
+				if is_body_damaged(body, grid, w, h):
+					if not damage_check_queue.has(body_id):
+						damage_check_queue.append(body_id)
+		else:
+			for body_id in bodies:
+				var body: RigidBodyData = bodies[body_id]
+				if body.is_static:
+					continue
+				if is_body_damaged(body, grid, w, h):
+					if not damage_check_queue.has(body_id):
+						damage_check_queue.append(body_id)
+	else:
+		# Räjähdys: skannaa VAIN dirty rect -alue body_mapista.
+		# O(dirty_rect_area) ≈ O(1600) eikä O(body.pixels) ≈ O(361000).
+		var damaged_ids: Dictionary = {}
+		var x0 := maxi(damage_dirty_rect.position.x, 0)
+		var y0 := maxi(damage_dirty_rect.position.y, 0)
+		var x1 := mini(damage_dirty_rect.end.x, w - 1)
+		var y1 := mini(damage_dirty_rect.end.y, h - 1)
+		for y in range(y0, y1 + 1):
+			var row := y * w
+			for x in range(x0, x1 + 1):
+				var idx := row + x
+				var bid := body_map[idx]
+				if bid != 0 and not damaged_ids.has(bid):
+					if bodies.has(bid):
+						var b: RigidBodyData = bodies[bid]
+						# Tarkista onko tämä solu muuttunut — jos kyllä, body on vaurioitunut
+						if grid[idx] != b.material:
+							damaged_ids[bid] = true
+		for body_id in damaged_ids:
+			if not damage_check_queue.has(body_id):
+				damage_check_queue.append(body_id)
 
-		for wp in world_pixels:
-			if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
-				continue
-			var idx := wp.y * w + wp.x
-			if grid[idx] != body.material:
-				intact = false
-				break
+	# Tallenna dirty rect _split_if_needed():ä varten ennen nollausta
+	_has_active_split_dirty_rect = has_damage_dirty_rect
+	_active_split_dirty_rect = damage_dirty_rect
 
-		if not intact:
-			bodies_to_check.append(body_id)
+	# Nollaa dirty rect ennen jonon käsittelyä
+	has_damage_dirty_rect = false
 
-	for body_id in bodies_to_check:
+	# Käsittele enintään MAX_SPLITS_PER_FRAME kappaletta tällä framella
+	var processed := 0
+	while not damage_check_queue.is_empty() and processed < MAX_SPLITS_PER_FRAME:
+		var body_id: int = damage_check_queue.pop_front()
 		_split_if_needed(body_id, grid, color_seed, w, h)
+		processed += 1
+
+	_has_active_split_dirty_rect = false
 
 
 func _split_if_needed(body_id: int, grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) -> void:
@@ -618,6 +697,30 @@ func _split_if_needed(body_id: int, grid: PackedByteArray, color_seed: PackedByt
 		return
 
 	var body: RigidBodyData = bodies[body_id]
+
+	# --- Nopea polku: suuri staattinen kappale + dirty rect saatavilla ---
+	# Vältetään 361K-pikselin get_world_pixels()-kutsu kokonaan.
+	# Päivitetään vain dirty rect -alue body_mapissa ja local_pixels-listassa.
+	const LARGE_BODY_DIRTY_THRESHOLD := 400
+	if body.is_static and body.local_pixels.size() > LARGE_BODY_DIRTY_THRESHOLD and _has_active_split_dirty_rect:
+		var x0 := maxi(_active_split_dirty_rect.position.x, 0)
+		var y0 := maxi(_active_split_dirty_rect.position.y, 0)
+		var x1 := mini(_active_split_dirty_rect.end.x, w - 1)
+		var y1 := mini(_active_split_dirty_rect.end.y, h - 1)
+		# Poista dirty rect -alueelta kadonneet pikselit body_mapista
+		for y in range(y0, y1 + 1):
+			var row := y * w
+			for x in range(x0, x1 + 1):
+				var idx := row + x
+				if body_map[idx] == body_id and grid[idx] != body.material:
+					body_map[idx] = 0
+		# Suuri staattinen kappale: ei CCL:ää eikä calculate_from_world_pixels().
+		# body.local_pixels jää vanhentuneeksi mutta se on hyväksyttävää —
+		# vaurioalueen pikselit ovat jo poistuneet body_mapista.
+		# CCL-skip pätee edelleen: iso staattinen ei splitaudu pienestä räjähdyksestä.
+		return
+
+	# --- Normaali polku: pieni kappale tai dynaaminen ---
 	var surviving_pixels: Array[Vector2i] = []
 	var surviving_seeds := PackedByteArray()
 	var world_pixels := body.get_world_pixels()
@@ -633,6 +736,19 @@ func _split_if_needed(body_id: int, grid: PackedByteArray, color_seed: PackedByt
 	if surviving_pixels.is_empty():
 		_clear_body_from_map(body_id)
 		remove_body(body_id)
+		return
+
+	# Suuri staattinen kappale ilman dirty rect (harvinainen: force_damage_check ilman räjähdystä) —
+	# ohitetaan kallis CCL ja päivitetään pikselilista suoraan
+	const LARGE_BODY_CCL_SKIP := 400
+	if body.is_static and surviving_pixels.size() > LARGE_BODY_CCL_SKIP:
+		_clear_body_from_map(body_id)
+		body.calculate_from_world_pixels(surviving_pixels, surviving_seeds)
+		# Staattinen kappale pysyy paikallaan
+		body.is_static = true
+		body.is_sleeping = true
+		for wp in surviving_pixels:
+			body_map[wp.y * w + wp.x] = body_id
 		return
 
 	var components := CCL.check_connectivity(surviving_pixels)
@@ -699,3 +815,17 @@ func _clear_body_from_map(body_id: int) -> void:
 			var idx := wp.y * map_w + wp.x
 			if body_map[idx] == body_id:
 				body_map[idx] = 0
+
+
+# === JONOTETTU VAURIONKÄSITTELY ===
+# Kutsutaan joka framella — käsittelee jäljellä olevat splittaukset jonosta
+
+func process_damage_queue(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) -> bool:
+	if damage_check_queue.is_empty():
+		return false
+	var processed := 0
+	while not damage_check_queue.is_empty() and processed < MAX_SPLITS_PER_FRAME:
+		var body_id: int = damage_check_queue.pop_front()
+		_split_if_needed(body_id, grid, color_seed, w, h)
+		processed += 1
+	return true
