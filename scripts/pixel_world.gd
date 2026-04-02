@@ -269,7 +269,7 @@ var debug_menu_visible: bool = false
 
 # Day/night sykli
 var time_of_day: float = 0.5      # 0=yö, 0.5=päivä
-var day_duration: float = 120.0   # Täyden päivän kesto sekunteina
+var day_duration: float = 30.0    # Täyden päivän kesto sekunteina
 
 # Linko-oletusasetukset (debug-menu synkronoi kaikki launchers näihin)
 var launcher_launch_speed: float = 120.0
@@ -1148,8 +1148,8 @@ func _bfs_thread(g: PackedByteArray) -> void:
 				dist[n] = 0
 				queue[q_tail] = n
 				q_tail += 1
-	# Vaihe 2: Levitä taivasyhteydestä 25px kaikkeen (kivet + eristetyt alueet)
-	const MAX_VIS := 25
+	# Vaihe 2: Levitä taivasyhteydestä 250px kaikkeen (kivet + eristetyt alueet)
+	const MAX_VIS := 250
 	var q2 := PackedInt32Array()
 	q2.resize(W * SIM_HEIGHT)
 	var q2h := 0
@@ -1216,17 +1216,13 @@ func explode(cx: int, cy: int, radius: int) -> void:
 				continue
 
 			if dist2 <= inner_r2:
-				# Sisäalue: tyhjennä kokonaan
+				# Sisäalue: kaikki kiinteät/nesteet → soraa, immateriaalit katoavat
 				if mat == MAT_OIL:
 					grid[idx] = MAT_FIRE  # Öljy syttyy!
-				elif mat == MAT_STONE:
-					# Kivi hajoaa: soraa
-					grid[idx] = MAT_GRAVEL
-					if physics_world.body_map.size() > idx:
-						physics_world.body_map[idx] = 0
+				elif mat == MAT_FIRE or mat == MAT_STEAM:
+					grid[idx] = MAT_EMPTY  # Immateriaalit katoavat
 				else:
-					grid[idx] = MAT_EMPTY
-					# Poista body_map-merkintä
+					grid[idx] = MAT_GRAVEL  # Kivi, hiekka, puu, vesi jne. → soraa
 					if physics_world.body_map.size() > idx:
 						physics_world.body_map[idx] = 0
 			else:
@@ -1292,11 +1288,10 @@ func _bullet_impact(cx: int, cy: int) -> void:
 				continue
 			var mat := grid[idx]
 			if mat != MAT_EMPTY:
-				if mat == MAT_STONE:
-					# Kivi hajoaa luodista: soraa
-					grid[idx] = MAT_GRAVEL
+				if mat == MAT_FIRE or mat == MAT_STEAM:
+					grid[idx] = MAT_EMPTY  # Immateriaalit katoavat
 				else:
-					grid[idx] = MAT_EMPTY
+					grid[idx] = MAT_GRAVEL  # Kaikki kiinteät/nesteet → soraa
 					if physics_world.body_map.size() > idx:
 						physics_world.body_map[idx] = 0
 	add_trauma(0.03)   # Mikroskooppinen osumashake

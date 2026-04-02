@@ -207,21 +207,24 @@ void fragment() {
 	if (player_size.x > 0.0 && player_size.y > 0.0) {
 		vec2 p_rel = (UV - player_pos) / player_size;
 		if (p_rel.x >= 0.0 && p_rel.x < 1.0 && p_rel.y >= 0.0 && p_rel.y < 1.0) {
-			int px = int(p_rel.x * 4.0);
-			int py = int(p_rel.y * 7.0);
+			int px = int(p_rel.x * 6.0);
+			int py = int(p_rel.y * 10.0);
 			// Peilaus suunnan mukaan
-			int sx = (player_facing_right == 1) ? px : (3 - px);
+			int sx = (player_facing_right == 1) ? px : (5 - px);
 
-			// Sprite-data: 7 riviä, 4 pikseliä per rivi
+			// Sprite-data: 10 riviä, 6 pikseliä per rivi
 			// Koodattu valmiiksi (2 bittiä per pikseli, pakattu inttiin)
 			int row_data = 0;
-			if (py == 0) row_data = 36;       // 0,2,2,0 = (0<<6)|(2<<4)|(2<<2)|0
-			else if (py == 1) row_data = 36;  // 0,2,2,0
-			else if (py == 2) row_data = 85;  // 1,1,1,1 = (1<<6)|(1<<4)|(1<<2)|1
-			else if (py == 3) row_data = 20;  // 0,1,1,0 = (0<<6)|(1<<4)|(1<<2)|0
-			else if (py == 4) row_data = 20;  // 0,1,1,0
-			else if (py == 5) row_data = 60;  // 0,3,3,0 = (0<<6)|(3<<4)|(3<<2)|0
-			else if (py == 6) row_data = 195; // 3,0,0,3 = (3<<6)|(0<<4)|(0<<2)|3
+			if      (py == 0) row_data = 160;  // 0,0,2,2,0,0
+			else if (py == 1) row_data = 680;  // 0,2,2,2,2,0
+			else if (py == 2) row_data = 680;  // 0,2,2,2,2,0
+			else if (py == 3) row_data = 1365; // 1,1,1,1,1,1
+			else if (py == 4) row_data = 340;  // 0,1,1,1,1,0
+			else if (py == 5) row_data = 340;  // 0,1,1,1,1,0
+			else if (py == 6) row_data = 340;  // 0,1,1,1,1,0
+			else if (py == 7) row_data = 500;  // 0,1,3,3,1,0
+			else if (py == 8) row_data = 1020; // 0,3,3,3,3,0
+			else if (py == 9) row_data = 3855; // 3,3,0,0,3,3
 
 			int pixel_type = (row_data >> (sx * 2)) & 3;
 
@@ -276,12 +279,12 @@ void fragment() {
 		// --- Taivasvalo BFS-kartasta ---
 		float vis_raw = texture(visibility_tex, UV).r;
 		float sky_dist = vis_raw * 255.0;
-		float sky_reach = clamp(1.0 - sky_dist / 25.0, 0.0, 1.0);
+		float sky_reach = clamp(1.0 - sky_dist / 250.0, 0.0, 1.0);
 		sky_reach = sky_reach * sky_reach;
 
 		// Päivä/yö-intensiteetti: cos-käyrä, yöllä 0.04, päivällä 1.0
 		float tod_angle = time_of_day * 6.28318;
-		float sun_intensity = clamp(cos(tod_angle) * 0.5 + 0.52, 0.04, 1.0);
+		float sun_intensity = clamp(cos(tod_angle) * 0.5 + 0.52, 0.20, 1.0);
 
 		// Taivasväri muuttuu kellonajan mukaan
 		vec3 sky_noon    = vec3(1.0, 0.97, 0.85);   // lämmin päivänvalo
@@ -313,7 +316,7 @@ void fragment() {
 		point_light_total = clamp(point_light_total, 0.0, 1.0);
 
 		// --- Yhdistä ---
-		float ambient = 0.035;
+		float ambient = 0.12;
 		float total_light = clamp(sky_light + point_light_total + ambient, 0.0, 1.0);
 		vec3 light_tint = mix(vec3(1.0), sky_color_tod, sky_light / max(total_light, 0.001));
 		if (point_light_total > 0.001) {
