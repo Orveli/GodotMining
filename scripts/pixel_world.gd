@@ -269,7 +269,7 @@ var debug_menu_visible: bool = false
 
 # Day/night sykli
 var time_of_day: float = 0.5      # 0=yö, 0.5=päivä
-var day_duration: float = 30.0    # Täyden päivän kesto sekunteina
+var day_duration: float = 60.0    # Täyden päivän kesto sekunteina
 
 # Linko-oletusasetukset (debug-menu synkronoi kaikki launchers näihin)
 var launcher_launch_speed: float = 120.0

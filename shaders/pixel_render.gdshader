@@ -282,19 +282,20 @@ void fragment() {
 		float sky_reach = clamp(1.0 - sky_dist / 250.0, 0.0, 1.0);
 		sky_reach = sky_reach * sky_reach;
 
-		// Päivä/yö-intensiteetti: cos-käyrä, yöllä 0.04, päivällä 1.0
-		float tod_angle = time_of_day * 6.28318;
-		float sun_intensity = clamp(cos(tod_angle) * 0.5 + 0.52, 0.20, 1.0);
+		// Epäsymmetrinen päivä/yö: 85% päivää, 15% yötä
+		// time_of_day: 0=puoliöö, 0.5=keskipäivä
+		float dist_mid = min(time_of_day, 1.0 - time_of_day);  // 0=puoliöö, 0.5=keskipäivä
+		const float NIGHT_HALF = 0.075;  // 7.5% kummallakin puolella = 15% yö yhteensä
+		float day_t = clamp((dist_mid - NIGHT_HALF) / (0.5 - NIGHT_HALF), 0.0, 1.0);
+		float sun_intensity = mix(0.20, 1.0, day_t * day_t);
 
-		// Taivasväri muuttuu kellonajan mukaan
-		vec3 sky_noon    = vec3(1.0, 0.97, 0.85);   // lämmin päivänvalo
-		vec3 sky_dusk    = vec3(1.0, 0.55, 0.2);    // oranssi ilta/aamu
-		vec3 sky_night   = vec3(0.15, 0.2, 0.45);   // kylmä sininen yö
-		// tod: 0=yö, 0.25=aamu, 0.5=päivä, 0.75=ilta
-		float day_t = clamp(cos(tod_angle) * 0.5 + 0.5, 0.0, 1.0);
-		float twilight_t = clamp(1.0 - abs(cos(tod_angle * 0.5)) * 1.6, 0.0, 1.0);
-		vec3 sky_color_tod = mix(sky_night, sky_noon, day_t);
-		sky_color_tod = mix(sky_color_tod, sky_dusk, twilight_t * 0.8);
+		// Taivasväri: yö → hämärä → päivä
+		vec3 sky_noon  = vec3(1.0, 0.97, 0.85);
+		vec3 sky_dusk  = vec3(1.0, 0.55, 0.2);
+		vec3 sky_night = vec3(0.15, 0.2, 0.45);
+		float twilight_t = clamp(smoothstep(0.0, 0.25, day_t) - smoothstep(0.25, 0.6, day_t), 0.0, 1.0);
+		vec3 sky_color_tod = mix(sky_night, sky_noon, day_t * day_t);
+		sky_color_tod = mix(sky_color_tod, sky_dusk, twilight_t * 0.9);
 
 		float sky_light = sky_reach * sun_intensity;
 
@@ -315,13 +316,40 @@ void fragment() {
 		}
 		point_light_total = clamp(point_light_total, 0.0, 1.0);
 
+		// --- Otsalamppu: V-muotoinen valokeila pelaajan päästä ---
+		float headlamp = 0.0;
+		if (player_size.x > 0.0) {
+			// Pään sijainti: pelaajan yläosa keskellä
+			vec2 head_uv = player_pos + vec2(player_size.x * 0.5, player_size.y * 0.1);
+			vec2 to_px = UV - head_uv;
+			to_px.x *= screen_aspect;
+			float lamp_dist = length(to_px);
+			// Suunta johon pelaaja katsoo
+			float facing = (player_facing_right == 1) ? 1.0 : -1.0;
+			vec2 facing_dir = vec2(facing, -0.1);  // Hieman alas suunnattu
+			// Kulma keilaukseen: cos(50°) ≈ 0.643, laaja V
+			float cone_cos = 0.60;
+			float dot_f = dot(normalize(to_px), normalize(facing_dir));
+			float cone_t = clamp((dot_f - cone_cos) / (1.0 - cone_cos), 0.0, 1.0);
+			cone_t = cone_t * cone_t;
+			// Etäisyysvaimeneminen — ulottuu noin 300px
+			float lamp_radius = 300.0 / float(1664);
+			float dist_t = clamp(1.0 - lamp_dist / lamp_radius, 0.0, 1.0);
+			dist_t = dist_t * dist_t;
+			headlamp = cone_t * dist_t * 0.75;
+		}
+
 		// --- Yhdistä ---
 		float ambient = 0.12;
-		float total_light = clamp(sky_light + point_light_total + ambient, 0.0, 1.0);
+		float total_light = clamp(sky_light + point_light_total + headlamp + ambient, 0.0, 1.0);
 		vec3 light_tint = mix(vec3(1.0), sky_color_tod, sky_light / max(total_light, 0.001));
 		if (point_light_total > 0.001) {
 			vec3 norm_point = point_color_total / max(point_light_total, 0.001);
 			light_tint = mix(light_tint, norm_point, clamp(point_light_total * 0.6, 0.0, 1.0));
+		}
+		// Otsalamppu: kylmä valkoinen hehku
+		if (headlamp > 0.001) {
+			light_tint = mix(light_tint, vec3(0.9, 0.92, 1.0), headlamp * 0.4);
 		}
 		color *= total_light * light_tint;
 	}
