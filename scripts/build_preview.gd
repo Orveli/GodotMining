@@ -104,7 +104,7 @@ func _draw_grid_overlay(center: Vector2) -> void:
 
 func _draw_launcher_preview() -> void:
 	# Hissilinkon kolmivaiheinen esikatselu — koordinaatit ovat jo grid-avaruudessa
-	# (BuildPreview on chicken_layer:n lapsi, joka on skaalattu grid-kooksi)
+	# (BuildPreview on skaalattu grid-kooksi)
 	match launcher_phase:
 		1:  # Pohjan valinta: vihreä snap-ruutu kursorissa
 			_draw_grid_overlay(launcher_cursor)

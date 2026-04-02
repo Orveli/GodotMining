@@ -75,16 +75,6 @@ func build_structure(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 
 
 func update_furnace(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int, delta: float) -> bool:
-	if broken:
-		return false
-	# Eheyden tarkistus
-	for sp in structure_pixels:
-		if sp.x >= 0 and sp.x < w and sp.y >= 0 and sp.y < h:
-			if grid[sp.y * w + sp.x] != FLOOR_MAT:
-				broken = true
-				queue_redraw()
-				return false
-
 	var modified := false
 
 	# Kerää materiaaleja intake-aukon yläpuolelta (kaikki resepti-inputit)
@@ -94,12 +84,26 @@ func update_furnace(grid: PackedByteArray, color_seed: PackedByteArray, w: int, 
 			if ix >= 0 and ix < w:
 				var idx := intake_y * w + ix
 				var mat_id: int = grid[idx]
-				if RECIPES.has(mat_id):
+				if mat_id == 0:
+					# Tyhjä — ohita
+					continue
+				elif RECIPES.has(mat_id):
+					# Resepti-input — kerää normaalisti
 					grid[idx] = 0
 					color_seed[idx] = randi() % 256
 					collected[mat_id] = collected.get(mat_id, 0) + 1
 					modified = true
 					queue_redraw()
+				elif mat_id in [4, 9, 16]:
+					# Orgaaninen (WOOD, WOOD_FALLING, COAL) — muutu tuhkaksi
+					grid[idx] = 8  # MAT_ASH
+					color_seed[idx] = randi() % 256
+					modified = true
+				else:
+					# Muu materiaali — hävitetään
+					grid[idx] = 0
+					color_seed[idx] = randi() % 256
+					modified = true
 
 	# Sulatusvaihe — tarkista täyttyikö jokin resepti
 	if not glass_ready:

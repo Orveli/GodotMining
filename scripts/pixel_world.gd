@@ -2,6 +2,8 @@ extends TextureRect
 
 const TestSceneGenerator = preload("res://scripts/test_scene_generator.gd")
 const LauncherScript = preload("res://scripts/launcher.gd")
+const MoneyExit = preload("res://scripts/money_exit.gd")
+const Crusher = preload("res://scripts/crusher.gd")
 
 const MAT_EMPTY := 0
 const MAT_SAND := 1
@@ -19,6 +21,9 @@ const MAT_IRON_ORE := 12
 const MAT_GOLD_ORE := 13
 const MAT_IRON := 14
 const MAT_GOLD := 15
+const MAT_COAL := 16
+const MAT_HELD := 17  # Poistettu käytöstä — säilytetään yhteensopivuuden vuoksi
+const MAT_GRAVEL := 18  # Sora — kiven murskautuessa syntyvä jauhe
 
 const SIM_WIDTH := 1664
 const SIM_HEIGHT := 960
@@ -59,22 +64,77 @@ var grid_texture: ImageTexture
 var seed_image: Image
 var seed_texture: ImageTexture
 var shader_mat: ShaderMaterial
+var darkness_mode: bool = false
+
+# Väripaletit — runtime-vaihdettava
+const PALETTE_DEFAULT: Array = [
+	Vector3(0.08, 0.08, 0.12),   # 0 EMPTY
+	Vector3(0.86, 0.78, 0.45),   # 1 SAND
+	Vector3(0.2, 0.4, 0.85),     # 2 WATER
+	Vector3(0.5, 0.5, 0.52),     # 3 STONE
+	Vector3(0.45, 0.28, 0.12),   # 4 WOOD
+	Vector3(1.0, 0.5, 0.1),      # 5 FIRE
+	Vector3(0.2, 0.15, 0.1),     # 6 OIL
+	Vector3(0.8, 0.85, 0.9),     # 7 STEAM
+	Vector3(0.35, 0.33, 0.3),    # 8 ASH
+	Vector3(0.45, 0.28, 0.12),   # 9 WOOD_FALLING
+	Vector3(0.65, 0.88, 0.84),   # 10 GLASS
+	Vector3(0.45, 0.32, 0.18),   # 11 DIRT
+	Vector3(0.55, 0.42, 0.38),   # 12 IRON_ORE
+	Vector3(0.72, 0.65, 0.25),   # 13 GOLD_ORE
+	Vector3(0.68, 0.68, 0.72),   # 14 IRON
+	Vector3(0.90, 0.78, 0.20),   # 15 GOLD
+	Vector3(0.18, 0.17, 0.21),   # 16 COAL
+	Vector3(1.0, 0.85, 0.1),     # 17 HELD
+	Vector3(0.55, 0.50, 0.45),   # 18 GRAVEL
+]
+
+const PALETTE_DEEP: Array = [
+	Vector3(0.04, 0.04, 0.08),   # 0 EMPTY (tummempi)
+	Vector3(0.7, 0.6, 0.3),      # 1 SAND
+	Vector3(0.1, 0.25, 0.6),     # 2 WATER (tummempi sininen)
+	Vector3(0.35, 0.32, 0.38),   # 3 STONE (violettiin vivahtava)
+	Vector3(0.3, 0.18, 0.08),    # 4 WOOD
+	Vector3(0.9, 0.3, 0.05),     # 5 FIRE (punaisempi)
+	Vector3(0.15, 0.1, 0.08),    # 6 OIL
+	Vector3(0.6, 0.65, 0.75),    # 7 STEAM
+	Vector3(0.25, 0.23, 0.22),   # 8 ASH
+	Vector3(0.3, 0.18, 0.08),    # 9 WOOD_FALLING
+	Vector3(0.45, 0.7, 0.65),    # 10 GLASS
+	Vector3(0.3, 0.2, 0.12),     # 11 DIRT
+	Vector3(0.45, 0.28, 0.22),   # 12 IRON_ORE
+	Vector3(0.6, 0.52, 0.18),    # 13 GOLD_ORE
+	Vector3(0.55, 0.55, 0.6),    # 14 IRON
+	Vector3(0.85, 0.7, 0.15),    # 15 GOLD
+	Vector3(0.12, 0.11, 0.14),   # 16 COAL
+	Vector3(1.0, 0.85, 0.1),     # 17 HELD
+	Vector3(0.42, 0.37, 0.32),   # 18 GRAVEL (tummempi syvyydessä)
+]
+
+const PALETTE_VAR_DEFAULT: Array = [
+	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03,
+	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.04
+]
+
+var current_palette: Array = PALETTE_DEFAULT
 
 var current_material: int = MAT_SAND
 var brush_size: int = 5
 var frame_count: int = 0
 var fps_timer: float = 0.0
-var gpu_passes: int = 4  # Adaptiivinen passimäärä (2-4)
+var gpu_passes: int = 8  # Adaptiivinen passimäärä (4-12); Margolus vaatii min 4 passia
 var sim_speed: float = 1.0  # 1=normaali, 4/8/16=nopea
 var _logic_frame_counter: int = 0
 var logic_frame_interval: int = 4  # CPU game logic ajetaan joka 4. frame
 var ui_panel: Control  # Asetetaan ui.gd:stä — tarkistetaan rektillä
+var _toast_label: Label       # Ruudulla näytettävä lyhyt ilmoitus
+var _toast_timer: float = 0.0 # Kuinka kauan ilmoitus on näkyvissä
 var gpu_time_ms: float = 0.0  # Edellisen framen GPU-aika
 var paint_pending := false
 
 # Kaivaustyökalut
 enum Tool { HAND, SHOVEL, PICKAXE, DRILL, MEGA_DRILL }
-enum Weapon { PICKAXE, MEGA_DRILL, LASER, ROCKET, GRAVITY_GUN }
+enum Weapon { PICKAXE, MEGA_DRILL, RIFLE, ROCKET, GRAVITY_GUN }
 var current_weapon: Weapon = Weapon.PICKAXE
 
 var current_tool: Tool = Tool.HAND
@@ -106,23 +166,38 @@ var _t_upload_render: float = 0.0
 var _t_gamelogic: float = 0.0
 var _perf_frame: int = 0
 
-# Laseri
+# Rynnäkkäkivääri
 var laser_mode := false
 var laser_dragging := false
-var laser_start := Vector2i.ZERO
-var laser_end := Vector2i.ZERO
+var rifle_cooldown: float = 0.0
+const RIFLE_COOLDOWN_TIME := 0.05
+
+# Laseri — funktio säilytetty mutta ei käytössä (vakiot tarvitaan kääntämiseen)
 var laser_beam_timer: int = 0
 const LASER_BEAM_DURATION := 8
-const LASER_WIDTH := 2  # Pikseleitä (paksuus)
+const LASER_WIDTH := 2
 
 # Screenshake
 var trauma: float = 0.0
 var shake_offset: Vector2 = Vector2.ZERO
+var ca_flash: float = 0.0  # Chromatic aberration osumasta, ei heiluta ruutua
+
+# Sky-visibility map
+var visibility_image: Image
+var visibility_tex: ImageTexture
+var visibility_dirty: bool = true
+var _vis_thread: Thread = null
+var _vis_result: PackedByteArray = PackedByteArray()
+
+# Lokaali impakti-CA
+var impact_uv: Vector2 = Vector2.ZERO
+var impact_intensity: float = 0.0
+var impact_type_val: int = 0  # 0=luoti, 1=raketti, 2=hakku
 
 # Räjähdykset
 var explosion_size: int = 1  # 0=pieni, 1=keski, 2=iso, 3=mega
 const EXPLOSION_RADII: Array[int] = [8, 15, 25, 40]
-const EXPLOSION_TRAUMA: Array[float] = [0.2, 0.5, 0.8, 1.0]
+const EXPLOSION_TRAUMA: Array[float] = [0.1, 0.25, 0.4, 0.6]
 
 # Räjähdysflash
 var flash_pos: Vector2 = Vector2.ZERO
@@ -139,6 +214,12 @@ var grav_gun_body_strength: float = 3.0
 var mouse_velocity: Vector2 = Vector2.ZERO
 var prev_mouse_grid: Vector2 = Vector2.ZERO
 
+# Gravity gun — held-lista (CPU omistaa kiinnitetyt pikselit)
+const GRAV_CAPTURE_RADIUS := 8       # Säde jolla pikselit nappataan (px)
+const GRAV_MAX_HELD := 500           # Maksimi kiinnitettyjen pikselien määrä
+var grav_held: Array[Vector3i] = []  # Elementit: (material_id, offset_x, offset_y)
+var grav_held_written: Array[int] = []  # Edellisellä framella kirjoitetut grid-indeksit
+
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
 var physics_initialized := false  # Onko kivi-kappaleet skannattu
@@ -146,11 +227,8 @@ var is_painting_stone := false  # Maalataan kiveä parhaillaan — fysiikka tauo
 var stroke_stone_pixels: Dictionary = {}  # Tämän vedon kivipikselit (deduplikoitu)
 var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
 
-# Kanat
-var chickens: Array = []
-var spawners: Array = []
-var chicken_texture: Texture2D
-var chicken_layer: Node2D
+# Rakennukset — lapsisolmut
+var building_layer: Node2D
 
 # Rakentaminen
 const BUILD_NONE := 0
@@ -162,6 +240,8 @@ const BUILD_FURNACE := 5
 const BUILD_SLING := 6
 const BUILD_WALL_START := 7
 const BUILD_WALL_END := 8
+const BUILD_MONEY_EXIT := 9
+const BUILD_CRUSHER := 10
 const GRID_SIZE := 8  # Rakennusgridi pikseleinä
 var build_mode: int = BUILD_NONE
 var build_menu_visible := false
@@ -171,6 +251,9 @@ var conveyors: Array = []
 var furnaces: Array = []
 var sand_mines: Array = []
 var launchers: Array = []
+var money_exits: Array = []
+var crushers: Array = []
+var money: int = 0
 var building_pixels: Dictionary = {}  # idx -> true, kaikki rakennusten pikselit
 var launcher_phase: int = 0    # 0=ei aktiivinen, 1=pohja, 2=katto, 3=suunta
 var launcher_start: Vector2i = Vector2i.ZERO
@@ -197,18 +280,17 @@ var block_paint := false
 var _gpu_upload_buf := PackedByteArray()
 const SNAP_DISTANCE := 6.0
 
-# Pelaaja
 const PlayerScript := preload("res://scripts/player.gd")
 var player: RefCounted
+var god_mode: bool = false
 
 # Kamera / zoom
-# Diskreetit zoom-tasot: 1×=4px, 2×=8px, 4×=16px, 8×=32px per sim-pikseli
-const ZOOM_LEVELS := [1.0, 2.0, 4.0, 8.0]
-var zoom_index: int = 0
+var zoom_index: int = 0  # Yhteensopivuus
 var zoom_level: float = 1.0
-var zoom_smooth: float = 8.0
 var target_zoom: float = 1.0
 var camera_offset: Vector2 = Vector2.ZERO
+var cam_grid_pos: Vector2 = Vector2(832.0, 480.0)
+var cam_vel: Vector2 = Vector2.ZERO
 
 # === SCENARIO RUNNER ===
 var _scenario_steps: Array = []
@@ -266,22 +348,32 @@ func _ready() -> void:
 	shader_mat.shader = shader
 	shader_mat.set_shader_parameter("seed_tex", seed_texture)
 	shader_mat.set_shader_parameter("frame", 0)
+	shader_mat.set_shader_parameter("mat_colors", PALETTE_DEFAULT)
+	shader_mat.set_shader_parameter("mat_var", PALETTE_VAR_DEFAULT)
+	shader_mat.set_shader_parameter("darkness_mode", 0)  # Pois oletuksena, O-näppäin togglea
+	shader_mat.set_shader_parameter("proj_count", 0)
+	shader_mat.set_shader_parameter("impact_intensity", 0.0)
+	shader_mat.set_shader_parameter("screen_aspect", float(W) / float(SIM_HEIGHT))
+
+	# Sky-visibility tekstuuri — BFS-pohjainen pimeys
+	visibility_image = Image.create(W, SIM_HEIGHT, false, Image.FORMAT_R8)
+	visibility_tex = ImageTexture.create_from_image(visibility_image)
+	shader_mat.set_shader_parameter("visibility_tex", visibility_tex)
 	material = shader_mat
 
 	# Fysiikkamoottori
 	physics_world = PhysicsWorld.new()
 
-	# Kanakerros (skaalataan grid → screen)
-	chicken_texture = load("res://assets/chicken.png")
-	chicken_layer = Node2D.new()
-	chicken_layer.name = "ChickenLayer"
-	add_child(chicken_layer)
+	# Rakennuskerros (skaalataan grid → screen)
+	building_layer = Node2D.new()
+	building_layer.name = "BuildingLayer"
+	add_child(building_layer)
 
 	# Rakennuksen esikatselu
 	build_preview = BuildPreview.new()
 	build_preview.name = "BuildPreview"
 	build_preview.z_index = 10
-	chicken_layer.add_child(build_preview)
+	building_layer.add_child(build_preview)
 
 	# Pelaaja
 	player = PlayerScript.new()
@@ -289,6 +381,19 @@ func _ready() -> void:
 
 	# GPU compute setup
 	_setup_compute()
+
+	# Toast-ilmoitus (I-näppäin ja muut pikailmoitukset) — lisätään scene rootiin jotta
+	# näkyy kaiken päällä eikä clippaannu TextureRectin sisään
+	_toast_label = Label.new()
+	_toast_label.add_theme_font_size_override("font_size", 24)
+	_toast_label.add_theme_color_override("font_color", Color(0.2, 1.0, 0.4))
+	_toast_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_toast_label.add_theme_constant_override("shadow_offset_x", 2)
+	_toast_label.add_theme_constant_override("shadow_offset_y", 2)
+	_toast_label.position = Vector2(16, 48)
+	_toast_label.z_index = 100
+	_toast_label.visible = false
+	get_tree().root.add_child(_toast_label)
 
 	# Scenario runner — tarkista cmdline-argumentit
 	var args := OS.get_cmdline_user_args()
@@ -505,7 +610,18 @@ func _setup_render_compute() -> void:
 	print("Render compute valmis — GPU→GPU, nolla CPU-kopiointia renderöinnissä")
 
 
+func _show_toast(msg: String, duration: float = 2.5) -> void:
+	_toast_label.text = msg
+	_toast_label.visible = true
+	_toast_timer = duration
+
+
 func _process(delta: float) -> void:
+	if _toast_timer > 0.0:
+		_toast_timer -= delta
+		if _toast_timer <= 0.0:
+			_toast_label.visible = false
+
 	frame_count += 1
 	fps_timer += delta
 
@@ -534,13 +650,25 @@ func _process(delta: float) -> void:
 		mega_drill_cooldown -= delta
 	if rocket_cooldown > 0.0:
 		rocket_cooldown -= delta
+	rifle_cooldown = maxf(rifle_cooldown - delta, 0.0)
 
-	_handle_input()
+	_handle_input(delta)
 
 	if gpu_ready:
 		# Ajan nopeus — kerrotaan gpu_passes simulaatiokertoimen mukaan
 		var saved_passes := gpu_passes
 		gpu_passes = max(1, gpu_passes * int(sim_speed))
+
+		# Vaihe 0: Gravity gun — CPU-veto ja held-merkintä ENNEN GPU-passia
+		# Järjestys on kriittinen: HELD-tila täytyy olla gridissä kun GPU simuloi,
+		# muuten GPU siirtää pikseleitä ennen kuin CPU ehtii kiinnittää ne.
+		if grav_gun_mode > 0:
+			# Poista edellisen framen held-pikselit
+			_grav_erase_held()
+			# Nappaa pikselit held-listaan koko grav_gun_radius alueelta ja merkitse HELD
+			_grav_capture()
+			_grav_write_held()
+			paint_pending = true
 
 		# Vaihe 1: CA-simulaatio GPU:lla
 		# Maalaukset ladataan ennen simulaatiota jos paint_pending
@@ -602,10 +730,25 @@ func _process(delta: float) -> void:
 		if _update_sand_mines(delta * sim_speed):
 			grid_modified = true
 
+		# Vaihe 5.65: Money exitit ja murskaajat
+		if _update_money_exits(delta * sim_speed):
+			grid_modified = true
+		if _update_crushers(delta * sim_speed):
+			grid_modified = true
+
 		# Vaihe 5.7: Hissilinkot + lentävät pikselit
 		if not launchers.is_empty() or not flying_pixels.is_empty():
 			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
+		# Projektiilivalaistus — päivitetään jokainen frame
+		_update_proj_lights()
+
+		# Visibility: käynnistä uusi laskenta kun dirty, hae valmis tulos threadista
+		if visibility_dirty:
+			visibility_dirty = false
+			_update_visibility_map()
+		elif _vis_thread != null and not _vis_thread.is_alive():
+			_update_visibility_map()  # Hakee tuloksen ja mahdollisesti käynnistää seuraavan
 
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
@@ -617,12 +760,9 @@ func _process(delta: float) -> void:
 			_upload_paint_to_gpu()
 			paint_pending = false
 
-	# Pelaajan päivitys
-	player.update(grid, W, SIM_HEIGHT)
-
-	# Laseri-beam timer
-	if laser_beam_timer > 0:
-		laser_beam_timer -= 1
+	# Pelaajan päivitys (vain player modessa)
+	if not god_mode:
+		player.update(grid, W, SIM_HEIGHT)
 
 	# Scenario runner — ajetaan ennen renderöintiä jotta fill_rect näkyy heti
 	if _scenario_active:
@@ -632,19 +772,15 @@ func _process(delta: float) -> void:
 	_upload_render()
 	_t_upload_render = float(Time.get_ticks_usec() - _t0_ul) / 1000.0
 
-	# Vaihe 7: Kanat ja spawnerit
-	_update_spawners(delta)
-	_update_chickens(delta)
-
-	# Vaihe 8: Rakennuksen esikatselu
+	# Vaihe 7: Rakennuksen esikatselu
 	_update_build_preview()
 
-	# Päivitä kanakerroksen skaalaus (grid → screen)
-	if chicken_layer and size.x > 0:
-		chicken_layer.scale = Vector2(size.x / float(W), size.y / float(SIM_HEIGHT))
+	# Päivitä rakennuskerroksen skaalaus (grid → screen)
+	if building_layer and size.x > 0:
+		building_layer.scale = Vector2(size.x / float(W), size.y / float(SIM_HEIGHT))
 
 
-func _handle_input() -> void:
+func _handle_input(delta: float) -> void:
 	# Estä toiminnot kun hiiri on UI-paneelin päällä
 	if ui_panel and ui_panel.get_global_rect().has_point(get_viewport().get_mouse_position()):
 		prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
@@ -658,6 +794,8 @@ func _handle_input() -> void:
 	# Nollaa grav_gun jos vaihdettu pois Gravity Gun -aseesta
 	if current_weapon != Weapon.GRAVITY_GUN and grav_gun_mode > 0:
 		grav_gun_mode = 0
+		grav_held.clear()
+		grav_held_written.clear()
 
 	# Oikea hiiri — käytä valittua asetta AINA
 	if true:
@@ -666,27 +804,34 @@ func _handle_input() -> void:
 			Weapon.PICKAXE:
 				if right_pressed and coords.x >= 0:
 					current_tool = Tool.PICKAXE
-					_cut(coords.x, coords.y)
+					var dig_pos := _player_adjacent_dig_pos(coords, 3)
+					_cut(dig_pos.x, dig_pos.y)
 			Weapon.MEGA_DRILL:
 				if right_pressed and coords.x >= 0 and mega_drill_cooldown <= 0.0:
 					current_tool = Tool.MEGA_DRILL
-					_cut(coords.x, coords.y)
+					var dig_pos := _player_adjacent_dig_pos(coords, 4)
+					_cut(dig_pos.x, dig_pos.y)
 					mega_drill_cooldown = MEGA_DRILL_COOLDOWN_TIME
-			Weapon.LASER:
-				if right_just and coords.x >= 0:
-					laser_start = coords
-					laser_end = coords
-					laser_dragging = true
-				elif right_pressed and laser_dragging and coords.x >= 0:
-					laser_end = coords
-				elif not right_pressed and laser_dragging:
-					if coords.x >= 0:
-						laser_end = coords
-					laser_dragging = false
-					if Vector2(laser_start).distance_to(Vector2(laser_end)) >= 3.0:
-						_fire_laser(laser_start, laser_end)
+			Weapon.RIFLE:
+				if right_pressed and coords.x >= 0 and rifle_cooldown <= 0.0:
+					var origin := cam_grid_pos if god_mode else Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
+					var dir := (Vector2(coords) - origin).normalized()
+					if dir.length_squared() < 0.01:
+						dir = Vector2(1, 0)
+					var spawn_pos := origin + dir * 5.0
+					if flying_pixels.size() < flying_max_count:
+						flying_pixels.append({
+							"pos": spawn_pos,
+							"vel": dir * 420.0,
+							"mat": MAT_STONE,
+							"seed": randi() % 256,
+							"age": 0.0,
+							"type": "bullet"
+						})
+					add_trauma(0.18)  # Recoil
+					rifle_cooldown = RIFLE_COOLDOWN_TIME
 			Weapon.ROCKET:
-				if right_just:
+				if right_pressed:
 					_fire_rocket_at_cursor()
 			Weapon.GRAVITY_GUN:
 				if right_pressed and coords.x >= 0:
@@ -702,8 +847,11 @@ func _handle_input() -> void:
 					var strength := grav_gun_body_strength * (2.5 if grav_gun_mode == 2 else 1.0)
 					physics_world.apply_attraction(Vector2(coords), radius, strength)
 				elif grav_gun_mode > 0:
-					var was_vacuum := grav_gun_mode == 2
+					# Vapauta held-pikselit
+					_grav_release()
+					# Heitä jos hiiri liikkui
 					if mouse_velocity.length() > 0.5:
+						var was_vacuum := grav_gun_mode == 2
 						var throw_mult := 6.0 if was_vacuum else 4.0
 						var body_mult := 5.0 if was_vacuum else 3.0
 						var radius := grav_gun_vacuum_radius if was_vacuum else grav_gun_radius
@@ -712,19 +860,15 @@ func _handle_input() -> void:
 					grav_gun_mode = 0
 					mouse_velocity = Vector2.ZERO
 
-	# Päivitä laser_mode dynaamisesti aseen mukaan
-	laser_mode = (current_weapon == Weapon.LASER)
+	# laser_mode pois käytöstä (shader-efekti poistettu)
+	laser_mode = false
 
 	# Rakennustilan klikkaus — vain kun ei lukossa
 	if left_just and build_mode != BUILD_NONE and not block_paint:
 		var coords := _mouse_to_grid()
 		if coords.x >= 0:
 			var grid_pos := Vector2(coords)
-			if build_mode == BUILD_SPAWNER:
-				_place_spawner(grid_pos)
-				# Jää spawner-moodiin — käyttäjä vaihtaa itse pois
-				block_paint = true
-			elif build_mode == BUILD_CONVEYOR_START:
+			if build_mode == BUILD_CONVEYOR_START:
 				conveyor_start_pos = _snap_to_belt_end(_snap_to_grid(grid_pos))
 				build_mode = BUILD_CONVEYOR_END
 				block_paint = true
@@ -753,6 +897,12 @@ func _handle_input() -> void:
 				_create_wall(wall_start_pos, end_pos)
 				# Jää seinä-moodiin — valmis piirtämään seuraavan
 				build_mode = BUILD_WALL_START
+				block_paint = true
+			elif build_mode == BUILD_MONEY_EXIT:
+				_place_money_exit(grid_pos)
+				block_paint = true
+			elif build_mode == BUILD_CRUSHER:
+				_place_crusher(grid_pos)
 				block_paint = true
 
 	if left_pressed and not block_paint and not laser_mode and build_mode == BUILD_NONE:
@@ -791,11 +941,9 @@ func _handle_explosion_input(event: InputEvent) -> void:
 			explosion_size = maxi(explosion_size - 1, 0)
 			print("Räjähdyskoko: %d (r=%d)" % [explosion_size, EXPLOSION_RADII[explosion_size]])
 		elif not event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			zoom_index = mini(zoom_index + 1, ZOOM_LEVELS.size() - 1)
-			target_zoom = ZOOM_LEVELS[zoom_index]
+			target_zoom = clampf(target_zoom * 1.2, 1.0, 10.0)
 		elif not event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			zoom_index = maxi(zoom_index - 1, 0)
-			target_zoom = ZOOM_LEVELS[zoom_index]
+			target_zoom = clampf(target_zoom / 1.2, 1.0, 10.0)
 
 
 func _mouse_to_grid() -> Vector2i:
@@ -809,6 +957,20 @@ func _mouse_to_grid() -> Vector2i:
 	return Vector2i(gx, gy)
 
 
+func set_palette(palette: Array) -> void:
+	# Vaihda väripaletti välittömästi
+	current_palette = palette
+	shader_mat.set_shader_parameter("mat_colors", palette)
+
+
+func lerp_palette(from_palette: Array, to_palette: Array, t: float) -> void:
+	# Interpoloi kahden paletin välillä — t: 0.0 = from, 1.0 = to
+	var blended: Array = []
+	for i in range(from_palette.size()):
+		blended.append(from_palette[i].lerp(to_palette[i], t))
+	shader_mat.set_shader_parameter("mat_colors", blended)
+
+
 func clear_world() -> void:
 	grid.fill(0)
 	for i in TOTAL:
@@ -817,7 +979,6 @@ func clear_world() -> void:
 	# Nollaa fysiikkamaailma
 	physics_world = PhysicsWorld.new()
 	physics_initialized = false
-	_clear_chickens()
 	_clear_conveyors()
 	_clear_buildings()
 	building_pixels.clear()
@@ -829,69 +990,193 @@ func clear_world() -> void:
 # === SCREENSHAKE ===
 
 func _update_screenshake(delta: float) -> void:
+	# Fyysinen shake (recoil) — pienenee nopeasti
 	if trauma > 0.0:
-		trauma = maxf(trauma - delta * 1.5, 0.0)
+		trauma = maxf(trauma - delta * 4.0, 0.0)
 		var shake_amount := trauma * trauma
-		var max_px := 8.0
+		var max_px := 2.0
 		shake_offset.x = randf_range(-1.0, 1.0) * max_px * shake_amount
 		shake_offset.y = randf_range(-1.0, 1.0) * max_px * shake_amount
 	else:
 		shake_offset = Vector2.ZERO
+	# CA flash (osumasta) — vääntyy ruutu ilman fyysistä heilumista
+	if ca_flash > 0.0:
+		ca_flash = maxf(ca_flash - delta * 5.0, 0.0)
+	shader_mat.set_shader_parameter("shake_intensity", ca_flash)
+	# Impakti-CA haipuu nopeasti
+	if impact_intensity > 0.0:
+		impact_intensity = maxf(impact_intensity - delta * 6.0, 0.0)
+	shader_mat.set_shader_parameter("impact_intensity", impact_intensity)
+	shader_mat.set_shader_parameter("impact_uv", impact_uv)
+	shader_mat.set_shader_parameter("impact_type", impact_type_val)
 
 
 # === KAMERA / ZOOM ===
 
 func _update_camera(delta: float) -> void:
-	# Pehmeä zoom-interpolaatio
-	zoom_level = lerpf(zoom_level, target_zoom, zoom_smooth * delta)
-
 	var viewport_size := get_viewport_rect().size
 	if viewport_size.x <= 0.0:
 		return
-
-	# TextureRect:n koko pysyy viewport-kokoisena (scale hoitaa zoomauksen)
 	size = viewport_size
 
-	if zoom_level <= 1.01:
-		# Ei zoomia — täysi näkymä, nollaa offset
+	if god_mode:
+		# God mode — WASD liikuttaa kameraa vapaasti
+		var spd := 300.0 / zoom_level
+		if Input.is_key_pressed(KEY_SHIFT): spd *= 3.0
+		var dir := Vector2.ZERO
+		if Input.is_key_pressed(KEY_A): dir.x -= 1.0
+		if Input.is_key_pressed(KEY_D): dir.x += 1.0
+		if Input.is_key_pressed(KEY_W): dir.y -= 1.0
+		if Input.is_key_pressed(KEY_S): dir.y += 1.0
+		cam_vel = cam_vel.lerp(dir * spd, 12.0 * delta)
+		cam_grid_pos += cam_vel * delta
+		cam_grid_pos.x = clampf(cam_grid_pos.x, 0.0, float(W))
+		cam_grid_pos.y = clampf(cam_grid_pos.y, 0.0, float(SIM_HEIGHT))
+	else:
+		# Player mode — kamera seuraa pelaajaa
+		cam_vel = Vector2.ZERO
+		cam_grid_pos = player.position
+
+	# Portaaton zoom — lerp kohti target_zoom
+	zoom_level = lerpf(zoom_level, target_zoom, 15.0 * delta)
+
+	if zoom_level <= 1.01 and target_zoom <= 1.01:
 		scale = Vector2.ONE
 		position = shake_offset
 		camera_offset = Vector2.ZERO
 		return
 
-	# Pelaajan sijainti normalisoituna (0-1)
-	var p_pos: Vector2 = player.position
-	var player_nx: float = p_pos.x / float(W)
-	var player_ny: float = p_pos.y / float(SIM_HEIGHT)
+	# Laske offset niin että cam_grid_pos on ruudun keskellä
+	var nx: float = cam_grid_pos.x / float(W)
+	var ny: float = cam_grid_pos.y / float(SIM_HEIGHT)
+	var ox: float = viewport_size.x * 0.5 - nx * viewport_size.x * zoom_level
+	var oy: float = viewport_size.y * 0.5 - ny * viewport_size.y * zoom_level
+	ox = clampf(ox, viewport_size.x - viewport_size.x * zoom_level, 0.0)
+	oy = clampf(oy, viewport_size.y - viewport_size.y * zoom_level, 0.0)
+	camera_offset = Vector2(ox, oy)
 
-	# Pivot-piste: pelaajan sijainti pikseleinä viewportissa
-	var pivot_x: float = player_nx * viewport_size.x
-	var pivot_y: float = player_ny * viewport_size.y
-
-	# Zoom: skaalaa viewport_size * zoom_level, pelaaja keskelle
-	# position = viewport_center - pivot * zoom
-	var target_x: float = viewport_size.x * 0.5 - pivot_x * zoom_level
-	var target_y: float = viewport_size.y * 0.5 - pivot_y * zoom_level
-
-	# Rajaa ettei mene kartan ulkopuolelle
-	var max_offset_x: float = 0.0
-	var min_offset_x: float = viewport_size.x - viewport_size.x * zoom_level
-	var max_offset_y: float = 0.0
-	var min_offset_y: float = viewport_size.y - viewport_size.y * zoom_level
-	target_x = clampf(target_x, min_offset_x, max_offset_x)
-	target_y = clampf(target_y, min_offset_y, max_offset_y)
-
-	# Pehmeä kameran liike
-	camera_offset.x = lerpf(camera_offset.x, target_x, zoom_smooth * delta)
-	camera_offset.y = lerpf(camera_offset.y, target_y, zoom_smooth * delta)
-
-	# Aseta transform
 	scale = Vector2(zoom_level, zoom_level)
 	position = camera_offset + shake_offset * zoom_level
 
 
 func add_trauma(amount: float) -> void:
 	trauma = minf(trauma + amount, 1.0)
+
+
+
+func _update_visibility_map() -> void:
+	# Jos thread vielä pyörii, älä käynnistä uutta
+	if _vis_thread != null and _vis_thread.is_alive():
+		return
+	# Hae edellisen threadin tulos jos valmis
+	if _vis_thread != null:
+		_vis_thread.wait_to_finish()
+		_vis_thread = null
+		if _vis_result.size() == W * SIM_HEIGHT:
+			visibility_image.set_data(W, SIM_HEIGHT, false, Image.FORMAT_R8, _vis_result)
+			visibility_tex.update(visibility_image)
+	# Käynnistä uusi laskenta threadissa
+	var grid_snapshot := grid.duplicate()
+	_vis_thread = Thread.new()
+	_vis_thread.start(_bfs_thread.bind(grid_snapshot))
+
+func _bfs_thread(g: PackedByteArray) -> void:
+	var dist := PackedByteArray()
+	dist.resize(W * SIM_HEIGHT)
+	dist.fill(255)
+	var queue := PackedInt32Array()
+	queue.resize(W * SIM_HEIGHT)
+	var q_head := 0
+	var q_tail := 0
+	# Irtomateriaalit läpäisevät valoa — eivät luo täyttä varjoa
+	# EMPTY=0, SAND=1, WATER=2, FIRE=5, OIL=6, STEAM=7, ASH=8, WOOD_FALLING=9
+	# Siemenet: joka sarakkeessa skannaa ylhäältä alas kunnes osuu kiinteään
+	# (maailma ei ala y=0:sta, pintamaa voi olla missä tahansa)
+	for x in range(W):
+		for y in range(SIM_HEIGHT):
+			var idx := y * W + x
+			var m := int(g[idx])
+			if m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9:
+				dist[idx] = 0
+				queue[q_tail] = idx
+				q_tail += 1
+			else:
+				break  # Ensimmäinen kiinteä pikseli — lopeta tämä sarake
+	# BFS läpinäkyvien pikselien läpi (tyhjät + irtomateriaalit)
+	while q_head < q_tail:
+		var idx := queue[q_head]
+		q_head += 1
+		var d := int(dist[idx])
+		if d >= 250:
+			continue
+		var x := idx % W
+		var y := idx / W
+		if x > 0:
+			var n := idx - 1
+			var m := int(g[n])
+			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
+				dist[n] = 0
+				queue[q_tail] = n
+				q_tail += 1
+		if x < W - 1:
+			var n := idx + 1
+			var m := int(g[n])
+			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
+				dist[n] = 0
+				queue[q_tail] = n
+				q_tail += 1
+		if y > 0:
+			var n := idx - W
+			var m := int(g[n])
+			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
+				dist[n] = 0
+				queue[q_tail] = n
+				q_tail += 1
+		if y < SIM_HEIGHT - 1:
+			var n := idx + W
+			var m := int(g[n])
+			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
+				dist[n] = 0
+				queue[q_tail] = n
+				q_tail += 1
+	# Vaihe 2: Levitä taivasyhteydestä 25px kaikkeen (kivet + eristetyt alueet)
+	const MAX_VIS := 25
+	var q2 := PackedInt32Array()
+	q2.resize(W * SIM_HEIGHT)
+	var q2h := 0
+	var q2t := 0
+	for i in range(W * SIM_HEIGHT):
+		if dist[i] == 0:
+			q2[q2t] = i
+			q2t += 1
+	while q2h < q2t:
+		var idx := q2[q2h]; q2h += 1
+		var d := int(dist[idx])
+		if d >= MAX_VIS:
+			continue
+		var x := idx % W
+		var y := idx / W
+		if x > 0 and dist[idx - 1] == 255:
+			dist[idx - 1] = d + 1
+			q2[q2t] = idx - 1; q2t += 1
+		if x < W - 1 and dist[idx + 1] == 255:
+			dist[idx + 1] = d + 1
+			q2[q2t] = idx + 1; q2t += 1
+		if y > 0 and dist[idx - W] == 255:
+			dist[idx - W] = d + 1
+			q2[q2t] = idx - W; q2t += 1
+		if y < SIM_HEIGHT - 1 and dist[idx + W] == 255:
+			dist[idx + W] = d + 1
+			q2[q2t] = idx + W; q2t += 1
+	_vis_result = dist
+
+func add_ca_flash(amount: float) -> void:
+	ca_flash = maxf(ca_flash, amount)  # Ei kumuloidu — ottaa suurimman arvon
+
+func set_impact(world_pos: Vector2, intensity: float, itype: int) -> void:
+	impact_uv = Vector2(world_pos.x / float(W), world_pos.y / float(SIM_HEIGHT))
+	impact_intensity = maxf(impact_intensity, intensity)
+	impact_type_val = itype
 
 
 # === RÄJÄHDYKSET ===
@@ -917,11 +1202,19 @@ func explode(cx: int, cy: int, radius: int) -> void:
 
 			if mat == MAT_EMPTY:
 				continue
+			# Suojatut rakennuspikselit eivät tuhoudu räjähdyksessä
+			if building_pixels.has(idx):
+				continue
 
 			if dist2 <= inner_r2:
 				# Sisäalue: tyhjennä kokonaan
 				if mat == MAT_OIL:
 					grid[idx] = MAT_FIRE  # Öljy syttyy!
+				elif mat == MAT_STONE:
+					# Kivi hajoaa: soraa
+					grid[idx] = MAT_GRAVEL
+					if physics_world.body_map.size() > idx:
+						physics_world.body_map[idx] = 0
 				else:
 					grid[idx] = MAT_EMPTY
 					# Poista body_map-merkintä
@@ -930,7 +1223,7 @@ func explode(cx: int, cy: int, radius: int) -> void:
 			else:
 				# Ulkoreuna: debris-konversio
 				if mat == MAT_STONE:
-					grid[idx] = MAT_SAND  # Kivi → irtonainen hiekka
+					grid[idx] = MAT_GRAVEL  # Kivi → sora
 					if physics_world.body_map.size() > idx:
 						physics_world.body_map[idx] = 0
 				elif mat == MAT_WOOD:
@@ -946,48 +1239,84 @@ func explode(cx: int, cy: int, radius: int) -> void:
 	# Etsi irronneet kivipalat räjähdyksen ympäriltä → luo rigid bodyt
 	_detect_detached_stone(cx, cy, radius)
 
-	# Screenshake
-	var trauma_amount := EXPLOSION_TRAUMA[clampi(explosion_size, 0, 3)]
-	add_trauma(trauma_amount)
+	# Räjähdys: CA-flash skaalautuu koon mukaan (ei fyysistä shakea)
+	var ca_amount := EXPLOSION_TRAUMA[clampi(explosion_size, 0, 3)]
+	add_ca_flash(ca_amount)
 
 	# Räjähdysflash
 	flash_pos = Vector2(float(cx) / float(W), float(cy) / float(SIM_HEIGHT))
 	flash_radius = float(radius) / float(W) * 1.5
 	flash_timer = FLASH_DURATION
 
-	# Tapa kanat räjähdysalueella
-	var exp_center := Vector2(float(cx), float(cy))
-	for chicken in chickens:
-		if chicken.alive:
-			var dist: float = chicken.grid_pos.distance_to(exp_center)
-			if dist < float(radius) * 1.3:
-				chicken.kill()
-
 	paint_pending = true
 
 
 # === LASERI ===
 
+func _player_adjacent_dig_pos(target_grid: Vector2i, reach: int) -> Vector2i:
+	if god_mode:
+		return target_grid
+	var player_center := Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
+	var target_f := Vector2(target_grid)
+	var dist := player_center.distance_to(target_f)
+	if dist <= float(reach):
+		return target_grid
+	var dir := (target_f - player_center).normalized()
+	return Vector2i(player_center + dir * float(reach))
+
+
+func _bullet_impact(cx: int, cy: int) -> void:
+	# Pieni tuhoalue — 2px säde
+	const IMPACT_R := 2
+	for dy in range(-IMPACT_R, IMPACT_R + 1):
+		var ny := cy + dy
+		if ny < 0 or ny >= SIM_HEIGHT:
+			continue
+		for dx in range(-IMPACT_R, IMPACT_R + 1):
+			if dx * dx + dy * dy > IMPACT_R * IMPACT_R:
+				continue
+			var nx := cx + dx
+			if nx < 0 or nx >= W:
+				continue
+			var idx := ny * W + nx
+			if building_pixels.has(idx):
+				continue
+			var mat := grid[idx]
+			if mat != MAT_EMPTY:
+				if mat == MAT_STONE:
+					# Kivi hajoaa luodista: soraa
+					grid[idx] = MAT_GRAVEL
+				else:
+					grid[idx] = MAT_EMPTY
+					if physics_world.body_map.size() > idx:
+						physics_world.body_map[idx] = 0
+	add_trauma(0.03)   # Mikroskooppinen osumashake
+	add_ca_flash(0.7)
+	set_impact(Vector2(cx, cy), 0.75, 0)
+	paint_pending = true
+
+
 func _fire_rocket_at_cursor() -> void:
-	if rocket_cooldown > 0.0 or flying_pixels.size() >= flying_max_count:
+	if rocket_cooldown > 0.0:
 		return
 	var mp := get_local_mouse_position()
 	var tex_size := size
 	var mouse_grid := Vector2(mp.x / tex_size.x * float(W), mp.y / tex_size.y * float(SIM_HEIGHT))
-	var spawn_pos := Vector2(player.get_grid_pos())
-	var dir := (mouse_grid - spawn_pos).normalized()
+	var origin := cam_grid_pos if god_mode else Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
+	var dir := (mouse_grid - origin).normalized()
 	if dir.length_squared() < 0.01:
 		dir = Vector2(1, 0)
-	flying_pixels.append({
-		"pos": spawn_pos,
-		"vel": dir * ROCKET_SPEED,
-		"mat": MAT_STONE,
-		"seed": randi() % 256,
-		"age": 0.0,
-		"type": "rocket"
-	})
-	rocket_cooldown = ROCKET_COOLDOWN_TIME
-	print("Raketti laukaistu suuntaan: %.2f,%.2f" % [dir.x, dir.y])
+	if flying_pixels.size() < flying_max_count:
+		flying_pixels.append({
+			"pos": origin + dir * 8.0,
+			"vel": dir * 180.0,
+			"mat": MAT_STONE,
+			"seed": randi() % 256,
+			"age": 0.0,
+			"type": "rocket"
+		})
+	add_trauma(0.25)
+	rocket_cooldown = 0.12
 
 
 func _fire_laser(start: Vector2i, end: Vector2i) -> void:
@@ -1020,11 +1349,13 @@ func _fire_laser(start: Vector2i, end: Vector2i) -> void:
 			var mat := grid[idx]
 			if mat == MAT_EMPTY:
 				continue
+			# Suojatut rakennuspikselit eivät tuhoudu laserilla
+			if building_pixels.has(idx):
+				continue
 			match mat:
 				MAT_STONE:
-					grid[idx] = MAT_EMPTY
-					if physics_world.body_map.size() > idx:
-						physics_world.body_map[idx] = 0
+					# Kivi hajoaa laserilla: soraa
+					grid[idx] = MAT_GRAVEL
 					has_stone = true
 				MAT_WOOD, MAT_WOOD_FALLING:
 					grid[idx] = MAT_FIRE
@@ -1044,18 +1375,9 @@ func _fire_laser(start: Vector2i, end: Vector2i) -> void:
 		var search_radius := int(line_len / 2.0) + LASER_WIDTH + 5
 		_detect_detached_stone(center_x, center_y, search_radius)
 
-	# Tapa kanat viivan lähellä
-	var line_start := Vector2(start)
-	var line_end_v := Vector2(end)
-	for chicken in chickens:
-		if chicken.alive:
-			var cp := _closest_point_on_line(chicken.grid_pos, line_start, line_end_v)
-			if chicken.grid_pos.distance_to(cp) < float(LASER_WIDTH + 2):
-				chicken.kill()
-
 	# Visuaaliset efektit
 	laser_beam_timer = LASER_BEAM_DURATION
-	add_trauma(0.3)
+	add_trauma(0.06)  # Pieni recoil laserille
 
 	# Flash viivan keskipisteessä
 	var mid_x := float(start.x + end.x) * 0.5
@@ -1106,10 +1428,10 @@ func regenerate_world() -> void:
 	for i in TOTAL:
 		color_seed[i] = randi() % 256
 	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
+	shader_mat.set_shader_parameter("surface_y_norm", WorldGen.surface_height_ratio)
 	paint_pending = true
 	physics_world = PhysicsWorld.new()
 	physics_initialized = false
-	_clear_chickens()
 	_clear_conveyors()
 	_clear_buildings()
 	build_mode = BUILD_NONE
@@ -1264,6 +1586,16 @@ func _input(event: InputEvent) -> void:
 					build_menu_visible = false
 					block_paint = true
 					print("Rakennustila: SEINÄ — klikkaa alkupiste")
+				KEY_7:
+					build_mode = BUILD_MONEY_EXIT
+					build_menu_visible = false
+					block_paint = true
+					print("Rakennustila: MONEY EXIT — klikkaa paikkaa")
+				KEY_8:
+					build_mode = BUILD_CRUSHER
+					build_menu_visible = false
+					block_paint = true
+					print("Rakennustila: MURSKAAJA — klikkaa paikkaa")
 				KEY_ESCAPE, KEY_B:
 					build_menu_visible = false
 					build_mode = BUILD_NONE
@@ -1291,34 +1623,29 @@ func _input(event: InputEvent) -> void:
 				# Suorituskykytesti: generoi maailma → räjäytä 3 kertaa → mittaa frame-spiikit
 				_run_perf_explosion_test()
 			KEY_Q:
-				if current_weapon != Weapon.GRAVITY_GUN:
-					grav_gun_mode = 0
-				if current_weapon != Weapon.LASER:
-					laser_dragging = false
-				current_weapon = (current_weapon + 1) % 5 as Weapon
-				var wnames := ["Hakku", "Megapora", "Laseri", "Raketinheitin", "Gravity Gun"]
-				print("Ase: %s" % wnames[current_weapon])
+				god_mode = not god_mode
+				if god_mode:
+					cam_grid_pos = player.position
+					cam_vel = Vector2.ZERO
+					print("God mode ON — WASD liikuttaa kameraa")
+				else:
+					print("Player mode ON")
 			KEY_X:
 				current_weapon = Weapon.PICKAXE
 				grav_gun_mode = 0
 				laser_dragging = false
 				print("Ase: Hakku")
 			KEY_L:
-				current_weapon = Weapon.LASER
+				current_weapon = Weapon.RIFLE
 				grav_gun_mode = 0
 				laser_dragging = false
-				print("Ase: Laseri")
+				print("Ase: Rynnäkkäkivääri")
 			KEY_C: clear_world()
 			KEY_R: regenerate_world()
 			KEY_ESCAPE:
 				if build_mode != BUILD_NONE:
 					build_mode = BUILD_NONE
 					print("Rakennustila peruttu")
-			KEY_W:
-				build_mode = BUILD_WALL_START
-				build_menu_visible = false
-				block_paint = true
-				print("Rakennustila: SEINÄ — klikkaa alkupiste")
 			KEY_B:
 				build_menu_visible = not build_menu_visible
 				if build_menu_visible:
@@ -1327,9 +1654,13 @@ func _input(event: InputEvent) -> void:
 					print("Rakennusvalikko suljettu")
 			KEY_F:
 				_fire_rocket_at_cursor()
+			KEY_O:
+				darkness_mode = !darkness_mode
+				shader_mat.set_shader_parameter("darkness_mode", int(darkness_mode))
+				print("Darkness mode: %s" % ("ON" if darkness_mode else "OFF"))
 			KEY_F5: save_world()
 			KEY_F9: load_world()
-			KEY_P: _run_perf_explosion_test()
+			KEY_I: _save_ai_screenshot()
 
 
 func _paint(cx: int, cy: int, mat: int) -> void:
@@ -1363,6 +1694,7 @@ func _cut(cx: int, cy: int) -> void:
 			return
 		pickaxe_cooldown = PICKAXE_COOLDOWN_TIME
 		add_trauma(0.05)
+		set_impact(Vector2(cx, cy), 0.5, 2)
 
 	var cut_size: int = TOOL_DATA[current_tool]["radius"] / 2  # Kaivaustyökalun säde
 	var changed := false
@@ -1381,16 +1713,25 @@ func _cut(cx: int, cy: int) -> void:
 				var mat := grid[idx]
 				# Megapora kaivaa myös mullan ja putoavan puun
 				if current_tool == Tool.MEGA_DRILL:
-					if mat == MAT_STONE or mat == MAT_DIRT or mat == MAT_IRON_ORE \
+					if mat == MAT_STONE:
+						# Kivi hajoaa: soraa megaporalla
+						grid[idx] = MAT_GRAVEL
+						changed = true
+					elif mat == MAT_DIRT or mat == MAT_IRON_ORE \
 							or mat == MAT_GOLD_ORE or mat == MAT_WOOD or mat == MAT_WOOD_FALLING:
 						grid[idx] = MAT_EMPTY
 						changed = true
 				else:
-					if mat == MAT_STONE or mat == MAT_WOOD or mat == MAT_IRON_ORE or mat == MAT_GOLD_ORE:
+					if mat == MAT_STONE:
+						# Kivi hajoaa hakulla: soraa
+						grid[idx] = MAT_GRAVEL
+						changed = true
+					elif mat == MAT_WOOD or mat == MAT_IRON_ORE or mat == MAT_GOLD_ORE:
 						grid[idx] = MAT_EMPTY
 						changed = true
 	if changed:
 		paint_pending = true
+		visibility_dirty = true
 		# check_damage hoitaa kappaleiden halkeamisen automaattisesti
 
 
@@ -1455,9 +1796,8 @@ func _simulate_gpu() -> void:
 		push.encode_u32(24, grav_gun_pos.y if grav_gun_mode > 0 else 0)
 		push.encode_u32(28, grav_gun_mode)
 		push.encode_u32(32, grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius)
-		# Padding loppu (36-47)
-		push.encode_u32(36, 0)
-		push.encode_u32(40, 0)
+		push.encode_u32(36, 0)   # käyttämätön
+		push.encode_u32(40, 0)   # käyttämätön
 		push.encode_u32(44, 0)
 
 		rd.compute_list_bind_compute_pipeline(cl, pipeline)
@@ -1502,9 +1842,9 @@ func _simulate_gpu() -> void:
 
 	# Mittaa GPU-aika ja säädä passimäärää adaptiivisesti
 	gpu_time_ms = float(Time.get_ticks_usec() - t0) / 1000.0
-	if gpu_time_ms > 12.0 and gpu_passes > 2:
+	if gpu_time_ms > 12.0 and gpu_passes > 4:
 		gpu_passes -= 1  # Liian hidas → vähemmän passeja
-	elif gpu_time_ms < 6.0 and gpu_passes < 4:
+	elif gpu_time_ms < 6.0 and gpu_passes < 12:
 		gpu_passes += 1  # Varaa riittää → enemmän passeja
 
 
@@ -1556,6 +1896,8 @@ func _upload_render() -> void:
 		shader_mat.set_shader_parameter("flash_intensity", 0.0)
 	# Gravity gun -efekti renderöintishaderille (moodi: 0=off, 1=normaali, 2=vakuumi)
 	shader_mat.set_shader_parameter("grav_gun_active", grav_gun_mode)
+	# Held-suhde: täyttöaste held-listan koon perusteella
+	shader_mat.set_shader_parameter("grav_fill_ratio", clampf(float(grav_held.size()) / float(GRAV_MAX_HELD), 0.0, 1.0))
 	if grav_gun_mode > 0:
 		var render_radius := grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius
 		shader_mat.set_shader_parameter("grav_gun_uv", Vector2(
@@ -1563,35 +1905,22 @@ func _upload_render() -> void:
 			float(grav_gun_pos.y) / float(SIM_HEIGHT)
 		))
 		shader_mat.set_shader_parameter("grav_gun_radius", float(render_radius) / float(W))
-	# Pelaaja-renderöinti
-	var pp: Vector2i = player.get_grid_pos()
-	shader_mat.set_shader_parameter("player_pos", Vector2(
-		float(pp.x) / float(W), float(pp.y) / float(SIM_HEIGHT)
-	))
-	shader_mat.set_shader_parameter("player_size", Vector2(
-		float(PlayerScript.WIDTH) / float(W), float(PlayerScript.HEIGHT) / float(SIM_HEIGHT)
-	))
-	shader_mat.set_shader_parameter("player_facing_right", 1 if player.facing_right else 0)
-	shader_mat.set_shader_parameter("player_in_water", 1 if player.in_water else 0)
-
-	# Laseri-efekti
-	var laser_active := laser_beam_timer > 0 or laser_dragging
-	if laser_active:
-		var ls := laser_start if (laser_beam_timer > 0 or laser_dragging) else Vector2i.ZERO
-		var le := laser_end if (laser_beam_timer > 0 or laser_dragging) else Vector2i.ZERO
-		shader_mat.set_shader_parameter("laser_start_uv", Vector2(
-			float(ls.x) / float(W), float(ls.y) / float(SIM_HEIGHT)
+	# Pelaaja-renderöinti (piilotetaan god modessa)
+	if not god_mode:
+		var pp: Vector2i = player.get_grid_pos()
+		shader_mat.set_shader_parameter("player_pos", Vector2(
+			float(pp.x) / float(W), float(pp.y) / float(SIM_HEIGHT)
 		))
-		shader_mat.set_shader_parameter("laser_end_uv", Vector2(
-			float(le.x) / float(W), float(le.y) / float(SIM_HEIGHT)
+		shader_mat.set_shader_parameter("player_size", Vector2(
+			float(PlayerScript.WIDTH) / float(W), float(PlayerScript.HEIGHT) / float(SIM_HEIGHT)
 		))
-		if laser_beam_timer > 0:
-			shader_mat.set_shader_parameter("laser_intensity", float(laser_beam_timer) / float(LASER_BEAM_DURATION))
-		else:
-			# Esikatselu vetäessä
-			shader_mat.set_shader_parameter("laser_intensity", 0.3)
+		shader_mat.set_shader_parameter("player_facing_right", 1 if player.facing_right else 0)
+		shader_mat.set_shader_parameter("player_in_water", 1 if player.in_water else 0)
 	else:
-		shader_mat.set_shader_parameter("laser_intensity", 0.0)
+		shader_mat.set_shader_parameter("player_size", Vector2.ZERO)
+
+	# Laser-efekti poistettu käytöstä
+	shader_mat.set_shader_parameter("laser_intensity", 0.0)
 
 
 # Vedä irtonaiset pikselit kohti pistettä (CPU, ei duplikaatiota)
@@ -1663,6 +1992,148 @@ func _pull_pixels(cx: int, cy: int, radius: int) -> void:
 
 	if not pixels.is_empty():
 		paint_pending = true
+
+
+# Tyhjentää edellisellä framella kirjoitetut held-pikselit gridistä
+func _grav_erase_held() -> void:
+	for idx in grav_held_written:
+		if idx >= 0 and idx < TOTAL and grid[idx] == MAT_HELD:
+			grid[idx] = MAT_EMPTY
+	grav_held_written.clear()
+
+
+# Bresenham-näköyhteystarkistus: palauttaa true jos polku (x0,y0)→(x1,y1) on vapaa kiinteistä
+func _grav_has_los(x0: int, y0: int, x1: int, y1: int) -> bool:
+	var dx := absi(x1 - x0)
+	var dy := absi(y1 - y0)
+	var sx := 1 if x0 < x1 else -1
+	var sy := 1 if y0 < y1 else -1
+	var err := dx - dy
+	var x := x0
+	var y := y0
+	while true:
+		if x == x1 and y == y1:
+			return true
+		if x < 0 or x >= W or y < 0 or y >= SIM_HEIGHT:
+			return false
+		# Tarkista välipisteet (ei alku- eikä loppupistettä)
+		if not (x == x0 and y == y0):
+			var m := grid[y * W + x]
+			# Vain kova rakenne estää — ei dirt/coal (maastomateriaali eikä seinä)
+			if m == MAT_STONE or m == MAT_WOOD or m == MAT_GLASS or \
+					m == MAT_IRON or m == MAT_GOLD or m == MAT_IRON_ORE or \
+					m == MAT_GOLD_ORE:
+				return false
+		var e2 := 2 * err
+		if e2 > -dy:
+			err -= dy
+			x += sx
+		if e2 < dx:
+			err += dx
+			y += sy
+	return true
+
+
+# Nappaa lähellä kursoria olevat irtonaiset pikselit held-listaan
+# Skannaa r+2 säteellä mutta tallentaa offsetin max r:n pinnalle —
+# näin palloa vasten pysähtyneeet pikselit pääsevät mukaan eivätkä jää juuttumaan
+func _grav_capture() -> void:
+	if grav_held.size() >= GRAV_MAX_HELD:
+		return
+	var cx := grav_gun_pos.x
+	var cy := grav_gun_pos.y
+	# Capture-säde ~1/3 pull-säteestä: pikselit lentävät ensin GPU-vedolla,
+	# CPU nappaa ne vasta kun ovat tarpeeksi lähellä → kompakti pallo, ei teleportti
+	var r := (grav_gun_vacuum_radius / 3) if grav_gun_mode == 2 else (grav_gun_radius / 3)
+	var scan_r := r + 2  # Skannaa hieman laajemmin — nappaa HELD-pallon ulkopuolelle juuttuneet
+	for dy in range(-scan_r, scan_r + 1):
+		for dx in range(-scan_r, scan_r + 1):
+			var dist2 := dx * dx + dy * dy
+			if dist2 > scan_r * scan_r:
+				continue
+			var nx := cx + dx
+			var ny := cy + dy
+			if nx < 0 or nx >= W or ny < 0 or ny >= SIM_HEIGHT:
+				continue
+			var idx := ny * W + nx
+			var mat := grid[idx] & 0xFF
+			# Nappaa irtonaiset materiaalit (ei kiviä, puuta tms.)
+			if mat != MAT_EMPTY and mat != MAT_HELD and mat != MAT_STONE and mat != MAT_WOOD \
+					and mat != MAT_GLASS and mat != MAT_IRON and mat != MAT_GOLD \
+					and mat != MAT_IRON_ORE and mat != MAT_GOLD_ORE \
+					and mat != MAT_COAL and mat != MAT_DIRT:
+				# Näköyhteystarkistus: ei napata seinän läpi
+				if not _grav_has_los(cx, cy, nx, ny):
+					continue
+				grid[idx] = MAT_EMPTY
+				# Puristaa offsetin enintään r:n pinnalle — pallo pysyy kompaktina
+				var store_dx := dx
+				var store_dy := dy
+				if dist2 > r * r:
+					var dist := sqrt(float(dist2))
+					store_dx = int(float(dx) / dist * float(r))
+					store_dy = int(float(dy) / dist * float(r))
+				grav_held.append(Vector3i(mat, store_dx, store_dy))
+				if grav_held.size() >= GRAV_MAX_HELD:
+					return
+
+
+# Kirjoittaa held-pikselit palloksi kursoorin ympärille, sisältä ulospäin.
+# Alkuperäinen muoto unohdetaan — pikselit tiivistetään kompaktiksi palloksi.
+func _grav_write_held() -> void:
+	grav_held_written.clear()  # Tyhjennä aina ensin — muuten vapautus käyttää vanhoja positioita
+	var cx := grav_gun_pos.x
+	var cy := grav_gun_pos.y
+	var ball_r := grav_gun_vacuum_radius / 3 if grav_gun_mode == 2 else grav_gun_radius / 3
+
+	# Luo kaikki pallonsisäiset paikat ja järjestä lähimmät ensin
+	var slots: Array[Vector2i] = []
+	for dy in range(-ball_r, ball_r + 1):
+		for dx in range(-ball_r, ball_r + 1):
+			if dx * dx + dy * dy <= ball_r * ball_r:
+				slots.append(Vector2i(dx, dy))
+	slots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return a.x * a.x + a.y * a.y < b.x * b.x + b.y * b.y
+	)
+
+	var slot_i := 0
+	for h in grav_held:
+		# Etsi seuraava vapaa paikka pallossa
+		while slot_i < slots.size():
+			var s := slots[slot_i]
+			slot_i += 1
+			var nx := cx + s.x
+			var ny := cy + s.y
+			if nx < 0 or nx >= W or ny < 0 or ny >= SIM_HEIGHT:
+				continue
+			var nidx := ny * W + nx
+			var target := grid[nidx] & 0xFF
+			var solid := target == MAT_STONE or target == MAT_WOOD or \
+					target == MAT_GLASS or target == MAT_IRON or target == MAT_GOLD or \
+					target == MAT_IRON_ORE or target == MAT_GOLD_ORE or \
+					target == MAT_COAL or target == MAT_DIRT
+			if not solid and (target == MAT_EMPTY or target == MAT_HELD):
+				grid[nidx] = MAT_HELD
+				grav_held_written.append(nidx)
+				break
+
+
+# Vapauttaa kaikki held-pikselit gridiin (hiiren vapautus)
+# Skannaa gridin suoraan MAT_HELD-solujen löytämiseksi — ei riipu grav_held_written-synkasta
+func _grav_release() -> void:
+	# Kerää HELD-positiot suoraan gridistä (varma tapa löytää pallon nykyiset solut)
+	var held_positions: Array[int] = []
+	for i in TOTAL:
+		if grid[i] == MAT_HELD:
+			held_positions.append(i)
+			grid[i] = MAT_EMPTY
+	# Kirjoita materiaalit samoihin paikkoihin
+	for i in min(grav_held.size(), held_positions.size()):
+		grid[held_positions[i]] = grav_held[i].x
+	print("grav_release: held=%d positions=%d" % [grav_held.size(), held_positions.size()])
+	grav_held.clear()
+	grav_held_written.clear()
+	paint_pending = true
 
 
 # Heitä irtonaiset pikselit suuntaan (CPU, ei duplikaatiota)
@@ -1867,61 +2338,6 @@ func _detect_detached_stone(cx: int, cy: int, radius: int) -> void:
 					physics_world.body_map[p.y * W + p.x] = body.body_id
 
 
-# === KANAT JA SPAWNERIT ===
-
-func _update_chickens(delta: float) -> void:
-	var i := chickens.size() - 1
-	while i >= 0:
-		var chicken = chickens[i]
-		if not chicken.alive:
-			chicken.queue_free()
-			chickens.remove_at(i)
-		else:
-			chicken.update(delta, grid, W, SIM_HEIGHT)
-			# Liukuhihna-työntö
-			for belt in conveyors:
-				var push_x: float = belt.push_chicken(chicken.grid_pos, 3)
-				if push_x != 0.0:
-					chicken.grid_pos.x += push_x
-		i -= 1
-
-
-func _update_spawners(delta: float) -> void:
-	for spawner in spawners:
-		if spawner.update_spawner(delta):
-			_spawn_chicken(spawner.get_spawn_pos())
-
-
-func _spawn_chicken(pos: Vector2) -> void:
-	var ChickenScene := preload("res://scripts/chicken.gd")
-	var chicken = ChickenScene.new()
-	chicken.setup(chicken_texture, pos)
-	chicken_layer.add_child(chicken)
-	chickens.append(chicken)
-
-
-func _place_spawner(pos: Vector2) -> void:
-	var SpawnerScene := preload("res://scripts/chicken_spawner.gd")
-	var spawner = SpawnerScene.new()
-	spawner.setup(pos)
-	chicken_layer.add_child(spawner)
-	spawners.append(spawner)
-	print("Spawner asetettu: ", pos)
-
-
-func _clear_chickens() -> void:
-	for chicken in chickens:
-		chicken.queue_free()
-	chickens.clear()
-	for spawner in spawners:
-		spawner.queue_free()
-	spawners.clear()
-
-
-func get_chicken_count() -> int:
-	return chickens.size()
-
-
 # === LIUKUHIHNAT ===
 
 func _update_conveyors(delta: float) -> bool:
@@ -1944,7 +2360,7 @@ func _create_conveyor(start: Vector2, end: Vector2) -> void:
 	var belt = BeltScene.new()
 	belt.setup(Vector2i(start), Vector2i(end))
 	belt.build_floor(grid, color_seed, W, SIM_HEIGHT)
-	chicken_layer.add_child(belt)
+	building_layer.add_child(belt)
 	conveyors.append(belt)
 	_register_building_pixels(belt.floor_pixels)
 	paint_pending = true
@@ -2159,6 +2575,57 @@ func _update_build_preview() -> void:
 		var wall_pxs: Array[Vector2i] = _wall_pixels(wall_start_pos, end_pos)
 		build_preview.preview_pixels = wall_pxs
 		build_preview.is_valid = _check_placement_valid(wall_pxs)
+	elif build_mode == BUILD_MONEY_EXIT:
+		# Money exit: 12×10 siluetti, intake-aukko ylhäällä, EI output-aukkoa (alarivi kiinni)
+		const PREVIEW_EXIT_W := 12
+		const PREVIEW_EXIT_H := 10
+		const PREVIEW_EXIT_INTAKE_W := 6
+		var snapped := _snap_to_grid(mouse_pos)
+		var center := Vector2i(int(snapped.x), int(snapped.y))
+		var gp := Vector2i(center.x - PREVIEW_EXIT_W / 2, center.y - PREVIEW_EXIT_H / 2)
+		var intake_start_x := gp.x + (PREVIEW_EXIT_W - PREVIEW_EXIT_INTAKE_W) / 2
+		var preview_pxs: Array[Vector2i] = []
+		# Rivi 0: reunat + intake-aukko auki
+		for dx in PREVIEW_EXIT_W:
+			var px := gp.x + dx
+			if px < intake_start_x or px >= intake_start_x + PREVIEW_EXIT_INTAKE_W:
+				preview_pxs.append(Vector2i(px, gp.y))
+		# Rivit 1..H-2: täynnä
+		for dy in range(1, PREVIEW_EXIT_H - 1):
+			for dx in PREVIEW_EXIT_W:
+				preview_pxs.append(Vector2i(gp.x + dx, gp.y + dy))
+		# Rivi H-1: täysin kiinni (EI output-aukkoa)
+		for dx in PREVIEW_EXIT_W:
+			preview_pxs.append(Vector2i(gp.x + dx, gp.y + PREVIEW_EXIT_H - 1))
+		build_preview.preview_pixels = preview_pxs
+		build_preview.is_valid = _check_placement_valid(preview_pxs)
+	elif build_mode == BUILD_CRUSHER:
+		# Murskaaja: 12×10 siluetti, intake ylhäällä, output-aukko alhaalla (sama kuin furnace)
+		const PREVIEW_CRUSHER_W := 12
+		const PREVIEW_CRUSHER_H := 10
+		const PREVIEW_CRUSHER_INTAKE_W := 6
+		var snapped := _snap_to_grid(mouse_pos)
+		var center := Vector2i(int(snapped.x), int(snapped.y))
+		var gp := Vector2i(center.x - PREVIEW_CRUSHER_W / 2, center.y - PREVIEW_CRUSHER_H / 2)
+		var intake_start_x := gp.x + (PREVIEW_CRUSHER_W - PREVIEW_CRUSHER_INTAKE_W) / 2
+		var output_start_x := gp.x + (PREVIEW_CRUSHER_W - 4) / 2
+		var preview_pxs: Array[Vector2i] = []
+		# Rivi 0: reunat + intake-aukko auki
+		for dx in PREVIEW_CRUSHER_W:
+			var px := gp.x + dx
+			if px < intake_start_x or px >= intake_start_x + PREVIEW_CRUSHER_INTAKE_W:
+				preview_pxs.append(Vector2i(px, gp.y))
+		# Rivit 1..H-2: täynnä
+		for dy in range(1, PREVIEW_CRUSHER_H - 1):
+			for dx in PREVIEW_CRUSHER_W:
+				preview_pxs.append(Vector2i(gp.x + dx, gp.y + dy))
+		# Rivi H-1: output-aukko auki
+		for dx in PREVIEW_CRUSHER_W:
+			var px := gp.x + dx
+			if px < output_start_x or px >= output_start_x + 4:
+				preview_pxs.append(Vector2i(px, gp.y + PREVIEW_CRUSHER_H - 1))
+		build_preview.preview_pixels = preview_pxs
+		build_preview.is_valid = _check_placement_valid(preview_pxs)
 
 	build_preview.queue_redraw()
 
@@ -2174,7 +2641,7 @@ func _place_sand_mine(pos: Vector2) -> void:
 	var mine = SandMineScript.new()
 	mine.setup(Vector2i(pos))
 	mine.build_structure(grid, color_seed, W, SIM_HEIGHT)
-	chicken_layer.add_child(mine)
+	building_layer.add_child(mine)
 	sand_mines.append(mine)
 	_register_building_pixels(mine.structure_pixels)
 	paint_pending = true
@@ -2186,7 +2653,7 @@ func _place_furnace(pos: Vector2) -> void:
 	var furnace = FurnaceScript.new()
 	furnace.setup(Vector2i(pos))
 	furnace.build_structure(grid, color_seed, W, SIM_HEIGHT)
-	chicken_layer.add_child(furnace)
+	building_layer.add_child(furnace)
 	furnaces.append(furnace)
 	_register_building_pixels(furnace.structure_pixels)
 	paint_pending = true
@@ -2255,6 +2722,76 @@ func _update_sand_mines(delta: float) -> bool:
 	return modified
 
 
+func _place_money_exit(pos: Vector2) -> void:
+	var me = MoneyExit.new()
+	me.setup(Vector2i(pos))
+	me.build_structure(grid, color_seed, W, SIM_HEIGHT)
+	building_layer.add_child(me)
+	money_exits.append(me)
+	_register_building_pixels(me.structure_pixels)
+	paint_pending = true
+	print("Money exit asetettu: ", pos)
+
+
+func _update_money_exits(delta: float) -> bool:
+	var modified := false
+	var alive: Array = []
+	for me in money_exits:
+		var earned: int = me.update_exit(grid, color_seed, W, SIM_HEIGHT, delta)
+		if earned > 0:
+			money += earned
+			modified = true
+		if me.broken:
+			_unregister_building_pixels(me.structure_pixels)
+			me.queue_free()
+		else:
+			alive.append(me)
+	money_exits = alive
+	return modified
+
+
+func _place_crusher(pos: Vector2) -> void:
+	var c = Crusher.new()
+	c.setup(Vector2i(pos))
+	c.build_structure(grid, color_seed, W, SIM_HEIGHT)
+	building_layer.add_child(c)
+	crushers.append(c)
+	_register_building_pixels(c.structure_pixels)
+	paint_pending = true
+	print("Murskaaja asetettu: ", pos)
+
+
+func _update_crushers(delta: float) -> bool:
+	var modified := false
+	var alive: Array = []
+	for c in crushers:
+		if c.update_crusher(grid, color_seed, W, SIM_HEIGHT, delta):
+			modified = true
+		if c.output_ready:
+			c.output_ready = false
+			_spawn_crusher_output(c.output_drop_pos, c.output_material, c.output_amount)
+			modified = true
+		if c.broken:
+			_unregister_building_pixels(c.structure_pixels)
+			c.queue_free()
+		else:
+			alive.append(c)
+	crushers = alive
+	return modified
+
+
+func _spawn_crusher_output(drop_pos: Vector2i, mat: int, amount: int) -> void:
+	# Kirjoita murskaustuotos suoraan gridiin — ei rigid bodya
+	for dy in amount:
+		var px: int = drop_pos.x + (dy % 4)
+		var py: int = drop_pos.y + (dy / 4)
+		if px >= 0 and px < W and py >= 0 and py < SIM_HEIGHT:
+			if grid[py * W + px] == 0:
+				grid[py * W + px] = mat
+				color_seed[py * W + px] = randi() % 256
+	paint_pending = true
+
+
 func _clear_buildings() -> void:
 	for f in furnaces:
 		f.queue_free()
@@ -2262,6 +2799,12 @@ func _clear_buildings() -> void:
 	for m in sand_mines:
 		m.queue_free()
 	sand_mines.clear()
+	for me in money_exits:
+		me.queue_free()
+	money_exits.clear()
+	for c in crushers:
+		c.queue_free()
+	crushers.clear()
 	_clear_launchers()
 
 
@@ -2295,7 +2838,7 @@ func _handle_launcher_click(world_pos: Vector2) -> void:
 			var launcher := LauncherScript.new()
 			launcher.build_structure(launcher_start, launcher_end, dir)
 			launcher.write_to_grid(grid, color_seed, W)
-			chicken_layer.add_child(launcher)
+			building_layer.add_child(launcher)
 			launchers.append(launcher)
 			# Rekisteröi kaikki launcherin pikselit suojatuiksi
 			_register_building_pixels(launcher.structure_pixels)
@@ -2343,8 +2886,9 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				# Raketti vanhenee: räjähtää paikalleen
 				var fx := int(fp["pos"].x)
 				var fy := int(fp["pos"].y)
-				explode(fx, fy, 20)
-				add_trauma(0.7)
+				explode(fx, fy, 5)
+				add_ca_flash(1.0)
+				set_impact(Vector2(fx, fy), 1.0, 1)
 			else:
 				var fx := int(fp["pos"].x)
 				var fy := int(fp["pos"].y)
@@ -2353,8 +2897,9 @@ func _update_launchers_and_flying(delta: float) -> bool:
 			continue
 
 		var old_pos: Vector2 = fp["pos"]
-		# Raketti: pienempi gravitaatio, normaali pikseli: flying_gravity
-		var grav_y := ROCKET_GRAVITY if is_rocket else flying_gravity
+		var is_bullet: bool = fp.get("type", "") == "bullet"
+		# Raketti: pieni gravitaatio, luoti: ei gravitaatiota, normaali pikseli: flying_gravity
+		var grav_y := ROCKET_GRAVITY if is_rocket else (0.0 if is_bullet else flying_gravity)
 		fp["vel"] = (fp["vel"] as Vector2) + Vector2(0.0, grav_y * delta)
 		var new_pos: Vector2 = old_pos + (fp["vel"] as Vector2) * delta
 
@@ -2388,8 +2933,9 @@ func _update_launchers_and_flying(delta: float) -> bool:
 			if pt.x < 0 or pt.x >= W or pt.y >= SIM_HEIGHT:
 				if is_rocket:
 					# Raketti rajalla — räjähtää
-					explode(last_free.x, last_free.y, 20)
-					add_trauma(0.7)
+					explode(last_free.x, last_free.y, 5)
+					add_ca_flash(1.0)
+					set_impact(Vector2(last_free.x, last_free.y), 1.0, 1)
 				else:
 					_flying_land(fp, last_free.x, last_free.y)
 				landed = true
@@ -2399,13 +2945,25 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				last_free = pt
 				continue
 			var idx := pt.y * W + pt.x
-			if grid[idx] != 0:
+			var hit_mat := grid[idx]
+			# Törmätään kiinteisiin materiaaleihin (kivi, puu) — räjähdykset/luodit
+			if hit_mat == MAT_STONE or hit_mat == MAT_WOOD or hit_mat == MAT_WOOD_FALLING:
 				if is_rocket:
-					# Raketti osui johonkin — iso räjähdys
-					explode(pt.x, pt.y, 20)
-					add_trauma(0.7)
+					# Raketti osui johonkin — pieni räjähdys
+					explode(pt.x, pt.y, 5)
+					add_ca_flash(1.0)
+					set_impact(Vector2(pt.x, pt.y), 1.0, 1)
+				elif is_bullet:
+					# Luoti tuhoa pari pikseliä
+					_bullet_impact(pt.x, pt.y)
 				else:
 					_flying_land(fp, last_free.x, last_free.y)
+				landed = true
+				modified = true
+				break
+			# Tavallinen lentopikeli pysähtyy myös muihin ei-tyhjiin soluihin (hiekka, vesi jne.)
+			elif hit_mat != 0 and not is_bullet and not is_rocket:
+				_flying_land(fp, last_free.x, last_free.y)
 				landed = true
 				modified = true
 				break
@@ -2418,6 +2976,26 @@ func _update_launchers_and_flying(delta: float) -> bool:
 	flying_pixels = still_flying
 	queue_redraw()
 	return modified
+
+
+func _update_proj_lights() -> void:
+	var positions: Array[Vector2] = []
+	var types: Array[float] = []
+	for fp: Dictionary in flying_pixels:
+		if positions.size() >= 8:
+			break
+		var ftype: String = fp.get("type", "")
+		if ftype == "rocket" or ftype == "bullet":
+			var p: Vector2 = fp["pos"]
+			positions.append(Vector2(p.x / float(W), p.y / float(SIM_HEIGHT)))
+			types.append(1.0 if ftype == "rocket" else 0.0)
+	var count := positions.size()
+	while positions.size() < 8:
+		positions.append(Vector2.ZERO)
+		types.append(0.0)
+	shader_mat.set_shader_parameter("proj_pos", positions)
+	shader_mat.set_shader_parameter("proj_type", types)
+	shader_mat.set_shader_parameter("proj_count", count)
 
 
 func _draw() -> void:
@@ -2454,7 +3032,7 @@ func _flying_land(fp: Dictionary, x: int, y: int) -> void:
 	y = clampi(y, 0, SIM_HEIGHT - 1)
 	x = clampi(x, 0, W - 1)
 	var idx := y * W + x
-	if idx >= 0 and idx < grid.size() and grid[idx] == 0:
+	if idx >= 0 and idx < grid.size() and not building_pixels.has(idx):
 		grid[idx] = fp["mat"]
 		color_seed[idx] = fp["seed"]
 		paint_pending = true
@@ -2531,6 +3109,26 @@ func _sell_nearest_building(sell_pos: Vector2) -> void:
 			best_list = launchers
 			best_idx = i
 
+	for i in money_exits.size():
+		var me = money_exits[i]
+		var center := Vector2(me.grid_pos) + Vector2(me.EXIT_W, me.EXIT_H) * 0.5
+		var d := sell_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = me
+			best_list = money_exits
+			best_idx = i
+
+	for i in crushers.size():
+		var c = crushers[i]
+		var center := Vector2(c.grid_pos) + Vector2(c.CRUSHER_W, c.CRUSHER_H) * 0.5
+		var d := sell_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = c
+			best_list = crushers
+			best_idx = i
+
 	if best_obj == null or best_idx < 0:
 		print("Ei rakennusta lähellä")
 		return
@@ -2585,7 +3183,96 @@ func _save_debug_image(path: String) -> void:
 
 
 const SAVE_MAGIC := "GMINE1"
-const SAVE_VERSION := 3
+const SAVE_VERSION := 4
+
+
+# Tallentaa kuvakaappauksen + pelitilan JSONin projektin juureen AI-analyysia varten (I)
+func _save_ai_screenshot() -> void:
+	# --- Kuvakaappaus ---
+	var img := get_viewport().get_texture().get_image()
+	var img_path := "res://game_view.png"
+	if img.save_png(img_path) == OK:
+		print("AI-kuvakaappaus tallennettu: ", ProjectSettings.globalize_path(img_path))
+	else:
+		push_error("AI-kuvakaappaus epäonnistui")
+
+	# --- Pelitila ---
+	var mat_names: Dictionary = {
+		MAT_EMPTY: "EMPTY", MAT_SAND: "SAND", MAT_WATER: "WATER", MAT_STONE: "STONE",
+		MAT_WOOD: "WOOD", MAT_FIRE: "FIRE", MAT_OIL: "OIL", MAT_STEAM: "STEAM",
+		MAT_ASH: "ASH", MAT_WOOD_FALLING: "WOOD_FALLING", MAT_GLASS: "GLASS",
+		MAT_DIRT: "DIRT", MAT_IRON_ORE: "IRON_ORE", MAT_GOLD_ORE: "GOLD_ORE",
+		MAT_IRON: "IRON", MAT_GOLD: "GOLD", MAT_COAL: "COAL"
+	}
+	var weapon_names: Array[String] = ["PICKAXE", "MEGA_DRILL", "RIFLE", "ROCKET", "GRAVITY_GUN"]
+	var grav_modes: Array[String] = ["off", "pull", "vacuum"]
+
+	var state: Dictionary = {
+		"timestamp": Time.get_datetime_string_from_system(),
+		"fps": Engine.get_frames_per_second(),
+		"sim_speed": sim_speed,
+		"god_mode": god_mode,
+		"player": {
+			"x": int(player.position.x),
+			"y": int(player.position.y),
+			"vel_x": snappedf(player.velocity.x, 0.01),
+			"vel_y": snappedf(player.velocity.y, 0.01),
+			"on_ground": player.on_ground,
+			"in_water": player.in_water,
+			"facing_right": player.facing_right
+		},
+		"weapon": weapon_names[current_weapon],
+		"material": {
+			"selected": mat_names.get(current_material, str(current_material)),
+			"brush_size": brush_size
+		},
+		"grav_gun": {
+			"mode": grav_modes[grav_gun_mode],
+			"pos_x": grav_gun_pos.x,
+			"pos_y": grav_gun_pos.y,
+			"radius": grav_gun_radius,
+			"held_pixels": grav_held.size()
+		},
+		"build_mode": build_mode,
+		"buildings": building_pixels.size(),
+		"furnaces": furnaces.map(func(f) -> Dictionary: return {
+			"x": f.grid_pos.x, "y": f.grid_pos.y,
+			"broken": f.broken,
+			"glass_ready": f.glass_ready,
+			"smelt_timer": snappedf(f.smelt_timer, 0.01),
+			"collected": f.collected
+		}),
+		"world_gen": {
+			"cave_threshold_min": WorldGen.cave_threshold_min,
+			"cave_threshold_max": WorldGen.cave_threshold_max,
+			"cave_warp_str": WorldGen.cave_warp_str,
+			"coal_count": WorldGen.coal_count,
+			"iron_count": WorldGen.iron_count,
+			"gold_count": WorldGen.gold_count,
+			"oil_count": WorldGen.oil_count,
+			"coal_r_min": WorldGen.coal_r_min,
+			"coal_r_max": WorldGen.coal_r_max,
+			"iron_r_min": WorldGen.iron_r_min,
+			"iron_r_max": WorldGen.iron_r_max,
+			"gold_r_min": WorldGen.gold_r_min,
+			"gold_r_max": WorldGen.gold_r_max,
+			"oil_r_min": WorldGen.oil_r_min,
+			"oil_r_max": WorldGen.oil_r_max,
+			"dirt_thickness": WorldGen.dirt_thickness,
+			"lake_count": WorldGen.lake_count,
+		}
+	}
+
+	var json_path := "res://game_state.json"
+	var file := FileAccess.open(json_path, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(state, "\t"))
+		file.close()
+		print("AI-pelidata tallennettu: ", ProjectSettings.globalize_path(json_path))
+	else:
+		push_error("AI-pelidata-tallennus epäonnistui")
+
+	_show_toast("AI-kuvakaappaus tallennettu")
 
 
 func save_world() -> void:
@@ -2618,13 +3305,24 @@ func save_world() -> void:
 	for m in sand_mines:
 		file.store_32(m.grid_pos.x + m.MINE_W / 2)
 		file.store_32(m.grid_pos.y + m.MINE_H / 2)
-	# Spawners
-	file.store_32(spawners.size())
-	for s in spawners:
-		file.store_float(s.grid_pos.x)
-		file.store_float(s.grid_pos.y)
+	# Spawners-lukumäärä — kirjoitetaan 0 taaksepäin-yhteensopivuuden vuoksi
+	file.store_32(0)
+	# Money exits
+	file.store_32(money_exits.size())
+	for me in money_exits:
+		file.store_32(me.grid_pos.x + me.EXIT_W / 2)
+		file.store_32(me.grid_pos.y + me.EXIT_H / 2)
+	# Crushers
+	file.store_32(crushers.size())
+	for c in crushers:
+		file.store_32(c.grid_pos.x + c.CRUSHER_W / 2)
+		file.store_32(c.grid_pos.y + c.CRUSHER_H / 2)
+	# Raha
+	file.store_32(money)
 	file.close()
-	print("Tallennettu: %d hihnat, %d uunit, %d kaivokset" % [conveyors.size(), furnaces.size(), sand_mines.size()])
+	print("Tallennettu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, $%d" % [
+		conveyors.size(), furnaces.size(), sand_mines.size(),
+		money_exits.size(), crushers.size(), money])
 
 
 func load_world() -> void:
@@ -2658,7 +3356,6 @@ func load_world() -> void:
 	paint_pending = true
 	# Nollaa tila
 	physics_world = PhysicsWorld.new()
-	_clear_chickens()
 	_clear_conveyors()
 	_clear_buildings()
 	# Conveyors — setup ilman build_floor (pikselit jo gridissä)
@@ -2671,7 +3368,7 @@ func load_world() -> void:
 		var BeltScene := preload("res://scripts/conveyor_belt.gd")
 		var belt = BeltScene.new()
 		belt.setup(Vector2i(sx, sy), Vector2i(ex, ey))
-		chicken_layer.add_child(belt)
+		building_layer.add_child(belt)
 		conveyors.append(belt)
 	# Furnaces — setup ilman build_structure (collected-data ei tallenneta, alkaa tyhjänä)
 	var furnace_count := file.get_32()
@@ -2681,7 +3378,7 @@ func load_world() -> void:
 		var FurnaceScript := preload("res://scripts/furnace.gd")
 		var f = FurnaceScript.new()
 		f.setup(Vector2i(cx, cy))
-		chicken_layer.add_child(f)
+		building_layer.add_child(f)
 		furnaces.append(f)
 	# Sand mines — setup ilman build_structure
 	var mine_count := file.get_32()
@@ -2691,19 +3388,41 @@ func load_world() -> void:
 		var SandMineScript := preload("res://scripts/sand_mine.gd")
 		var m = SandMineScript.new()
 		m.setup(Vector2i(cx, cy))
-		chicken_layer.add_child(m)
+		building_layer.add_child(m)
 		sand_mines.append(m)
-	# Spawners
+	# Spawners-data ohitetaan (taaksepäin-yhteensopivuus, tallennus kirjoittaa 0)
 	var spawner_count := file.get_32()
 	for _i in spawner_count:
-		var x := file.get_float()
-		var y := file.get_float()
-		_place_spawner(Vector2(x, y))
+		file.get_float()
+		file.get_float()
+	# Money exits
+	var exit_count := file.get_32()
+	for _i in exit_count:
+		var cx := int(file.get_32())
+		var cy := int(file.get_32())
+		var me = MoneyExit.new()
+		me.setup(Vector2i(cx, cy))
+		me.build_structure(grid, color_seed, W, SIM_HEIGHT)
+		building_layer.add_child(me)
+		money_exits.append(me)
+	# Crushers
+	var crusher_count := file.get_32()
+	for _i in crusher_count:
+		var cx := int(file.get_32())
+		var cy := int(file.get_32())
+		var c = Crusher.new()
+		c.setup(Vector2i(cx, cy))
+		c.build_structure(grid, color_seed, W, SIM_HEIGHT)
+		building_layer.add_child(c)
+		crushers.append(c)
+	# Raha
+	money = int(file.get_32())
 	file.close()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
-	print("Ladattu: %d hihnat, %d uunit, %d kaivokset, %d spawnerit" % [
-		conveyors.size(), furnaces.size(), sand_mines.size(), spawners.size()])
+	print("Ladattu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, $%d" % [
+		conveyors.size(), furnaces.size(), sand_mines.size(),
+		money_exits.size(), crushers.size(), money])
 
 
 # ============================================================
@@ -2800,9 +3519,7 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			var by: int = step.get("y", 0)
 			var pos := Vector2(bx, by)
 			match btype:
-				"spawner":   _place_spawner(pos)
-				"furnace":   _place_furnace(pos)
-				"sand_mine": _place_sand_mine(pos)
+				_: push_warning("ScenarioRunner: tuntematon rakennus '%s'" % btype)
 			print("ScenarioRunner: place_building type=%s (%d,%d)" % [btype, bx, by])
 		"explode":
 			var ex: int = step.get("x", W / 2)
@@ -2940,6 +3657,21 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			physics_initialized = true
 			paint_pending = true
 			print("ScenarioRunner: place_launcher start=%s end=%s dir=%.1f" % [lstart, lend, ldir])
+		"set_grav_gun":
+			# Aseta gravity gun -tila suoraan skenaariosta
+			var ggx: int = step.get("x", W / 2)
+			var ggy: int = step.get("y", SIM_HEIGHT / 2)
+			var ggmode: int = step.get("mode", 1)
+			grav_gun_mode = ggmode
+			grav_gun_pos = Vector2i(ggx, ggy)
+			grav_held.clear()
+			grav_held_written.clear()
+			print("ScenarioRunner: set_grav_gun mode=%d pos=(%d,%d)" % [ggmode, ggx, ggy])
+		"clear_grav_gun":
+			grav_gun_mode = 0
+			grav_held.clear()
+			grav_held_written.clear()
+			print("ScenarioRunner: clear_grav_gun")
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false
@@ -3024,6 +3756,8 @@ func _autofill_test() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
+		if _vis_thread != null and _vis_thread.is_alive():
+			_vis_thread.wait_to_finish()
 		if gpu_ready and rd != null:
 			rd.free_rid(pipeline)
 			rd.free_rid(uniform_set)

@@ -32,15 +32,6 @@ func build_structure(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 
 
 func update_mine(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int, delta: float) -> bool:
-	if broken:
-		return false
-	# Eheyden tarkistus
-	for sp in structure_pixels:
-		if sp.x >= 0 and sp.x < w and sp.y >= 0 and sp.y < h:
-			if grid[sp.y * w + sp.x] != FLOOR_MAT:
-				broken = true
-				queue_redraw()
-				return false
 	spawn_timer += delta
 	if spawn_timer < SPAWN_INTERVAL:
 		return false

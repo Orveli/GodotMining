@@ -5,7 +5,7 @@ extends Node2D
 
 const BELT_SPEED := 4  # Siirrot per sekunti
 const FLOOR_MAT := 3   # MAT_STONE
-const CHICKEN_PUSH := 0.4  # Kanojen työntönopeus hihnalla
+
 
 var start_pos: Vector2i = Vector2i.ZERO
 var end_pos: Vector2i = Vector2i.ZERO
@@ -46,17 +46,6 @@ func build_floor(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 
 
 func update_belt(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int, delta: float) -> bool:
-	if broken:
-		return false
-
-	# Tarkista eheys — jos jokin lattiapikselipaikka on tyhjentynyt, hihna on rikki
-	for fp in floor_pixels:
-		var idx := fp.y * w + fp.x
-		if idx >= 0 and idx < grid.size() and grid[idx] != FLOOR_MAT:
-			broken = true
-			queue_redraw()
-			return false
-
 	anim_offset = fmod(anim_offset + delta * 8.0, 3000.0)  # Estä float-tarkkuuden heikkeneminen
 	queue_redraw()
 
@@ -109,19 +98,6 @@ func update_belt(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 			modified = true
 
 	return modified
-
-
-# Tarkista onko kana tämän hihnan päällä ja työnnä sitä
-func push_chicken(chicken_pos: Vector2, chicken_half_w: int) -> float:
-	var cx := int(chicken_pos.x)
-	var cy := int(chicken_pos.y)  # Jalat
-	# Tarkista onko jalkojen alla hihnan lattia
-	var foot_y := cy + 1
-	for dx in range(-chicken_half_w, chicken_half_w + 1):
-		var check := Vector2i(cx + dx, foot_y)
-		if floor_set.has(check):
-			return belt_dir_x * CHICKEN_PUSH
-	return 0.0
 
 
 func _draw() -> void:

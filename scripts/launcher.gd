@@ -8,7 +8,7 @@ var launch_speed: float = 120.0    # px/s perusnopeus
 var launch_angle_deg: float = -45.0 # 45° ylöspäin (negatiivinen Y = ylös)
 const ANGLE_VARIANCE := 3.0    # ±astetta hajontaa
 const SPEED_VARIANCE := 0.05   # ±5% nopeushajonta
-var intake_cooldown: float = 0.08  # s per pikseli-erä
+var intake_cooldown: float = 0.32  # s per pikseli-erä
 const MAX_INTAKE_PER_FRAME := 4  # Pikseleitä per frame maksimissaan
 const FLOOR_MAT := 3           # MAT_STONE
 
@@ -17,7 +17,6 @@ var end_pos: Vector2i = Vector2i.ZERO     # Katto (suoraan ylhäällä)
 var launch_dir: float = 1.0              # 1.0=oikealle, -1.0=vasemmalle
 var structure_pixels: Array[Vector2i] = []  # Kuilun reunat + tykki (check_intact seuraa näitä)
 var _jalusta_pixels: Array[Vector2i] = []   # Jalusta erikseen — ei check_intact:ssa (osuu hihnaan)
-var intake_pixels: Array[Vector2i] = []  # Pohjan pikselit joista imetään
 var barrel_tip: Vector2i = Vector2i.ZERO  # Tykkiputken kärki
 var broken: bool = false
 var cooldown_timer: float = 0.0
@@ -32,7 +31,6 @@ func build_structure(start: Vector2i, end: Vector2i, dir: float) -> void:
 	end_pos = end
 	launch_dir = dir
 	structure_pixels.clear()
-	intake_pixels.clear()
 
 	# Kuilu: start.y ylhäältä end.y:hyn asti
 	# Vasen reuna (x == end.x) ja oikea reuna (x == end.x + SHAFT_WIDTH - 1) = kivi
@@ -68,14 +66,6 @@ func build_structure(start: Vector2i, end: Vector2i, dir: float) -> void:
 			structure_pixels.append(Vector2i(bx0 - i, end.y - i + 1))  # 2px paksuus
 		barrel_tip = Vector2i(bx0 - BARREL_LENGTH, end.y - BARREL_LENGTH)
 
-	# Intake-pikselit: kuilun vieressä hihnan tasolla — imetään hihnan päältä
-	# Skannaa laajempi alue kuilun kummallakin puolella jotta hihnalta tuleva
-	# materiaali löytyy vaikka se ei osu suoraan kuilun kohdalle
-	const INTAKE_REACH := 6  # pikseliä kummaltakin sivulta
-	for x in range(start.x - INTAKE_REACH, start.x + SHAFT_WIDTH + INTAKE_REACH):
-		intake_pixels.append(Vector2i(x, start.y - 1))
-		intake_pixels.append(Vector2i(x, start.y - 2))
-
 	position = Vector2.ZERO
 	queue_redraw()
 
@@ -89,16 +79,7 @@ func write_to_grid(grid: PackedByteArray, color_seed: PackedByteArray, w: int) -
 			color_seed[idx] = randi() % 256
 
 
-func check_intact(grid: PackedByteArray, w: int) -> bool:
-	# Tarkistaa että kaikki rakenteen pikselit ovat edelleen kiveä; asettaa broken jos ei
-	for p in structure_pixels:
-		var idx := p.y * w + p.x
-		if idx < 0 or idx >= grid.size():
-			broken = true
-			return false
-		if grid[idx] != FLOOR_MAT:
-			broken = true
-			return false
+func check_intact(_grid: PackedByteArray, _w: int) -> bool:
 	return true
 
 
@@ -115,27 +96,31 @@ func update_launcher(grid: PackedByteArray, w: int, delta: float) -> void:
 	if cooldown_timer > 0.0:
 		return
 
+	const INTAKE_DEPTH := 5    # pikseliä alaspäin
+
 	var count := 0
-	for p in intake_pixels:
+	for x in range(start_pos.x, start_pos.x + SHAFT_WIDTH):
 		if count >= MAX_INTAKE_PER_FRAME:
 			break
-		var idx := p.y * w + p.x
-		if idx < 0 or idx >= grid.size():
-			continue
-		var mat := grid[idx]
-		if mat == 0 or mat == FLOOR_MAT:  # Tyhjä tai kivi — ohita
-			continue
-
-		# Poista materiaali gridistä
-		grid[idx] = 0
-
-		# Lisää pikseli kuiluun — se nousee animoituna ylöspäin
-		shaft_pixels.append({
-			"pos": Vector2(float(p.x), float(start_pos.y - 1)),  # alkaa pohjan yläpuolelta
-			"mat": mat,
-			"seed": randi() % 256
-		})
-		count += 1
+		for dy in range(2, INTAKE_DEPTH + 2):  # +2 hypätään jalustapikselien yli
+			var py := start_pos.y + dy
+			var idx := py * w + x
+			if idx < 0 or idx >= grid.size():
+				break
+			var mat := grid[idx]
+			if mat == FLOOR_MAT:  # Kivi tai hihna estää — pysähdy tähän sarakkeeseen
+				break
+			if mat == 0:  # Tyhjä — jatka alaspäin
+				continue
+			# Löydettiin imettävää materiaalia
+			grid[idx] = 0
+			shaft_pixels.append({
+				"pos": Vector2(float(x), float(start_pos.y - 1)),
+				"mat": mat,
+				"seed": randi() % 256
+			})
+			count += 1
+			break  # Yksi pikseli per sarake per frame
 
 	if count > 0:
 		cooldown_timer = intake_cooldown

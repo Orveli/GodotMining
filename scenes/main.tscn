@@ -38,98 +38,13 @@ script = ExtResource("3")
 follow_viewport_enabled = false
 
 [node name="Panel" type="PanelContainer" parent="UI"]
-anchors_preset = 0
-offset_left = 10.0
-offset_top = 10.0
-offset_right = 200.0
-offset_bottom = 500.0
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 50.0
 script = ExtResource("2")
 
-[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
-layout_mode = 2
-theme_override_constants/separation = 4
-
-[node name="Title" type="Label" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "Materiaalit"
-horizontal_alignment = 1
-
-[node name="BtnSand" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Hiekka [1]"
-
-[node name="BtnWater" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Vesi [2]"
-
-[node name="BtnStone" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Kivi kiinni [3]"
-
-[node name="BtnStoneDynamic" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Kivi irrall."
-
-[node name="BtnWood" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Puu [4]"
-
-[node name="BtnFire" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Tuli [5]"
-
-[node name="BtnOil" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Öljy [6]"
-
-[node name="BtnErase" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Pyyhekumi [E]"
-
-[node name="BtnClear" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Tyhjennä [C]"
-
-[node name="BtnReset" type="Button" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 14
-text = "Uusi maailma [R]"
-
-[node name="Sep" type="HSeparator" parent="UI/Panel/VBox"]
-layout_mode = 2
-
-[node name="BrushLabel" type="Label" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 13
-text = "Pensseli: 5"
-
-[node name="BrushSlider" type="HSlider" parent="UI/Panel/VBox"]
-layout_mode = 2
-min_value = 1.0
-max_value = 20.0
-step = 1.0
-value = 5.0
-
-[node name="FPSLabel" type="Label" parent="UI/Panel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 13
-text = "FPS: 0"
-
-[node name="DebugMenu" type="Control" parent="."]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+[node name="DebugMenu" type="Control" parent="UI"]
 script = ExtResource("4")

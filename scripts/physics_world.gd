@@ -185,6 +185,22 @@ func step(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) ->
 
 		# Ympäristötörmäys (näkee maasto + staattiset + jo kirjoitetut kappaleet)
 		var collision := _find_env_collision(body, grid, w, h)
+
+		# CCD: nopea kappale voi tunnelöida ohuiden seinien läpi — sweepaa väliaskeleet
+		if not collision.hit and body.velocity.length() > 1.5:
+			var ccd_n := ceili(body.velocity.length())
+			for ci in range(1, ccd_n):
+				var t_probe := float(ci) / float(ccd_n)
+				body.position = old_pos + body.velocity * t_probe
+				body.angle = old_angle + body.angular_velocity * t_probe
+				var c := _find_env_collision(body, grid, w, h)
+				if c.hit:
+					collision = c
+					break
+			if not collision.hit:
+				body.position = old_pos + body.velocity
+				body.angle = old_angle + body.angular_velocity
+
 		if collision.hit:
 			var t_min := 0.0
 			var t_max := 1.0

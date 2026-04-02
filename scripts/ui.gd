@@ -1,16 +1,35 @@
 extends PanelContainer
 
 @onready var pixel_world: TextureRect = get_node("../../PixelWorld")
-@onready var brush_label: Label = $VBox/BrushLabel
-@onready var brush_slider: HSlider = $VBox/BrushSlider
-@onready var fps_label: Label = $VBox/FPSLabel
+
+# Materiaalit-napit — tallennetaan viitteiksi korostusta varten
+var btn_stone: Button
+var btn_stone_dynamic: Button
+
+# Pensseli
+var brush_slider: HSlider
+var brush_label: Label
+
+# FPS-teksti
+var fps_label: Label
 
 # Rakennusnapit (luodaan ohjelmallisesti)
-var build_section: VBoxContainer
+var build_panel: PanelContainer      # erillinen paneeli palkin alla
 var btn_spawner: Button
 var btn_conveyor: Button
 var btn_sling: Button
 var btn_wall: Button
+var btn_sand_mine_build: Button
+var btn_furnace_build: Button
+var btn_money_exit_build: Button
+var btn_crusher_build: Button
+var build_buttons: Array[Button] = []  # kaikki rakennus-napit korostusta varten
+
+# Raha-näyttö
+var money_label: Label
+
+# Build-toggle-nappi (synkronoidaan B-näppäimeen)
+var btn_build_toggle: Button
 
 # Speed-napit
 var speed_buttons: Array[Button] = []
@@ -19,166 +38,418 @@ const SPEED_LABELS: Array[String] = ["1x", "4x", "8x", "16x"]
 
 # Asenapit
 var weapon_buttons: Array[Button] = []
-const WEAPON_LABELS: Array[String] = ["Hakku", "Megapora", "Laseri", "Raketti", "GravGun"]
+const WEAPON_LABELS: Array[String] = ["Hakku", "Megapora", "Rynnäkkö", "Raketti", "GravGun"]
+
+# Materiaaliskanneri — oikea alakulma
+var scanner_panel: PanelContainer
+var scanner_label: RichTextLabel
+var _scanner_frame: int = 0
+const SCANNER_INTERVAL: int = 6  # Päivitetään joka 6. frame (~10 Hz 60fps:llä)
+const SCANNER_RADIUS: int = 50
+
+# Materiaalinimi- ja värikartat skannerille
+const MAT_NAMES: Dictionary = {
+	0: "",          # EMPTY ei näytetä
+	1: "Hiekka",
+	2: "Vesi",
+	3: "Kivi",
+	4: "Puu",
+	5: "Tuli",
+	6: "Öljy",
+	7: "Höyry",
+	8: "Tuhka",
+	9: "Puu↓",
+	10: "Lasi",
+	11: "Multa",
+	12: "Rautamalmi",
+	13: "Kultamalmi",
+	14: "Rauta",
+	15: "Kulta",
+	16: "Hiili",
+}
+const MAT_COLORS: Dictionary = {
+	1: "#dcc874",   # SAND
+	2: "#6699dd",   # WATER
+	3: "#8c8c85",   # STONE
+	4: "#7a4820",   # WOOD
+	5: "#ff8020",   # FIRE
+	6: "#3a2a1a",   # OIL
+	7: "#ccd8e6",   # STEAM
+	8: "#5a5450",   # ASH
+	9: "#7a4820",   # WOOD_FALLING
+	10: "#a6e0d6",  # GLASS
+	11: "#7a5230",  # DIRT
+	12: "#8c6b60",  # IRON_ORE
+	13: "#b8a640",  # GOLD_ORE
+	14: "#adadb8",  # IRON
+	15: "#e6c732",  # GOLD
+	16: "#2e2b36",  # COAL
+}
+
+
+# Apufunktio: luo VSeparator
+func _sep() -> VSeparator:
+	var s := VSeparator.new()
+	return s
+
+
+# Apufunktio: luo nappi vakioasetuksilla
+func _make_btn(label: String, font_size: int = 12) -> Button:
+	var btn := Button.new()
+	btn.text = label
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.add_theme_font_size_override("font_size", font_size)
+	return btn
 
 
 func _ready() -> void:
 	# UI-esto: anna pixel_world viittaus tähän paneeliin (rektitarkistus)
 	pixel_world.ui_panel = self
 
-	# Poista focus kaikista napeista — muuten ne kaappaavat näppäimet
-	for btn in [$VBox/BtnSand, $VBox/BtnWater, $VBox/BtnStone, $VBox/BtnStoneDynamic,
-			$VBox/BtnWood, $VBox/BtnFire, $VBox/BtnOil, $VBox/BtnErase, $VBox/BtnClear, $VBox/BtnReset]:
-		btn.focus_mode = Control.FOCUS_NONE
+	# Pääcontainer: yksi vaakariivi koko palkin leveydeltä
+	var hbox := HBoxContainer.new()
+	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_theme_constant_override("separation", 4)
+	add_child(hbox)
+
+	# ── Materiaalit-ryhmä ──────────────────────────────────────────────────
+	var mat_box := HBoxContainer.new()
+	mat_box.add_theme_constant_override("separation", 2)
+	hbox.add_child(mat_box)
+
+	var mat_label := Label.new()
+	mat_label.text = "Mat:"
+	mat_label.add_theme_font_size_override("font_size", 12)
+	mat_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	mat_box.add_child(mat_label)
+
+	var btn_sand := _make_btn("Hiekka")
+	btn_sand.pressed.connect(_on_material.bind(1))
+	mat_box.add_child(btn_sand)
+
+	var btn_water := _make_btn("Vesi")
+	btn_water.pressed.connect(_on_material.bind(2))
+	mat_box.add_child(btn_water)
+
+	btn_stone = _make_btn("Kivi")
+	btn_stone.pressed.connect(_on_stone_static)
+	mat_box.add_child(btn_stone)
+
+	btn_stone_dynamic = _make_btn("Kivi~")
+	btn_stone_dynamic.pressed.connect(_on_stone_dynamic)
+	mat_box.add_child(btn_stone_dynamic)
+
+	var btn_wood := _make_btn("Puu")
+	btn_wood.pressed.connect(_on_material.bind(4))
+	mat_box.add_child(btn_wood)
+
+	var btn_fire := _make_btn("Tuli")
+	btn_fire.pressed.connect(_on_material.bind(5))
+	mat_box.add_child(btn_fire)
+
+	var btn_oil := _make_btn("Öljy")
+	btn_oil.pressed.connect(_on_material.bind(6))
+	mat_box.add_child(btn_oil)
+
+	var btn_erase := _make_btn("Kumita")
+	btn_erase.pressed.connect(_on_material.bind(0))
+	mat_box.add_child(btn_erase)
+
+	var btn_clear := _make_btn("Tyhjennä")
+	btn_clear.pressed.connect(_on_clear)
+	mat_box.add_child(btn_clear)
+
+	var btn_reset := _make_btn("Uusi [R]")
+	btn_reset.pressed.connect(_on_reset)
+	mat_box.add_child(btn_reset)
+
+	# ── Pensseli-ryhmä ─────────────────────────────────────────────────────
+	hbox.add_child(_sep())
+
+	var pen_box := HBoxContainer.new()
+	pen_box.add_theme_constant_override("separation", 4)
+	hbox.add_child(pen_box)
+
+	brush_label = Label.new()
+	brush_label.text = "Pen: 5"
+	brush_label.add_theme_font_size_override("font_size", 12)
+	brush_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	pen_box.add_child(brush_label)
+
+	brush_slider = HSlider.new()
+	brush_slider.min_value = 1.0
+	brush_slider.max_value = 20.0
+	brush_slider.step = 1.0
+	brush_slider.value = 5.0
 	brush_slider.focus_mode = Control.FOCUS_NONE
-
-	$VBox/BtnSand.pressed.connect(_on_material.bind(1))  # Mat.SAND
-	$VBox/BtnWater.pressed.connect(_on_material.bind(2))  # Mat.WATER
-	$VBox/BtnStone.pressed.connect(_on_stone_static)   # Staattinen kivi
-	$VBox/BtnStoneDynamic.pressed.connect(_on_stone_dynamic)
-	$VBox/BtnWood.pressed.connect(_on_material.bind(4))   # Mat.WOOD
-	$VBox/BtnFire.pressed.connect(_on_material.bind(5))   # Mat.FIRE
-	$VBox/BtnOil.pressed.connect(_on_material.bind(6))    # Mat.OIL
-	$VBox/BtnErase.pressed.connect(_on_material.bind(0))  # Mat.EMPTY
-	$VBox/BtnClear.pressed.connect(_on_clear)
-	$VBox/BtnReset.pressed.connect(_on_reset)
+	brush_slider.custom_minimum_size = Vector2(80.0, 0.0)
+	brush_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	brush_slider.value_changed.connect(_on_brush_changed)
+	pen_box.add_child(brush_slider)
 
-	# Tallennus / lataus
-	var sep_save := HSeparator.new()
-	$VBox.add_child(sep_save)
+	# ── Nopeus-ryhmä ───────────────────────────────────────────────────────
+	hbox.add_child(_sep())
 
-	var save_row := HBoxContainer.new()
-	save_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	$VBox.add_child(save_row)
-
-	var btn_save := Button.new()
-	btn_save.text = "Tallenna [F5]"
-	btn_save.focus_mode = Control.FOCUS_NONE
-	btn_save.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn_save.add_theme_font_size_override("font_size", 13)
-	btn_save.pressed.connect(func(): pixel_world.save_world())
-	save_row.add_child(btn_save)
-
-	var btn_load := Button.new()
-	btn_load.text = "Lataa [F9]"
-	btn_load.focus_mode = Control.FOCUS_NONE
-	btn_load.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn_load.add_theme_font_size_override("font_size", 13)
-	btn_load.pressed.connect(func(): pixel_world.load_world())
-	save_row.add_child(btn_load)
-
-	# Ajan nopeus -osio
-	var sep_speed := HSeparator.new()
-	$VBox.add_child(sep_speed)
-
-	var speed_title := Label.new()
-	speed_title.text = "Aika"
-	speed_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	speed_title.add_theme_font_size_override("font_size", 16)
-	$VBox.add_child(speed_title)
-
-	var speed_row := HBoxContainer.new()
-	speed_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	$VBox.add_child(speed_row)
+	var speed_box := HBoxContainer.new()
+	speed_box.add_theme_constant_override("separation", 2)
+	hbox.add_child(speed_box)
 
 	for i in SPEED_VALUES.size():
-		var btn := Button.new()
-		btn.text = SPEED_LABELS[i]
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.custom_minimum_size = Vector2(36, 0)
-		btn.add_theme_font_size_override("font_size", 13)
+		var btn := _make_btn(SPEED_LABELS[i])
+		btn.custom_minimum_size = Vector2(32.0, 0.0)
 		btn.pressed.connect(_on_speed.bind(SPEED_VALUES[i]))
-		speed_row.add_child(btn)
+		speed_box.add_child(btn)
 		speed_buttons.append(btn)
 
-	# Rakennusvalikko — toggle-nappi + sisältö
-	var sep_build := HSeparator.new()
-	$VBox.add_child(sep_build)
+	# ── Ase-ryhmä ──────────────────────────────────────────────────────────
+	hbox.add_child(_sep())
 
-	var btn_build_toggle := Button.new()
-	btn_build_toggle.text = "Rakennukset [B]"
-	btn_build_toggle.toggle_mode = true
-	btn_build_toggle.focus_mode = Control.FOCUS_NONE
-	btn_build_toggle.add_theme_font_size_override("font_size", 16)
-	btn_build_toggle.toggled.connect(_on_build_toggle)
-	$VBox.add_child(btn_build_toggle)
-
-	build_section = VBoxContainer.new()
-	build_section.visible = false
-	$VBox.add_child(build_section)
-
-	btn_spawner = Button.new()
-	btn_spawner.text = "Spawner [1]"
-	btn_spawner.add_theme_font_size_override("font_size", 14)
-	btn_spawner.focus_mode = Control.FOCUS_NONE
-	btn_spawner.pressed.connect(_on_build_spawner)
-	build_section.add_child(btn_spawner)
-
-	btn_conveyor = Button.new()
-	btn_conveyor.text = "Hihna [2]"
-	btn_conveyor.add_theme_font_size_override("font_size", 14)
-	btn_conveyor.focus_mode = Control.FOCUS_NONE
-	btn_conveyor.pressed.connect(_on_build_conveyor)
-	build_section.add_child(btn_conveyor)
-
-	var btn_sand_mine := Button.new()
-	btn_sand_mine.text = "Kaivos [3]"
-	btn_sand_mine.add_theme_font_size_override("font_size", 14)
-	btn_sand_mine.focus_mode = Control.FOCUS_NONE
-	btn_sand_mine.pressed.connect(_on_build_sand_mine)
-	build_section.add_child(btn_sand_mine)
-
-	var btn_furnace := Button.new()
-	btn_furnace.text = "Uuni [4]"
-	btn_furnace.add_theme_font_size_override("font_size", 14)
-	btn_furnace.focus_mode = Control.FOCUS_NONE
-	btn_furnace.pressed.connect(_on_build_furnace)
-	build_section.add_child(btn_furnace)
-
-	btn_sling = Button.new()
-	btn_sling.text = "Linko [5]"
-	btn_sling.add_theme_font_size_override("font_size", 14)
-	btn_sling.focus_mode = Control.FOCUS_NONE
-	btn_sling.pressed.connect(_on_build_sling)
-	build_section.add_child(btn_sling)
-
-	btn_wall = Button.new()
-	btn_wall.text = "Seinä [W]"
-	btn_wall.add_theme_font_size_override("font_size", 14)
-	btn_wall.focus_mode = Control.FOCUS_NONE
-	btn_wall.pressed.connect(_on_build_wall)
-	build_section.add_child(btn_wall)
-
-	# Ase-osio
-	var sep_weapon := HSeparator.new()
-	$VBox.add_child(sep_weapon)
-
-	var weapon_title := Label.new()
-	weapon_title.text = "Ase [Q]"
-	weapon_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	weapon_title.add_theme_font_size_override("font_size", 16)
-	$VBox.add_child(weapon_title)
+	var weapon_box := HBoxContainer.new()
+	weapon_box.add_theme_constant_override("separation", 2)
+	hbox.add_child(weapon_box)
 
 	for i in WEAPON_LABELS.size():
-		var btn := Button.new()
-		btn.text = WEAPON_LABELS[i]
-		btn.focus_mode = Control.FOCUS_NONE
-		btn.add_theme_font_size_override("font_size", 14)
+		var btn := _make_btn(WEAPON_LABELS[i])
 		btn.pressed.connect(func(): pixel_world.current_weapon = i)
-		$VBox.add_child(btn)
+		weapon_box.add_child(btn)
 		weapon_buttons.append(btn)
 
-	# Tallenna toggle-nappi jotta voidaan synkronoida B-näppäimen kanssa
-	set_meta("build_toggle_btn", btn_build_toggle)
+	# ── Rakennukset-toggle ─────────────────────────────────────────────────
+	hbox.add_child(_sep())
+
+	btn_build_toggle = _make_btn("Rakennukset [B] ▼")
+	btn_build_toggle.toggle_mode = true
+	btn_build_toggle.toggled.connect(_on_build_toggle)
+	hbox.add_child(btn_build_toggle)
+
+	# ── Tallennus-ryhmä ────────────────────────────────────────────────────
+	hbox.add_child(_sep())
+
+	var save_box := HBoxContainer.new()
+	save_box.add_theme_constant_override("separation", 2)
+	hbox.add_child(save_box)
+
+	var btn_save := _make_btn("F5")
+	btn_save.pressed.connect(func(): pixel_world.save_world())
+	save_box.add_child(btn_save)
+
+	var btn_load := _make_btn("F9")
+	btn_load.pressed.connect(func(): pixel_world.load_world())
+	save_box.add_child(btn_load)
+
+	# ── Raha-label ─────────────────────────────────────────────────────────
+	hbox.add_child(_sep())
+
+	money_label = Label.new()
+	money_label.text = "$0"
+	money_label.add_theme_font_size_override("font_size", 14)
+	money_label.add_theme_color_override("font_color", Color(0.3, 0.9, 0.3))
+	money_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	hbox.add_child(money_label)
+	hbox.add_child(_sep())
+
+	# ── FPS-label oikealle ─────────────────────────────────────────────────
+
+	fps_label = Label.new()
+	fps_label.text = "FPS: 0"
+	fps_label.add_theme_font_size_override("font_size", 12)
+	fps_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	fps_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fps_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	hbox.add_child(fps_label)
+
+	# ── Rakennus-dropdown-paneeli (toinen rivi, palkin alla) ────────────────
+	_build_dropdown_panel()
+
+	# ── Materiaaliskanneri (oikea alakulma) ────────────────────────────────
+	_build_scanner_panel()
+
+
+func _build_dropdown_panel() -> void:
+	# Luo erillinen PanelContainer palkin alapuolelle (offset_top = 50)
+	build_panel = PanelContainer.new()
+	build_panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	build_panel.anchor_right = 1.0
+	build_panel.offset_top = 50.0
+	build_panel.offset_bottom = 84.0
+	build_panel.offset_left = 0.0
+	build_panel.offset_right = 0.0
+	build_panel.visible = false
+	get_parent().add_child.call_deferred(build_panel)  # lisätään CanvasLayer UI:hin, ei paneliin
+
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 6)
+	build_panel.add_child(hbox)
+
+	# Ohjeteksti vasemmalla
+	var hint_lbl := Label.new()
+	hint_lbl.text = "Sijoita:"
+	hint_lbl.add_theme_font_size_override("font_size", 12)
+	hint_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	hint_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	hbox.add_child(hint_lbl)
+
+	btn_spawner = _make_btn("Spawner [1]")
+	btn_spawner.pressed.connect(_on_build_spawner)
+	hbox.add_child(btn_spawner)
+	build_buttons.append(btn_spawner)
+
+	btn_conveyor = _make_btn("Hihna [2]")
+	btn_conveyor.pressed.connect(_on_build_conveyor)
+	hbox.add_child(btn_conveyor)
+	build_buttons.append(btn_conveyor)
+
+	btn_sand_mine_build = _make_btn("Kaivos [3]")
+	btn_sand_mine_build.pressed.connect(_on_build_sand_mine)
+	hbox.add_child(btn_sand_mine_build)
+	build_buttons.append(btn_sand_mine_build)
+
+	btn_furnace_build = _make_btn("Uuni [4]")
+	btn_furnace_build.pressed.connect(_on_build_furnace)
+	hbox.add_child(btn_furnace_build)
+	build_buttons.append(btn_furnace_build)
+
+	btn_sling = _make_btn("Linko [5]")
+	btn_sling.pressed.connect(_on_build_sling)
+	hbox.add_child(btn_sling)
+	build_buttons.append(btn_sling)
+
+	btn_wall = _make_btn("Seinä [W]")
+	btn_wall.pressed.connect(_on_build_wall)
+	hbox.add_child(btn_wall)
+	build_buttons.append(btn_wall)
+
+	btn_money_exit_build = _make_btn("Kassa [7]")
+	btn_money_exit_build.pressed.connect(func():
+		pixel_world.build_mode = pixel_world.BUILD_MONEY_EXIT
+		pixel_world.block_paint = true)
+	hbox.add_child(btn_money_exit_build)
+	build_buttons.append(btn_money_exit_build)
+
+	btn_crusher_build = _make_btn("Murskaaja [8]")
+	btn_crusher_build.pressed.connect(func():
+		pixel_world.build_mode = pixel_world.BUILD_CRUSHER
+		pixel_world.block_paint = true)
+	hbox.add_child(btn_crusher_build)
+	build_buttons.append(btn_crusher_build)
+
+
+func _build_scanner_panel() -> void:
+	# Luo erillinen paneeli oikeaan alakulmaan — lisätään CanvasLayer UI:hin
+	scanner_panel = PanelContainer.new()
+	scanner_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	scanner_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	scanner_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	scanner_panel.offset_right = -8.0
+	scanner_panel.offset_bottom = -8.0
+	scanner_panel.offset_left = -180.0
+	scanner_panel.offset_top = -200.0
+
+	# Puoliläpinäkyvä tausta
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.05, 0.05, 0.08, 0.72)
+	style.corner_radius_top_left = 4
+	style.corner_radius_top_right = 4
+	style.corner_radius_bottom_left = 4
+	style.corner_radius_bottom_right = 4
+	style.content_margin_left = 6.0
+	style.content_margin_right = 6.0
+	style.content_margin_top = 4.0
+	style.content_margin_bottom = 4.0
+	scanner_panel.add_theme_stylebox_override("panel", style)
+
+	scanner_label = RichTextLabel.new()
+	scanner_label.bbcode_enabled = true
+	scanner_label.fit_content = true
+	scanner_label.scroll_active = false
+	scanner_label.custom_minimum_size = Vector2(168.0, 0.0)
+	scanner_label.add_theme_font_size_override("normal_font_size", 11)
+	scanner_panel.add_child(scanner_label)
+
+	get_parent().add_child.call_deferred(scanner_panel)
+
+
+func update_material_scanner() -> void:
+	# Luetaan pelaajan sijainti simulaatiokoordinaateissa
+	if not is_instance_valid(pixel_world):
+		return
+	if pixel_world.grid.is_empty():
+		return
+
+	var px: int = int(pixel_world.cam_grid_pos.x)
+	var py: int = int(pixel_world.cam_grid_pos.y)
+	var w: int = pixel_world.SIM_WIDTH
+	var h: int = pixel_world.SIM_HEIGHT
+	var r: int = SCANNER_RADIUS
+	var r2: int = r * r
+
+	# Laske materiaalimäärät
+	var counts: Dictionary = {}
+	var total: int = 0
+
+	var y_min: int = maxi(py - r, 0)
+	var y_max: int = mini(py + r, h - 1)
+	var x_min: int = maxi(px - r, 0)
+	var x_max: int = mini(px + r, w - 1)
+
+	for cy in range(y_min, y_max + 1):
+		var dy: int = cy - py
+		var dy2: int = dy * dy
+		if dy2 > r2:
+			continue
+		var dx_max: int = int(sqrt(float(r2 - dy2)))
+		var cx_min: int = maxi(px - dx_max, x_min)
+		var cx_max: int = mini(px + dx_max, x_max)
+		for cx in range(cx_min, cx_max + 1):
+			var mat: int = pixel_world.grid[cy * w + cx]
+			if mat != 0:
+				counts[mat] = counts.get(mat, 0) + 1
+				total += 1
+
+	if total == 0:
+		scanner_label.text = "[color=#666666]Skanneri: tyhjää[/color]"
+		return
+
+	# Järjestä laskevaan järjestykseen
+	var entries: Array = []
+	for mat_id: int in counts:
+		entries.append([mat_id, counts[mat_id]])
+	entries.sort_custom(func(a: Array, b: Array) -> bool: return a[1] > b[1])
+
+	# Rakenna BBCode-teksti
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("[color=#aaaaaa]Ympäristö (r=%d)[/color]" % r)
+	for entry: Array in entries:
+		var mat_id: int = entry[0]
+		var count: int = entry[1]
+		if not MAT_NAMES.has(mat_id) or MAT_NAMES[mat_id] == "":
+			continue
+		var pct: float = 100.0 * float(count) / float(total)
+		var name_str: String = MAT_NAMES[mat_id]
+		if MAT_COLORS.has(mat_id):
+			lines.append("[color=%s]%s[/color]  [color=#cccccc]%.1f%%[/color]" % [MAT_COLORS[mat_id], name_str, pct])
+		else:
+			lines.append("%s  %.1f%%" % [name_str, pct])
+	scanner_label.text = "\n".join(lines)
 
 
 func _process(_delta: float) -> void:
+	# Päivitä materiaaliskanneri harvakseen (performance)
+	_scanner_frame += 1
+	if _scanner_frame >= SCANNER_INTERVAL:
+		_scanner_frame = 0
+		update_material_scanner()
+
+	var build_open: bool = pixel_world.build_menu_visible
+
 	# Synkronoi build-toggle-nappi B-näppäimen tilaan
-	var btn_build: Button = get_meta("build_toggle_btn")
-	if btn_build.button_pressed != pixel_world.build_menu_visible:
-		btn_build.set_pressed_no_signal(pixel_world.build_menu_visible)
-	build_section.visible = pixel_world.build_menu_visible
+	if btn_build_toggle.button_pressed != build_open:
+		btn_build_toggle.set_pressed_no_signal(build_open)
+	# Nuoli osoittaa auki/kiinni-tilan
+	btn_build_toggle.text = "Rakennukset [B] " + ("▲" if build_open else "▼")
+	# Build-paneeli näkyviin/piiloon (deferred-lisäys voi olla vielä null)
+	if build_panel != null:
+		build_panel.visible = build_open
 
 	# Korosta aktiivinen nopeus
 	for i in speed_buttons.size():
@@ -188,10 +459,25 @@ func _process(_delta: float) -> void:
 	for i in weapon_buttons.size():
 		weapon_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == pixel_world.current_weapon else Color.WHITE
 
-	# Tila-teksti
+	# Korosta aktiivinen rakennustila
+	var bm: int = pixel_world.build_mode
+	var active_build_idx: int = -1
+	match bm:
+		pixel_world.BUILD_SPAWNER:       active_build_idx = 0
+		pixel_world.BUILD_CONVEYOR_START, pixel_world.BUILD_CONVEYOR_END: active_build_idx = 1
+		pixel_world.BUILD_SAND_MINE:     active_build_idx = 2
+		pixel_world.BUILD_FURNACE:       active_build_idx = 3
+		pixel_world.BUILD_SLING:         active_build_idx = 4
+		pixel_world.BUILD_WALL_START, pixel_world.BUILD_WALL_END: active_build_idx = 5
+		pixel_world.BUILD_MONEY_EXIT:    active_build_idx = 6
+		pixel_world.BUILD_CRUSHER:       active_build_idx = 7
+	for i in build_buttons.size():
+		build_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == active_build_idx else Color.WHITE
+
+	# Tila-teksti FPS-labelissa
 	var mode_str := ""
 	if pixel_world.build_menu_visible:
-		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko [6] Seinä | MAT: [7] Multa [8] RautaMalmi [9] KultaMalmi"
+		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko [6] Seinä [7] Kassa [8] Murskaaja | MAT: [9] Multa [0] RautaMalmi"
 	elif pixel_world.build_mode == pixel_world.BUILD_SPAWNER:
 		mode_str = " | SPAWNER [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_CONVEYOR_START:
@@ -214,21 +500,18 @@ func _process(_delta: float) -> void:
 		mode_str = " | SEINÄ: klikkaa loppu"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
-	elif pixel_world.laser_mode:
-		if pixel_world.laser_dragging:
-			mode_str = " | LASERI [vedä]"
-		else:
-			mode_str = " | LASERI [L]"
+	elif pixel_world.current_weapon == pixel_world.Weapon.RIFLE:
+		mode_str = " | RYNNÄKKÖ [L]"
+
 	var explosion_names: Array[String] = ["Pieni", "Keski", "Iso", "Mega"]
 	var exp_str := explosion_names[pixel_world.explosion_size]
-	var chicken_count: int = pixel_world.get_chicken_count()
-	var chicken_str := " | Kanoja: %d" % chicken_count if chicken_count > 0 else ""
 	var belt_str := " | Hihnoja: %d" % pixel_world.conveyors.size() if not pixel_world.conveyors.is_empty() else ""
 	var furnace_str := " | Uuneja: %d" % pixel_world.furnaces.size() if not pixel_world.furnaces.is_empty() else ""
 	var mine_str := " | Kaivoksia: %d" % pixel_world.sand_mines.size() if not pixel_world.sand_mines.is_empty() else ""
 	var sling_str := " | Linkoja: %d" % pixel_world.launchers.size() if not pixel_world.launchers.is_empty() else ""
 	var speed_str := " | %dx" % int(pixel_world.sim_speed) if pixel_world.sim_speed > 1.0 else ""
-	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, chicken_str, belt_str, furnace_str, mine_str, sling_str, speed_str, mode_str]
+	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, belt_str, furnace_str, mine_str, sling_str, speed_str, mode_str]
+	money_label.text = "$%d" % pixel_world.money
 
 
 func _on_material(mat: int) -> void:
@@ -241,16 +524,16 @@ func _on_stone_static() -> void:
 	pixel_world.current_material = pixel_world.MAT_STONE
 	pixel_world.stone_dynamic = false
 	pixel_world.build_mode = pixel_world.BUILD_NONE
-	$VBox/BtnStone.modulate = Color(1.5, 1.5, 0.5)
-	$VBox/BtnStoneDynamic.modulate = Color.WHITE
+	btn_stone.modulate = Color(1.5, 1.5, 0.5)
+	btn_stone_dynamic.modulate = Color.WHITE
 
 
 func _on_stone_dynamic() -> void:
 	pixel_world.current_material = pixel_world.MAT_STONE
 	pixel_world.stone_dynamic = true
 	pixel_world.build_mode = pixel_world.BUILD_NONE
-	$VBox/BtnStone.modulate = Color.WHITE
-	$VBox/BtnStoneDynamic.modulate = Color(1.5, 1.5, 0.5)
+	btn_stone.modulate = Color.WHITE
+	btn_stone_dynamic.modulate = Color(1.5, 1.5, 0.5)
 
 
 func _on_clear() -> void:
@@ -263,7 +546,7 @@ func _on_reset() -> void:
 
 func _on_brush_changed(value: float) -> void:
 	pixel_world.brush_size = int(value)
-	brush_label.text = "Pensseli: %d" % int(value)
+	brush_label.text = "Pen: %d" % int(value)
 
 
 func _on_speed(speed: float) -> void:

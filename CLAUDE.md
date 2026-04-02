@@ -68,6 +68,15 @@ EMPTY=0, SAND=1, WATER=2, STONE=3, WOOD=4, FIRE=5, OIL=6, STEAM=7, ASH=8, WOOD_F
 - Maalaus: vasen hiiri = maalaa, oikea = pyyhi
 - Leikkaus: X = leikkaustila päälle/pois, vasen hiiri leikkaa kiveä/puuta
 - Tyhjennys: C = tyhjennä kenttä
+- **I** = tallentaa AI-debugdata: `game_view.png` (kuvakaappaus) + `game_state.json` (pelitila)
+
+## AI-pelinäkymä
+
+Kun käyttäjä viittaa kuvakaappaukseen, screenshottiin, pelimaailmaan tai tallentamaansa debugdataan — **lue aina ensin**:
+- `C:\Users\mauri\Desktop\Git\GodotMining\game_view.png` (visuaalinen näkymä, Read-työkalu)
+- `C:\Users\mauri\Desktop\Git\GodotMining\game_state.json` (pelitila: pelaaja, ase, gravity gun, FPS jne.)
+
+Jos tiedostoja ei löydy: pyydä käyttäjää painamaan I pelissä ensin.
 
 ## Tärkeät rajoitteet
 
