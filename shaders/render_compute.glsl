@@ -41,6 +41,10 @@ const uint IRON_ORE    = 12u;
 const uint GOLD_ORE    = 13u;
 const uint IRON        = 14u;
 const uint GOLD        = 15u;
+const uint COAL        = 16u;
+const uint HELD        = 17u;
+const uint GRAVEL      = 18u;
+const uint BEDROCK     = 19u;
 
 // Materiaalien perusvärit (sama kuin pixel_render.gdshader MAT_COLORS)
 // Tallennettu 0-255 uint-arvoina
@@ -60,6 +64,10 @@ uvec3 mat_base_color(uint mat) {
     if (mat == GOLD_ORE)     return uvec3(183u, 165u, 63u);
     if (mat == IRON)         return uvec3(173u, 173u, 183u);
     if (mat == GOLD)         return uvec3(229u, 198u, 51u);
+    if (mat == COAL)         return uvec3(46u,  43u,  53u);
+    if (mat == HELD)         return uvec3(255u, 216u, 25u);
+    if (mat == GRAVEL)       return uvec3(140u, 127u, 114u);
+    if (mat == BEDROCK)      return uvec3(63u,  56u,  76u);
     return uvec3(20u, 20u, 30u);  // EMPTY ja tuntemattomat
 }
 
@@ -80,6 +88,9 @@ uint mat_variation(uint mat) {
     if (mat == GOLD_ORE)     return 10u;   // 0.04
     if (mat == IRON)         return 5u;    // 0.02
     if (mat == GOLD)         return 5u;    // 0.02
+    if (mat == COAL)         return 12u;   // 0.05
+    if (mat == GRAVEL)       return 10u;   // 0.04
+    if (mat == BEDROCK)      return 7u;    // 0.03
     return 0u;
 }
 
@@ -104,8 +115,8 @@ void main() {
     uint mat  = cell & 0xFFu;
     uint seed = (cell >> 8u) & 0xFFu;
 
-    // Rajaa materiaali-ID tunnettuun väliin
-    if (mat > 15u) mat = 0u;
+    // Rajaa materiaali-ID tunnettuun väliin (0-19)
+    if (mat > 19u) mat = 0u;
 
     uvec3 color = mat_base_color(mat);
     uint  var_  = mat_variation(mat);
@@ -158,6 +169,18 @@ void main() {
         color.r = uint((color.r * alpha + empty_r * (255u - alpha)) / 255u);
         color.g = uint((color.g * alpha + empty_g * (255u - alpha)) / 255u);
         color.b = uint((color.b * alpha + empty_b * (255u - alpha)) / 255u);
+    }
+
+    // --- Bedrock-efekti: diagonaalinen raitakuvio ---
+    if (mat == BEDROCK) {
+        // Approksimoi sin((x+y)*800 + frame*0.3)*0.5+0.5
+        uint stripe_h = hash((x + y) * 12345u ^ p.frame * 1234u);
+        uint stripe = (stripe_h & 0xFFu);  // [0, 255]
+        // mix(color, color * 0.6, stripe * 0.2 / 255) — tummennusefekti
+        uint dark_mult = 255u - (stripe * 51u / 255u);  // 0.2 * stripe
+        color.r = (color.r * dark_mult) / 255u;
+        color.g = (color.g * dark_mult) / 255u;
+        color.b = (color.b * dark_mult) / 255u;
     }
 
     // UNORM: arvo / 255 → [0.0, 1.0], imageStore ottaa vec4 (ei uvec4) rgba8-formaatissa

@@ -1,8 +1,8 @@
 extends RefCounted
 
 # Pelaajan koko pikseleinä
-const WIDTH := 4
-const HEIGHT := 7
+const WIDTH := 6
+const HEIGHT := 10
 
 # Fysiikka
 const GRAVITY := 0.35
@@ -38,16 +38,38 @@ var diving := false  # Sukellustila — pelaaja uppoaa pohjaan
 var jetpack_active := false  # Jetpack päällä/pois
 var _space_was_pressed := false  # Rising-edge detektio space-näppäimelle
 
+# Animaatiotilat
+enum AnimState { IDLE = 0, WALK = 1, JETPACK = 2, MINE = 3, SWIM = 4 }
+const ANIM_OFFSETS: Dictionary = {
+	AnimState.IDLE: 0, AnimState.WALK: 1, AnimState.JETPACK: 5,
+	AnimState.MINE: 7, AnimState.SWIM: 10,
+}
+const ANIM_LENGTHS: Dictionary = {
+	AnimState.IDLE: 1, AnimState.WALK: 4, AnimState.JETPACK: 2,
+	AnimState.MINE: 3, AnimState.SWIM: 2,
+}
+const ANIM_SPEEDS: Dictionary = {
+	AnimState.IDLE: 0.0, AnimState.WALK: 0.12, AnimState.JETPACK: 0.18,
+	AnimState.MINE: 0.08, AnimState.SWIM: 0.22,
+}
+var anim_state: int = AnimState.IDLE
+var anim_frame: int = 0
+var anim_timer: float = 0.0
+var anim_mining: bool = false  # Asetetaan pixel_world.gd:stä kaivauksen aikana
+
 # Värit pelaajaspritelle (yksinkertainen pikseligrafiiikka)
 # 0 = läpinäkyvä, 1 = vartalo, 2 = pää, 3 = jalat
 const SPRITE: Array[Array] = [
-	[0, 2, 2, 0],  # Pää ylärivi
-	[0, 2, 2, 0],  # Pää alarivi
-	[1, 1, 1, 1],  # Hartiat
-	[0, 1, 1, 0],  # Vartalo
-	[0, 1, 1, 0],  # Vartalo
-	[0, 3, 3, 0],  # Jalat ylä
-	[3, 0, 0, 3],  # Jalat ala (levällään)
+	[0, 0, 2, 2, 0, 0],  # Pää ylä
+	[0, 2, 2, 2, 2, 0],  # Pää
+	[0, 2, 2, 2, 2, 0],  # Pää ala
+	[1, 1, 1, 1, 1, 1],  # Hartiat
+	[0, 1, 1, 1, 1, 0],  # Vartalo
+	[0, 1, 1, 1, 1, 0],  # Vartalo
+	[0, 1, 1, 1, 1, 0],  # Vartalo
+	[0, 1, 3, 3, 1, 0],  # Jalat ylä
+	[0, 3, 3, 3, 3, 0],  # Jalat keski
+	[3, 3, 0, 0, 3, 3],  # Jalat ala
 ]
 
 const SPRITE_COLORS: Array[Color] = [
@@ -58,9 +80,36 @@ const SPRITE_COLORS: Array[Color] = [
 ]
 
 
-func update(grid: PackedByteArray, w: int, h: int) -> void:
+func update(grid: PackedByteArray, w: int, h: int, delta: float = 0.016) -> void:
 	_handle_movement()
 	_apply_physics(grid, w, h)
+	_update_animation(delta)
+
+
+func _update_animation(delta: float) -> void:
+	var new_state: int
+	if anim_mining:
+		new_state = AnimState.MINE
+	elif in_water:
+		new_state = AnimState.SWIM
+	elif jetpack_active:
+		new_state = AnimState.JETPACK
+	elif abs(velocity.x) > 0.3 and on_ground:
+		new_state = AnimState.WALK
+	else:
+		new_state = AnimState.IDLE
+
+	if new_state != anim_state:
+		anim_state = new_state
+		anim_timer = 0.0
+
+	var spd: float = ANIM_SPEEDS[anim_state]
+	if spd > 0.0:
+		anim_timer += delta
+		var local_frame: int = int(anim_timer / spd) % ANIM_LENGTHS[anim_state]
+		anim_frame = ANIM_OFFSETS[anim_state] + local_frame
+	else:
+		anim_frame = ANIM_OFFSETS[anim_state]
 
 
 func _handle_movement() -> void:

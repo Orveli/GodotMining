@@ -170,6 +170,7 @@ func _build_ui() -> void:
 	_tab_launcher(tabs)
 	_tab_worldgen(tabs)
 	_tab_game(tabs)
+	_tab_testit(tabs)
 
 
 # Apufunktio: luo ScrollContainer + VBoxContainer tabi-sisällöksi
@@ -207,8 +208,8 @@ func _tab_simulaatio(tabs: TabContainer) -> void:
 		func(): return float(pixel_world.get("logic_frame_interval")) if pixel_world != null else 4.0,
 		func(v: float): pixel_world.set("logic_frame_interval", int(v)))
 	_slider_row(p, "Zoom smooth", 1.0, 20.0, 0.5,
-		func(): return float(pixel_world.get("zoom_smooth")) if pixel_world != null else 8.0,
-		func(v: float): pixel_world.set("zoom_smooth", v))
+		func(): return float(pixel_world.get("zoom_level") if pixel_world != null else 1.0),
+		func(v: float): if pixel_world != null: pixel_world.target_zoom = v)
 
 
 func _tab_physics(tabs: TabContainer) -> void:
@@ -225,11 +226,8 @@ func _tab_physics(tabs: TabContainer) -> void:
 		func(): return float(pixel_world.get("grav_gun_radius")) if pixel_world != null else 40.0,
 		func(v: float): pixel_world.set("grav_gun_radius", int(v)))
 	_slider_row(p, "GravGun vakuumi säde (px)", 20, 250, 10,
-		func(): return float(pixel_world.get("grav_gun_vacuum_radius")) if pixel_world != null else 80.0,
-		func(v: float): pixel_world.set("grav_gun_vacuum_radius", int(v)))
-	_slider_row(p, "GravGun kappalevoima", 0.5, 15.0, 0.5,
-		func(): return float(pixel_world.get("grav_gun_body_strength")) if pixel_world != null else 3.0,
-		func(v: float): pixel_world.set("grav_gun_body_strength", v))
+		func(): return float(pixel_world.get("grav_gun_vacuum_radius") if pixel_world != null else 80),
+		func(v: float): if pixel_world != null: pixel_world.set("grav_gun_vacuum_radius", int(v)))
 
 
 func _tab_launcher(tabs: TabContainer) -> void:
@@ -719,3 +717,125 @@ func _save_screenshot() -> void:
 	var path := "user://screenshot_%s.png" % ts
 	img.save_png(path)
 	print("Kuvakaappaus tallennettu: %s" % path)
+
+
+# ── Testit-tabi ──────────────────────────────────────────────────────────────
+
+const _GODOT_PATH := "C:/Users/mauri/Desktop/Godot/Godot_v4.6.1-stable_win64_console.exe"
+const _UNIT_TESTS: Array[String] = [
+	"test_physics.gd",
+	"test_launcher.gd",
+	"test_grav_gun.gd",
+]
+
+var _test_output: RichTextLabel
+
+
+func _tab_testit(tabs: TabContainer) -> void:
+	var p := _make_tab_scroll(tabs, "Testit")
+
+	# ── Yksikkötestit-osio ──
+	_subheader(p, "Yksikkötestit")
+
+	# Yksittäiset testinapit — capture arvo closureen välittämällä parametrina
+	for test_name: String in _UNIT_TESTS:
+		p.add_child(_make_btn(test_name, _run_test.bind(test_name)))
+
+	p.add_child(HSeparator.new())
+	p.add_child(_make_btn("Aja kaikki yksikkötestit", _run_all_tests))
+
+	p.add_child(HSeparator.new())
+
+	# ── Tulokset ──
+	_subheader(p, "Tulokset")
+
+	var result_row := HBoxContainer.new()
+	result_row.add_theme_constant_override("separation", 6)
+	p.add_child(result_row)
+
+	var clear_btn := _make_btn("Tyhjennä", func(): _test_output.clear())
+	result_row.add_child(clear_btn)
+
+	_test_output = RichTextLabel.new()
+	_test_output.bbcode_enabled = true
+	_test_output.scroll_following = true
+	_test_output.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_test_output.custom_minimum_size = Vector2(0, 200)
+	# Monospace-fontti luettavuuden vuoksi
+	_test_output.add_theme_font_size_override("normal_font_size", 11)
+	_test_output.add_theme_font_size_override("mono_font_size", 11)
+	_test_output.text = ""
+	p.add_child(_test_output)
+
+
+# Ajaa yhden yksikkötestin ja lisää tuloksen näyttöön
+func _run_test(test_name: String) -> void:
+	if _test_output == null:
+		return
+	var project_path := ProjectSettings.globalize_path("res://")
+	_test_output.append_text("\n[color=#7bbfff]── %s ──[/color]\n" % test_name)
+
+	var output: Array = []
+	var exit_code := OS.execute(
+		_GODOT_PATH,
+		["--headless", "--path", project_path, "--script", "res://tests/unit/" + test_name],
+		output,
+		true
+	)
+
+	_append_test_output(output, exit_code)
+
+
+# Ajaa kaikki yksikkötestit peräkkäin
+func _run_all_tests() -> void:
+	if _test_output == null:
+		return
+	_test_output.clear()
+	_test_output.append_text("[color=#7bbfff]═══ Kaikki yksikkötestit ═══[/color]\n")
+
+	var project_path := ProjectSettings.globalize_path("res://")
+	var all_ok := true
+
+	for test_name: String in _UNIT_TESTS:
+		_test_output.append_text("\n[color=#7bbfff]── %s ──[/color]\n" % test_name)
+		var output: Array = []
+		var exit_code := OS.execute(
+			_GODOT_PATH,
+			["--headless", "--path", project_path, "--script", "res://tests/unit/" + test_name],
+			output,
+			true
+		)
+		if exit_code != 0:
+			all_ok = false
+		_append_test_output(output, exit_code)
+
+	_test_output.append_text("\n")
+	if all_ok:
+		_test_output.append_text("[color=#55ff55][b]Kaikki testit OK[/b][/color]\n")
+	else:
+		_test_output.append_text("[color=#ff5555][b]Jotkut testit EPÄONNISTUIVAT[/b][/color]\n")
+
+
+# Lisää OS.execute()-tulosteen RichTextLabeliin väritettynä
+func _append_test_output(output: Array, exit_code: int) -> void:
+	var raw := ""
+	for chunk in output:
+		raw += str(chunk)
+
+	# Väritä rivit: FAILED/ERROR = punainen, OK/PASS = vihreä, muu = normaali
+	for line in raw.split("\n"):
+		if line.is_empty():
+			continue
+		var upper := line.to_upper()
+		if "FAILED" in upper or "ERROR" in upper or "FAIL:" in upper:
+			_test_output.append_text("[color=#ff5555]%s[/color]\n" % line.xml_escape())
+		elif "OK" in upper or "PASS" in upper or "PASSED" in upper:
+			_test_output.append_text("[color=#55ff55]%s[/color]\n" % line.xml_escape())
+		else:
+			_test_output.append_text("%s\n" % line.xml_escape())
+
+	# Lopputulos exit-koodin perusteella
+	if exit_code == 0:
+		_test_output.append_text("[color=#55ff55]Exit: %d (OK)[/color]\n" % exit_code)
+	else:
+		_test_output.append_text("[color=#ff5555]Exit: %d (VIRHE)[/color]\n" % exit_code)

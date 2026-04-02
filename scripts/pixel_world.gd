@@ -4,6 +4,7 @@ const TestSceneGenerator = preload("res://scripts/test_scene_generator.gd")
 const LauncherScript = preload("res://scripts/launcher.gd")
 const MoneyExit = preload("res://scripts/money_exit.gd")
 const Crusher = preload("res://scripts/crusher.gd")
+const DrillScript = preload("res://scripts/drill.gd")
 
 const MAT_EMPTY := 0
 const MAT_SAND := 1
@@ -24,6 +25,7 @@ const MAT_GOLD := 15
 const MAT_COAL := 16
 const MAT_HELD := 17  # Poistettu käytöstä — säilytetään yhteensopivuuden vuoksi
 const MAT_GRAVEL := 18  # Sora — kiven murskautuessa syntyvä jauhe
+const MAT_BEDROCK := 19  # Pohjakivi — tuhoamaton, worldgen kirjoittaa reunoihin/pohjaan
 
 const SIM_WIDTH := 1664
 const SIM_HEIGHT := 960
@@ -64,7 +66,6 @@ var grid_texture: ImageTexture
 var seed_image: Image
 var seed_texture: ImageTexture
 var shader_mat: ShaderMaterial
-var darkness_mode: bool = false
 
 # Väripaletit — runtime-vaihdettava
 const PALETTE_DEFAULT: Array = [
@@ -87,6 +88,7 @@ const PALETTE_DEFAULT: Array = [
 	Vector3(0.18, 0.17, 0.21),   # 16 COAL
 	Vector3(1.0, 0.85, 0.1),     # 17 HELD
 	Vector3(0.55, 0.50, 0.45),   # 18 GRAVEL
+	Vector3(0.25, 0.22, 0.30),   # 19 BEDROCK (tumma harmaa-violetti)
 ]
 
 const PALETTE_DEEP: Array = [
@@ -109,11 +111,12 @@ const PALETTE_DEEP: Array = [
 	Vector3(0.12, 0.11, 0.14),   # 16 COAL
 	Vector3(1.0, 0.85, 0.1),     # 17 HELD
 	Vector3(0.42, 0.37, 0.32),   # 18 GRAVEL (tummempi syvyydessä)
+	Vector3(0.18, 0.16, 0.22),   # 19 BEDROCK (vielä tummempi syvyydessä)
 ]
 
 const PALETTE_VAR_DEFAULT: Array = [
 	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03,
-	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.04
+	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.04, 0.03
 ]
 
 var current_palette: Array = PALETTE_DEFAULT
@@ -134,9 +137,6 @@ var paint_pending := false
 
 # Kaivaustyökalut
 enum Tool { HAND, SHOVEL, PICKAXE, DRILL, MEGA_DRILL }
-enum Weapon { PICKAXE, MEGA_DRILL, RIFLE, ROCKET, GRAVITY_GUN }
-var current_weapon: Weapon = Weapon.PICKAXE
-
 var current_tool: Tool = Tool.HAND
 const TOOL_DATA := {
 	Tool.HAND:       { "radius": 3,  "speed": 1 },
@@ -146,19 +146,6 @@ const TOOL_DATA := {
 	Tool.MEGA_DRILL: { "radius": 14, "speed": 4 },
 }
 
-# Hakkuun cooldown — estää liian nopean kaivauksen
-var pickaxe_cooldown: float = 0.0
-const PICKAXE_COOLDOWN_TIME := 0.15
-var mega_drill_cooldown: float = 0.0
-const MEGA_DRILL_COOLDOWN_TIME := 0.05  # 20x/s riittää
-
-# Raketinheitin
-var rocket_cooldown: float = 0.0
-const ROCKET_COOLDOWN_TIME := 0.5
-const ROCKET_SPEED := 200.0
-const ROCKET_GRAVITY := 15.0  # Pieni gravitaatio raketille
-const MAX_ROCKETS := 3
-
 # Per-faasi ajoitusmittaus
 var _t_gpu: float = 0.0
 var _t_download: float = 0.0
@@ -166,28 +153,26 @@ var _t_upload_render: float = 0.0
 var _t_gamelogic: float = 0.0
 var _perf_frame: int = 0
 
-# Rynnäkkäkivääri
-var laser_mode := false
-var laser_dragging := false
-var rifle_cooldown: float = 0.0
-const RIFLE_COOLDOWN_TIME := 0.05
-
 # Laseri — funktio säilytetty mutta ei käytössä (vakiot tarvitaan kääntämiseen)
 var laser_beam_timer: int = 0
 const LASER_BEAM_DURATION := 8
 const LASER_WIDTH := 2
 
+# Kaivaustyökalun cooldown
+var pickaxe_cooldown: float = 0.0
+const PICKAXE_COOLDOWN_TIME := 0.15
+const ROCKET_GRAVITY := 15.0  # Pieni gravitaatio raketille (launcher-rakennus)
+
+# Pommi-systeemi
+var placed_bombs: Array = []       # Elementit: { "pos": Vector2i, "timer": float, "radius": int }
+var bomb_mode: bool = false        # Tosi = vasemmalla klikillä sijoitetaan pommi
+var bomb_radius: int = 20          # Räjähdyssäde pikseleinä
+var _bomb_blink: float = 0.0      # Vilkutusajastin piirtoa varten
+
 # Screenshake
 var trauma: float = 0.0
 var shake_offset: Vector2 = Vector2.ZERO
 var ca_flash: float = 0.0  # Chromatic aberration osumasta, ei heiluta ruutua
-
-# Sky-visibility map
-var visibility_image: Image
-var visibility_tex: ImageTexture
-var visibility_dirty: bool = true
-var _vis_thread: Thread = null
-var _vis_result: PackedByteArray = PackedByteArray()
 
 # Lokaali impakti-CA
 var impact_uv: Vector2 = Vector2.ZERO
@@ -205,20 +190,14 @@ var flash_radius: float = 0.0
 var flash_timer: int = 0  # Frameja jäljellä (0 = ei flashia)
 const FLASH_DURATION := 6  # Frameja
 
-# Gravity gun
-var grav_gun_mode: int = 0  # 0=off, 1=pull, 2=vakuumi
+# Gravity gun — poistettu käytöstä, muuttujat säilytetään kääntämistä varten
+var grav_gun_mode: int = 0
 var grav_gun_pos: Vector2i = Vector2i.ZERO
 var grav_gun_radius: int = 40
 var grav_gun_vacuum_radius: int = 80
-var grav_gun_body_strength: float = 3.0
-var mouse_velocity: Vector2 = Vector2.ZERO
-var prev_mouse_grid: Vector2 = Vector2.ZERO
-
-# Gravity gun — held-lista (CPU omistaa kiinnitetyt pikselit)
-const GRAV_CAPTURE_RADIUS := 8       # Säde jolla pikselit nappataan (px)
-const GRAV_MAX_HELD := 500           # Maksimi kiinnitettyjen pikselien määrä
-var grav_held: Array[Vector3i] = []  # Elementit: (material_id, offset_x, offset_y)
-var grav_held_written: Array[int] = []  # Edellisellä framella kirjoitetut grid-indeksit
+const GRAV_MAX_HELD := 500
+var grav_held: Array[Vector3i] = []
+var grav_held_written: Array[int] = []
 
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
@@ -242,6 +221,7 @@ const BUILD_WALL_START := 7
 const BUILD_WALL_END := 8
 const BUILD_MONEY_EXIT := 9
 const BUILD_CRUSHER := 10
+const BUILD_DRILL := 11
 const GRID_SIZE := 8  # Rakennusgridi pikseleinä
 var build_mode: int = BUILD_NONE
 var build_menu_visible := false
@@ -253,6 +233,7 @@ var sand_mines: Array = []
 var launchers: Array = []
 var money_exits: Array = []
 var crushers: Array = []
+var drills: Array = []
 var money: int = 0
 var building_pixels: Dictionary = {}  # idx -> true, kaikki rakennusten pikselit
 var launcher_phase: int = 0    # 0=ei aktiivinen, 1=pohja, 2=katto, 3=suunta
@@ -266,10 +247,14 @@ var flying_max_count: int = 300
 # Debug
 var infinite_money: bool = false
 var debug_menu_visible: bool = false
+var god_mode: bool = true  # God mode — pelaaja ei ota vahinkoa
 
-# Day/night sykli
-var time_of_day: float = 0.5      # 0=yö, 0.5=päivä
-var day_duration: float = 60.0    # Täyden päivän kesto sekunteina
+# Ase-enum ja aktiivinen ase
+enum Weapon { PICKAXE, MEGA_DRILL, RIFLE, ROCKET, GRAVITY_GUN }
+var current_weapon: int = Weapon.PICKAXE
+
+# Pelaaja-viittaus (asetetaan player.gd:stä tai jätetään nulliksi god-modessa)
+var player: Node = null
 
 # Linko-oletusasetukset (debug-menu synkronoi kaikki launchers näihin)
 var launcher_launch_speed: float = 120.0
@@ -283,10 +268,6 @@ var prev_right_pressed := false
 var block_paint := false
 var _gpu_upload_buf := PackedByteArray()
 const SNAP_DISTANCE := 6.0
-
-const PlayerScript := preload("res://scripts/player.gd")
-var player: RefCounted
-var god_mode: bool = false
 
 # Kamera / zoom
 var zoom_index: int = 0  # Yhteensopivuus
@@ -354,17 +335,8 @@ func _ready() -> void:
 	shader_mat.set_shader_parameter("frame", 0)
 	shader_mat.set_shader_parameter("mat_colors", PALETTE_DEFAULT)
 	shader_mat.set_shader_parameter("mat_var", PALETTE_VAR_DEFAULT)
-	shader_mat.set_shader_parameter("darkness_mode", 0)  # Pois oletuksena, O-näppäin togglea
-	shader_mat.set_shader_parameter("time_of_day", time_of_day)
-	shader_mat.set_shader_parameter("static_light_count", 0)
-	shader_mat.set_shader_parameter("proj_count", 0)
 	shader_mat.set_shader_parameter("impact_intensity", 0.0)
 	shader_mat.set_shader_parameter("screen_aspect", float(W) / float(SIM_HEIGHT))
-
-	# Sky-visibility tekstuuri — BFS-pohjainen pimeys
-	visibility_image = Image.create(W, SIM_HEIGHT, false, Image.FORMAT_R8)
-	visibility_tex = ImageTexture.create_from_image(visibility_image)
-	shader_mat.set_shader_parameter("visibility_tex", visibility_tex)
 	material = shader_mat
 
 	# Fysiikkamoottori
@@ -381,10 +353,6 @@ func _ready() -> void:
 	build_preview.z_index = 10
 	building_layer.add_child(build_preview)
 
-	# Pelaaja
-	player = PlayerScript.new()
-	player.spawn_at_surface(grid, W, SIM_HEIGHT)
-
 	# GPU compute setup
 	_setup_compute()
 
@@ -399,7 +367,7 @@ func _ready() -> void:
 	_toast_label.position = Vector2(16, 48)
 	_toast_label.z_index = 100
 	_toast_label.visible = false
-	get_tree().root.add_child(_toast_label)
+	get_tree().root.add_child.call_deferred(_toast_label)
 
 	# Scenario runner — tarkista cmdline-argumentit
 	var args := OS.get_cmdline_user_args()
@@ -628,9 +596,6 @@ func _process(delta: float) -> void:
 		if _toast_timer <= 0.0:
 			_toast_label.visible = false
 
-	# Päivitä päivä/yö-sykli
-	time_of_day = fmod(time_of_day + delta / day_duration, 1.0)
-
 	frame_count += 1
 	fps_timer += delta
 
@@ -646,20 +611,18 @@ func _process(delta: float) -> void:
 		])
 		fps_timer = 0.0
 
+	# Kaivaustyökalun cooldown
+	if pickaxe_cooldown > 0.0:
+		pickaxe_cooldown -= delta
+
 	# Screenshake
 	_update_screenshake(delta)
 
 	# Kamera: pehmeä zoom + seuraa pelaajaa
 	_update_camera(delta)
 
-	# Cooldownit
-	if pickaxe_cooldown > 0.0:
-		pickaxe_cooldown -= delta
-	if mega_drill_cooldown > 0.0:
-		mega_drill_cooldown -= delta
-	if rocket_cooldown > 0.0:
-		rocket_cooldown -= delta
-	rifle_cooldown = maxf(rifle_cooldown - delta, 0.0)
+	# Pommi-ajastimet — laske ja räjäytä kun aika loppuu
+	_update_bombs(delta)
 
 	_handle_input(delta)
 
@@ -667,17 +630,6 @@ func _process(delta: float) -> void:
 		# Ajan nopeus — kerrotaan gpu_passes simulaatiokertoimen mukaan
 		var saved_passes := gpu_passes
 		gpu_passes = max(1, gpu_passes * int(sim_speed))
-
-		# Vaihe 0: Gravity gun — CPU-veto ja held-merkintä ENNEN GPU-passia
-		# Järjestys on kriittinen: HELD-tila täytyy olla gridissä kun GPU simuloi,
-		# muuten GPU siirtää pikseleitä ennen kuin CPU ehtii kiinnittää ne.
-		if grav_gun_mode > 0:
-			# Poista edellisen framen held-pikselit
-			_grav_erase_held()
-			# Nappaa pikselit held-listaan koko grav_gun_radius alueelta ja merkitse HELD
-			_grav_capture()
-			_grav_write_held()
-			paint_pending = true
 
 		# Vaihe 1: CA-simulaatio GPU:lla
 		# Maalaukset ladataan ennen simulaatiota jos paint_pending
@@ -739,26 +691,18 @@ func _process(delta: float) -> void:
 		if _update_sand_mines(delta * sim_speed):
 			grid_modified = true
 
-		# Vaihe 5.65: Money exitit ja murskaajat
+		# Vaihe 5.65: Money exitit, murskaajat ja porat
 		if _update_money_exits(delta * sim_speed):
 			grid_modified = true
 		if _update_crushers(delta * sim_speed):
+			grid_modified = true
+		if _update_drills(delta * sim_speed):
 			grid_modified = true
 
 		# Vaihe 5.7: Hissilinkot + lentävät pikselit
 		if not launchers.is_empty() or not flying_pixels.is_empty():
 			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
-		# Projektiilivalaistus — päivitetään jokainen frame
-		_update_proj_lights()
-
-		# Visibility: käynnistä uusi laskenta kun dirty, hae valmis tulos threadista
-		if visibility_dirty:
-			visibility_dirty = false
-			_update_visibility_map()
-		elif _vis_thread != null and not _vis_thread.is_alive():
-			_update_visibility_map()  # Hakee tuloksen ja mahdollisesti käynnistää seuraavan
-
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
 		# Vaihe 6: Lataa CPU:n muutokset GPU:lle — yhdistetty lataus
@@ -768,10 +712,6 @@ func _process(delta: float) -> void:
 		if grid_modified or paint_pending:
 			_upload_paint_to_gpu()
 			paint_pending = false
-
-	# Pelaajan päivitys (vain player modessa)
-	if not god_mode:
-		player.update(grid, W, SIM_HEIGHT)
 
 	# Scenario runner — ajetaan ennen renderöintiä jotta fill_rect näkyy heti
 	if _scenario_active:
@@ -789,88 +729,22 @@ func _process(delta: float) -> void:
 		building_layer.scale = Vector2(size.x / float(W), size.y / float(SIM_HEIGHT))
 
 
-func _handle_input(delta: float) -> void:
+func _handle_input(_delta: float) -> void:
 	# Estä toiminnot kun hiiri on UI-paneelin päällä
 	if ui_panel and ui_panel.get_global_rect().has_point(get_viewport().get_mouse_position()):
 		prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-		grav_gun_mode = 0
 		return
 	var left_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var right_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
 	var left_just := left_pressed and not prev_left_pressed
 	var right_just := right_pressed and not prev_right_pressed
 
-	# Nollaa grav_gun jos vaihdettu pois Gravity Gun -aseesta
-	if current_weapon != Weapon.GRAVITY_GUN and grav_gun_mode > 0:
-		grav_gun_mode = 0
-		grav_held.clear()
-		grav_held_written.clear()
-
-	# Oikea hiiri — käytä valittua asetta AINA
-	if true:
+	# Oikea hiiri — kaivaa aina
+	if right_pressed:
 		var coords := _mouse_to_grid()
-		match current_weapon:
-			Weapon.PICKAXE:
-				if right_pressed and coords.x >= 0:
-					current_tool = Tool.PICKAXE
-					var dig_pos := _player_adjacent_dig_pos(coords, 3)
-					_cut(dig_pos.x, dig_pos.y)
-			Weapon.MEGA_DRILL:
-				if right_pressed and coords.x >= 0 and mega_drill_cooldown <= 0.0:
-					current_tool = Tool.MEGA_DRILL
-					var dig_pos := _player_adjacent_dig_pos(coords, 4)
-					_cut(dig_pos.x, dig_pos.y)
-					mega_drill_cooldown = MEGA_DRILL_COOLDOWN_TIME
-			Weapon.RIFLE:
-				if right_pressed and coords.x >= 0 and rifle_cooldown <= 0.0:
-					var origin := cam_grid_pos if god_mode else Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
-					var dir := (Vector2(coords) - origin).normalized()
-					if dir.length_squared() < 0.01:
-						dir = Vector2(1, 0)
-					var spawn_pos := origin + dir * 5.0
-					if flying_pixels.size() < flying_max_count:
-						flying_pixels.append({
-							"pos": spawn_pos,
-							"vel": dir * 420.0,
-							"mat": MAT_STONE,
-							"seed": randi() % 256,
-							"age": 0.0,
-							"type": "bullet"
-						})
-					add_trauma(0.18)  # Recoil
-					rifle_cooldown = RIFLE_COOLDOWN_TIME
-			Weapon.ROCKET:
-				if right_pressed:
-					_fire_rocket_at_cursor()
-			Weapon.GRAVITY_GUN:
-				if right_pressed and coords.x >= 0:
-					var current_pos := Vector2(coords)
-					mouse_velocity = current_pos - prev_mouse_grid
-					prev_mouse_grid = current_pos
-					if Input.is_key_pressed(KEY_SHIFT):
-						grav_gun_mode = 2
-					else:
-						grav_gun_mode = 1
-					grav_gun_pos = coords
-					var radius := float(grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius)
-					var strength := grav_gun_body_strength * (2.5 if grav_gun_mode == 2 else 1.0)
-					physics_world.apply_attraction(Vector2(coords), radius, strength)
-				elif grav_gun_mode > 0:
-					# Vapauta held-pikselit
-					_grav_release()
-					# Heitä jos hiiri liikkui
-					if mouse_velocity.length() > 0.5:
-						var was_vacuum := grav_gun_mode == 2
-						var throw_mult := 6.0 if was_vacuum else 4.0
-						var body_mult := 5.0 if was_vacuum else 3.0
-						var radius := grav_gun_vacuum_radius if was_vacuum else grav_gun_radius
-						_throw_pixels(grav_gun_pos, radius, mouse_velocity * throw_mult)
-						physics_world.apply_throw(Vector2(grav_gun_pos), float(radius), mouse_velocity * body_mult)
-					grav_gun_mode = 0
-					mouse_velocity = Vector2.ZERO
-
-	# laser_mode pois käytöstä (shader-efekti poistettu)
-	laser_mode = false
+		if coords.x >= 0:
+			current_tool = Tool.PICKAXE
+			_cut(coords.x, coords.y)
 
 	# Rakennustilan klikkaus — vain kun ei lukossa
 	if left_just and build_mode != BUILD_NONE and not block_paint:
@@ -913,8 +787,17 @@ func _handle_input(delta: float) -> void:
 			elif build_mode == BUILD_CRUSHER:
 				_place_crusher(grid_pos)
 				block_paint = true
+			elif build_mode == BUILD_DRILL:
+				_place_drill(grid_pos)
+				block_paint = true
 
-	if left_pressed and not block_paint and not laser_mode and build_mode == BUILD_NONE:
+	# Vasen klikkaus: pommi-moodi sijoittaa pommin, muuten maalataan
+	if left_just and bomb_mode and build_mode == BUILD_NONE and not block_paint:
+		var coords := _mouse_to_grid()
+		if coords.x >= 0:
+			placed_bombs.append({ "pos": coords, "timer": 3.0, "radius": bomb_radius })
+
+	elif left_pressed and not block_paint and build_mode == BUILD_NONE and not bomb_mode:
 		var coords := _mouse_to_grid()
 		if coords.x >= 0:
 			if current_material == MAT_STONE:
@@ -993,7 +876,6 @@ func clear_world() -> void:
 	building_pixels.clear()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
-	player.spawn_at_surface(grid, W, SIM_HEIGHT)
 
 
 # === SCREENSHAKE ===
@@ -1028,23 +910,18 @@ func _update_camera(delta: float) -> void:
 		return
 	size = viewport_size
 
-	if god_mode:
-		# God mode — WASD liikuttaa kameraa vapaasti
-		var spd := 300.0 / zoom_level
-		if Input.is_key_pressed(KEY_SHIFT): spd *= 3.0
-		var dir := Vector2.ZERO
-		if Input.is_key_pressed(KEY_A): dir.x -= 1.0
-		if Input.is_key_pressed(KEY_D): dir.x += 1.0
-		if Input.is_key_pressed(KEY_W): dir.y -= 1.0
-		if Input.is_key_pressed(KEY_S): dir.y += 1.0
-		cam_vel = cam_vel.lerp(dir * spd, 12.0 * delta)
-		cam_grid_pos += cam_vel * delta
-		cam_grid_pos.x = clampf(cam_grid_pos.x, 0.0, float(W))
-		cam_grid_pos.y = clampf(cam_grid_pos.y, 0.0, float(SIM_HEIGHT))
-	else:
-		# Player mode — kamera seuraa pelaajaa
-		cam_vel = Vector2.ZERO
-		cam_grid_pos = player.position
+	# WASD liikuttaa kameraa vapaasti aina
+	var spd := 300.0 / zoom_level
+	if Input.is_key_pressed(KEY_SHIFT): spd *= 3.0
+	var dir := Vector2.ZERO
+	if Input.is_key_pressed(KEY_A): dir.x -= 1.0
+	if Input.is_key_pressed(KEY_D): dir.x += 1.0
+	if Input.is_key_pressed(KEY_W): dir.y -= 1.0
+	if Input.is_key_pressed(KEY_S): dir.y += 1.0
+	cam_vel = cam_vel.lerp(dir * spd, 12.0 * delta)
+	cam_grid_pos += cam_vel * delta
+	cam_grid_pos.x = clampf(cam_grid_pos.x, 0.0, float(W))
+	cam_grid_pos.y = clampf(cam_grid_pos.y, 0.0, float(SIM_HEIGHT))
 
 	# Portaaton zoom — lerp kohti target_zoom
 	zoom_level = lerpf(zoom_level, target_zoom, 15.0 * delta)
@@ -1072,112 +949,6 @@ func add_trauma(amount: float) -> void:
 	trauma = minf(trauma + amount, 1.0)
 
 
-
-func _update_visibility_map() -> void:
-	# Jos thread vielä pyörii, älä käynnistä uutta
-	if _vis_thread != null and _vis_thread.is_alive():
-		return
-	# Hae edellisen threadin tulos jos valmis
-	if _vis_thread != null:
-		_vis_thread.wait_to_finish()
-		_vis_thread = null
-		if _vis_result.size() == W * SIM_HEIGHT:
-			visibility_image.set_data(W, SIM_HEIGHT, false, Image.FORMAT_R8, _vis_result)
-			visibility_tex.update(visibility_image)
-	# Käynnistä uusi laskenta threadissa
-	var grid_snapshot := grid.duplicate()
-	_vis_thread = Thread.new()
-	_vis_thread.start(_bfs_thread.bind(grid_snapshot))
-
-func _bfs_thread(g: PackedByteArray) -> void:
-	var dist := PackedByteArray()
-	dist.resize(W * SIM_HEIGHT)
-	dist.fill(255)
-	var queue := PackedInt32Array()
-	queue.resize(W * SIM_HEIGHT)
-	var q_head := 0
-	var q_tail := 0
-	# Irtomateriaalit läpäisevät valoa — eivät luo täyttä varjoa
-	# EMPTY=0, SAND=1, WATER=2, FIRE=5, OIL=6, STEAM=7, ASH=8, WOOD_FALLING=9
-	# Siemenet: joka sarakkeessa skannaa ylhäältä alas kunnes osuu kiinteään
-	# (maailma ei ala y=0:sta, pintamaa voi olla missä tahansa)
-	for x in range(W):
-		for y in range(SIM_HEIGHT):
-			var idx := y * W + x
-			var m := int(g[idx])
-			if m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9:
-				dist[idx] = 0
-				queue[q_tail] = idx
-				q_tail += 1
-			else:
-				break  # Ensimmäinen kiinteä pikseli — lopeta tämä sarake
-	# BFS läpinäkyvien pikselien läpi (tyhjät + irtomateriaalit)
-	while q_head < q_tail:
-		var idx := queue[q_head]
-		q_head += 1
-		var d := int(dist[idx])
-		if d >= 250:
-			continue
-		var x := idx % W
-		var y := idx / W
-		if x > 0:
-			var n := idx - 1
-			var m := int(g[n])
-			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
-				dist[n] = 0
-				queue[q_tail] = n
-				q_tail += 1
-		if x < W - 1:
-			var n := idx + 1
-			var m := int(g[n])
-			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
-				dist[n] = 0
-				queue[q_tail] = n
-				q_tail += 1
-		if y > 0:
-			var n := idx - W
-			var m := int(g[n])
-			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
-				dist[n] = 0
-				queue[q_tail] = n
-				q_tail += 1
-		if y < SIM_HEIGHT - 1:
-			var n := idx + W
-			var m := int(g[n])
-			if dist[n] == 255 and (m == 0 or m == 1 or m == 2 or m == 5 or m == 6 or m == 7 or m == 8 or m == 9):
-				dist[n] = 0
-				queue[q_tail] = n
-				q_tail += 1
-	# Vaihe 2: Levitä taivasyhteydestä 250px kaikkeen (kivet + eristetyt alueet)
-	const MAX_VIS := 250
-	var q2 := PackedInt32Array()
-	q2.resize(W * SIM_HEIGHT)
-	var q2h := 0
-	var q2t := 0
-	for i in range(W * SIM_HEIGHT):
-		if dist[i] == 0:
-			q2[q2t] = i
-			q2t += 1
-	while q2h < q2t:
-		var idx := q2[q2h]; q2h += 1
-		var d := int(dist[idx])
-		if d >= MAX_VIS:
-			continue
-		var x := idx % W
-		var y := idx / W
-		if x > 0 and dist[idx - 1] == 255:
-			dist[idx - 1] = d + 1
-			q2[q2t] = idx - 1; q2t += 1
-		if x < W - 1 and dist[idx + 1] == 255:
-			dist[idx + 1] = d + 1
-			q2[q2t] = idx + 1; q2t += 1
-		if y > 0 and dist[idx - W] == 255:
-			dist[idx - W] = d + 1
-			q2[q2t] = idx - W; q2t += 1
-		if y < SIM_HEIGHT - 1 and dist[idx + W] == 255:
-			dist[idx + W] = d + 1
-			q2[q2t] = idx + W; q2t += 1
-	_vis_result = dist
 
 func add_ca_flash(amount: float) -> void:
 	ca_flash = maxf(ca_flash, amount)  # Ei kumuloidu — ottaa suurimman arvon
@@ -1256,18 +1027,44 @@ func explode(cx: int, cy: int, radius: int) -> void:
 	paint_pending = true
 
 
+# === POMMIT ===
+
+func _update_bombs(delta: float) -> void:
+	if placed_bombs.is_empty():
+		return
+
+	# Päivitä vilkutusajastin
+	_bomb_blink += delta * 6.0
+
+	var i := placed_bombs.size() - 1
+	while i >= 0:
+		var bomb: Dictionary = placed_bombs[i]
+		bomb["timer"] -= delta
+		placed_bombs[i] = bomb
+
+		if bomb["timer"] <= 0.0:
+			# Räjäytä pommi
+			var pos: Vector2i = bomb["pos"]
+			var radius: int = bomb["radius"]
+			explode(pos.x, pos.y, radius)
+			add_trauma(EXPLOSION_TRAUMA[clampi(explosion_size, 0, 3)])
+			placed_bombs.remove_at(i)
+		elif bomb["timer"] < 1.0:
+			# Nopea vilkutus lähellä räjähdystä — piirretään punaisena
+			var pos: Vector2i = bomb["pos"]
+			var blink_on: bool = fmod(_bomb_blink, 1.0) < 0.5
+			var mat: int = MAT_FIRE if blink_on else MAT_EMPTY
+			if pos.x >= 0 and pos.x < W and pos.y >= 0 and pos.y < SIM_HEIGHT:
+				grid[pos.y * W + pos.x] = mat
+				paint_pending = true
+		i -= 1
+
+
 # === LASERI ===
 
-func _player_adjacent_dig_pos(target_grid: Vector2i, reach: int) -> Vector2i:
-	if god_mode:
-		return target_grid
-	var player_center := Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
-	var target_f := Vector2(target_grid)
-	var dist := player_center.distance_to(target_f)
-	if dist <= float(reach):
-		return target_grid
-	var dir := (target_f - player_center).normalized()
-	return Vector2i(player_center + dir * float(reach))
+func _player_adjacent_dig_pos(target_grid: Vector2i, _reach: int) -> Vector2i:
+	# Kamera on aina god-modessa — kaivetaan suoraan kursorin kohdalta
+	return target_grid
 
 
 func _bullet_impact(cx: int, cy: int) -> void:
@@ -1301,26 +1098,8 @@ func _bullet_impact(cx: int, cy: int) -> void:
 
 
 func _fire_rocket_at_cursor() -> void:
-	if rocket_cooldown > 0.0:
-		return
-	var mp := get_local_mouse_position()
-	var tex_size := size
-	var mouse_grid := Vector2(mp.x / tex_size.x * float(W), mp.y / tex_size.y * float(SIM_HEIGHT))
-	var origin := cam_grid_pos if god_mode else Vector2(player.get_grid_pos()) + Vector2(2.0, 3.0)
-	var dir := (mouse_grid - origin).normalized()
-	if dir.length_squared() < 0.01:
-		dir = Vector2(1, 0)
-	if flying_pixels.size() < flying_max_count:
-		flying_pixels.append({
-			"pos": origin + dir * 8.0,
-			"vel": dir * 180.0,
-			"mat": MAT_STONE,
-			"seed": randi() % 256,
-			"age": 0.0,
-			"type": "rocket"
-		})
-	add_trauma(0.25)
-	rocket_cooldown = 0.12
+	# Ei enää käytössä — aselogiikka poistettu
+	pass
 
 
 func _fire_laser(start: Vector2i, end: Vector2i) -> void:
@@ -1432,7 +1211,6 @@ func regenerate_world() -> void:
 	for i in TOTAL:
 		color_seed[i] = randi() % 256
 	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
-	shader_mat.set_shader_parameter("surface_y_norm", WorldGen.surface_height_ratio)
 	paint_pending = true
 	physics_world = PhysicsWorld.new()
 	physics_initialized = false
@@ -1440,7 +1218,6 @@ func regenerate_world() -> void:
 	_clear_buildings()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
-	player.spawn_at_surface(grid, W, SIM_HEIGHT)
 	print("Maailma regeneroitu!")
 
 
@@ -1600,6 +1377,11 @@ func _input(event: InputEvent) -> void:
 					build_menu_visible = false
 					block_paint = true
 					print("Rakennustila: MURSKAAJA — klikkaa paikkaa")
+				KEY_P:
+					build_mode = BUILD_DRILL
+					build_menu_visible = false
+					block_paint = true
+					print("Rakennustila: PORA — klikkaa paikkaa")
 				KEY_ESCAPE, KEY_B:
 					build_menu_visible = false
 					build_mode = BUILD_NONE
@@ -1626,42 +1408,19 @@ func _input(event: InputEvent) -> void:
 			KEY_P:
 				# Suorituskykytesti: generoi maailma → räjäytä 3 kertaa → mittaa frame-spiikit
 				_run_perf_explosion_test()
-			KEY_Q:
-				god_mode = not god_mode
-				if god_mode:
-					cam_grid_pos = player.position
-					cam_vel = Vector2.ZERO
-					print("God mode ON — WASD liikuttaa kameraa")
-				else:
-					print("Player mode ON")
-			KEY_X:
-				current_weapon = Weapon.PICKAXE
-				grav_gun_mode = 0
-				laser_dragging = false
-				print("Ase: Hakku")
-			KEY_L:
-				current_weapon = Weapon.RIFLE
-				grav_gun_mode = 0
-				laser_dragging = false
-				print("Ase: Rynnäkkäkivääri")
+			KEY_G:
+				# Pommi-moodi toggle
+				bomb_mode = not bomb_mode
+				print("Pommi-moodi: %s" % ("ON — klikkaa sijoittaaksesi" if bomb_mode else "OFF"))
 			KEY_C: clear_world()
 			KEY_R: regenerate_world()
 			KEY_ESCAPE:
 				if build_mode != BUILD_NONE:
 					build_mode = BUILD_NONE
 					print("Rakennustila peruttu")
-			KEY_B:
-				build_menu_visible = not build_menu_visible
-				if build_menu_visible:
-					print("=== RAKENNUSVALIKKO === 1: Spawner | 2: Liukuhihna | 3: Kaivos | 4: Uuni | 5: Linko | 6: Seinä | B/ESC: Sulje")
-				else:
-					print("Rakennusvalikko suljettu")
-			KEY_F:
-				_fire_rocket_at_cursor()
-			KEY_O:
-				darkness_mode = !darkness_mode
-				shader_mat.set_shader_parameter("darkness_mode", int(darkness_mode))
-				print("Darkness mode: %s" % ("ON" if darkness_mode else "OFF"))
+				elif bomb_mode:
+					bomb_mode = false
+					print("Pommi-moodi peruttu")
 			KEY_F5: save_world()
 			KEY_F9: load_world()
 			KEY_I: _save_ai_screenshot()
@@ -1898,53 +1657,12 @@ func _upload_render() -> void:
 		flash_timer -= 1
 	else:
 		shader_mat.set_shader_parameter("flash_intensity", 0.0)
-	# Gravity gun -efekti renderöintishaderille (moodi: 0=off, 1=normaali, 2=vakuumi)
-	shader_mat.set_shader_parameter("grav_gun_active", grav_gun_mode)
-	# Held-suhde: täyttöaste held-listan koon perusteella
-	shader_mat.set_shader_parameter("grav_fill_ratio", clampf(float(grav_held.size()) / float(GRAV_MAX_HELD), 0.0, 1.0))
-	if grav_gun_mode > 0:
-		var render_radius := grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius
-		shader_mat.set_shader_parameter("grav_gun_uv", Vector2(
-			float(grav_gun_pos.x) / float(W),
-			float(grav_gun_pos.y) / float(SIM_HEIGHT)
-		))
-		shader_mat.set_shader_parameter("grav_gun_radius", float(render_radius) / float(W))
-	# Pelaaja-renderöinti (piilotetaan god modessa)
-	if not god_mode:
-		var pp: Vector2i = player.get_grid_pos()
-		shader_mat.set_shader_parameter("player_pos", Vector2(
-			float(pp.x) / float(W), float(pp.y) / float(SIM_HEIGHT)
-		))
-		shader_mat.set_shader_parameter("player_size", Vector2(
-			float(PlayerScript.WIDTH) / float(W), float(PlayerScript.HEIGHT) / float(SIM_HEIGHT)
-		))
-		shader_mat.set_shader_parameter("player_facing_right", 1 if player.facing_right else 0)
-		shader_mat.set_shader_parameter("player_in_water", 1 if player.in_water else 0)
-	else:
-		shader_mat.set_shader_parameter("player_size", Vector2.ZERO)
-
-	# Laser-efekti poistettu käytöstä
+	# Gravity gun poistettu käytöstä — nollataan shader-parametrit
+	shader_mat.set_shader_parameter("grav_gun_active", 0)
+	shader_mat.set_shader_parameter("grav_fill_ratio", 0.0)
+	# Laseri poistettu käytöstä
 	shader_mat.set_shader_parameter("laser_intensity", 0.0)
 
-	# Day/night sykli
-	shader_mat.set_shader_parameter("time_of_day", time_of_day)
-
-	# Static pistemaalivalolähteet — linkojen barrel_tipit
-	var s_pos: Array[Vector2] = []
-	var s_col: Array[Vector3] = []
-	var s_rad: Array[float] = []
-	for launcher in launchers:
-		if not launcher.broken:
-			var bt: Vector2i = launcher.barrel_tip
-			s_pos.append(Vector2(float(bt.x) / float(W), float(bt.y) / float(SIM_HEIGHT)))
-			s_col.append(Vector3(1.0, 0.88, 0.55))  # Lämmin keltainen
-			s_rad.append(40.0 / float(W))            # ~40px säde
-	var cnt := mini(s_pos.size(), 8)
-	shader_mat.set_shader_parameter("static_light_count", cnt)
-	if cnt > 0:
-		shader_mat.set_shader_parameter("static_light_pos", s_pos.slice(0, cnt))
-		shader_mat.set_shader_parameter("static_light_color", s_col.slice(0, cnt))
-		shader_mat.set_shader_parameter("static_light_radius", s_rad.slice(0, cnt))
 
 
 # Vedä irtonaiset pikselit kohti pistettä (CPU, ei duplikaatiota)
@@ -2477,7 +2195,19 @@ func _unregister_building_pixels(pixels: Array) -> void:
 
 
 func _check_placement_valid(pixels: Array) -> bool:
-	# Palauttaa tosi jos kaikki pikselit ovat rajoissa eikä osu olemassa olevaan rakennukseen
+	# Palauttaa tosi jos kaikki pikselit ovat rajoissa, eivät osu rakennukseen eikä materiaaliin
+	for p in pixels:
+		if p.x < 0 or p.x >= W or p.y < 0 or p.y >= SIM_HEIGHT:
+			return false
+		if building_pixels.has(p.y * W + p.x):
+			return false
+		if grid[p.y * W + p.x] != MAT_EMPTY:
+			return false
+	return true
+
+
+func _check_placement_valid_airborne(pixels: Array) -> bool:
+	# Rajatarkistus + building_pixels — EI gridin materiaalia (käytetään poralle joka sijoitetaan ilmaan)
 	for p in pixels:
 		if p.x < 0 or p.x >= W or p.y < 0 or p.y >= SIM_HEIGHT:
 			return false
@@ -2624,15 +2354,15 @@ func _update_build_preview() -> void:
 		build_preview.preview_pixels = preview_pxs
 		build_preview.is_valid = _check_placement_valid(preview_pxs)
 	elif build_mode == BUILD_CRUSHER:
-		# Murskaaja: 12×10 siluetti, intake ylhäällä, output-aukko alhaalla (sama kuin furnace)
-		const PREVIEW_CRUSHER_W := 12
+		# Murskaaja: 16×10 siluetti, intake 8px ylhäällä, output-aukko 8px alhaalla
+		const PREVIEW_CRUSHER_W := 16
 		const PREVIEW_CRUSHER_H := 10
-		const PREVIEW_CRUSHER_INTAKE_W := 6
+		const PREVIEW_CRUSHER_INTAKE_W := 8
 		var snapped := _snap_to_grid(mouse_pos)
 		var center := Vector2i(int(snapped.x), int(snapped.y))
 		var gp := Vector2i(center.x - PREVIEW_CRUSHER_W / 2, center.y - PREVIEW_CRUSHER_H / 2)
 		var intake_start_x := gp.x + (PREVIEW_CRUSHER_W - PREVIEW_CRUSHER_INTAKE_W) / 2
-		var output_start_x := gp.x + (PREVIEW_CRUSHER_W - 4) / 2
+		var output_start_x := gp.x + (PREVIEW_CRUSHER_W - 8) / 2
 		var preview_pxs: Array[Vector2i] = []
 		# Rivi 0: reunat + intake-aukko auki
 		for dx in PREVIEW_CRUSHER_W:
@@ -2646,10 +2376,24 @@ func _update_build_preview() -> void:
 		# Rivi H-1: output-aukko auki
 		for dx in PREVIEW_CRUSHER_W:
 			var px := gp.x + dx
-			if px < output_start_x or px >= output_start_x + 4:
+			if px < output_start_x or px >= output_start_x + 8:
 				preview_pxs.append(Vector2i(px, gp.y + PREVIEW_CRUSHER_H - 1))
 		build_preview.preview_pixels = preview_pxs
 		build_preview.is_valid = _check_placement_valid(preview_pxs)
+	elif build_mode == BUILD_DRILL:
+		# Pora: 4×6 siluetti (vastaa Drill.DRILL_W=4, Drill.DRILL_H=6)
+		const PREVIEW_DRILL_W := 4
+		const PREVIEW_DRILL_H := 6
+		var snapped := _snap_to_grid(mouse_pos)
+		var center := Vector2i(int(snapped.x), int(snapped.y))
+		var gp := Vector2i(center.x - PREVIEW_DRILL_W / 2, center.y - PREVIEW_DRILL_H / 2)
+		var preview_pxs: Array[Vector2i] = []
+		for dy in PREVIEW_DRILL_H:
+			for dx in PREVIEW_DRILL_W:
+				preview_pxs.append(Vector2i(gp.x + dx, gp.y + dy))
+		build_preview.preview_pixels = preview_pxs
+		# Pora voidaan sijoittaa ilmaan — tarkistetaan vain rajat ja building_pixels
+		build_preview.is_valid = _check_placement_valid_airborne(preview_pxs)
 
 	build_preview.queue_redraw()
 
@@ -2783,6 +2527,70 @@ func _place_crusher(pos: Vector2) -> void:
 	_register_building_pixels(c.structure_pixels)
 	paint_pending = true
 	print("Murskaaja asetettu: ", pos)
+	_auto_connect_conveyor(c)
+
+
+func _place_drill(pos: Vector2) -> void:
+	var d = DrillScript.new()
+	d.setup(Vector2i(pos))
+	d.build_structure(grid, color_seed, W, SIM_HEIGHT)
+	building_layer.add_child(d)
+	drills.append(d)
+	_register_building_pixels(d.structure_pixels)
+	paint_pending = true
+	print("Pora asetettu: ", pos)
+
+
+func _update_drills(delta: float) -> bool:
+	var modified := false
+	var alive: Array = []
+	for d in drills:
+		# Ennen päivitystä: poista vanhat pikselit suojattujen listalta (putoamista varten)
+		_unregister_building_pixels(d.structure_pixels)
+		if d.update_drill(grid, color_seed, W, SIM_HEIGHT, delta, MAT_BEDROCK):
+			modified = true
+			paint_pending = true
+		# Rekisteröi uudelleen (rakenne voi olla siirtynyt putoamisen myötä)
+		_register_building_pixels(d.structure_pixels)
+		if d.broken:
+			_unregister_building_pixels(d.structure_pixels)
+			# Poista poran pikselit gridistä ennen vapautusta
+			d._erase_from_grid(grid, color_seed, W, SIM_HEIGHT)
+			paint_pending = true
+			d.queue_free()
+		else:
+			alive.append(d)
+	drills = alive
+	return modified
+
+
+func _auto_connect_conveyor(building: Node) -> void:
+	# Yhdistää automaattisesti lähellä olevan konveyorin sisääntuloon tai ulostuloon
+	# Koskee vain Crusheria jolla on get_intake_center / get_output_center
+	if not building.has_method("get_intake_center"):
+		return
+	var intake_center: Vector2i = building.get_intake_center()
+	var output_center: Vector2i = building.get_output_center()
+	const AUTO_SNAP_DIST := 16  # Pikselietäisyys jolla auto-connect aktivoituu
+	for belt in conveyors:
+		# Tarkista hihnan pää → murskain intake
+		var d_end_to_intake := Vector2(belt.end_pos).distance_to(Vector2(intake_center))
+		if d_end_to_intake <= AUTO_SNAP_DIST and d_end_to_intake > 1.0:
+			var connect_start := Vector2(belt.end_pos)
+			var connect_end := Vector2(intake_center)
+			var pxs: Array[Vector2i] = ConveyorBelt.bresenham_line(Vector2i(connect_start), Vector2i(connect_end))
+			if _check_placement_valid(pxs):
+				_create_conveyor(connect_start, connect_end)
+				return
+		# Tarkista murskain output → hihnan alku
+		var d_output_to_start := Vector2(output_center).distance_to(Vector2(belt.start_pos))
+		if d_output_to_start <= AUTO_SNAP_DIST and d_output_to_start > 1.0:
+			var connect_start := Vector2(output_center)
+			var connect_end := Vector2(belt.start_pos)
+			var pxs: Array[Vector2i] = ConveyorBelt.bresenham_line(Vector2i(connect_start), Vector2i(connect_end))
+			if _check_placement_valid(pxs):
+				_create_conveyor(connect_start, connect_end)
+				return
 
 
 func _update_crushers(delta: float) -> bool:
@@ -2829,6 +2637,9 @@ func _clear_buildings() -> void:
 	for c in crushers:
 		c.queue_free()
 	crushers.clear()
+	for d in drills:
+		d.queue_free()
+	drills.clear()
 	_clear_launchers()
 
 
@@ -2887,6 +2698,14 @@ func _update_launchers_and_flying(delta: float) -> bool:
 			continue
 		# Imu: kerää pikselit intake-alueelta kuiluun
 		launcher.update_launcher(grid, W, delta)
+		# Dynaaminen alapää — jalusta laskeutuu tyhjän päälle tai lukittuu konveyyoriin
+		var bottom_changed: bool = launcher.update_bottom(grid, W, MAT_STONE)
+		if bottom_changed:
+			var result: Array = launcher.move_bottom(launcher.start_pos.y, grid, W)
+			_unregister_building_pixels(result[0])
+			_register_building_pixels(result[1])
+			paint_pending = true
+			modified = true
 		# Kuilu: liikuta pikselit ylöspäin, kerää laukaistavat
 		var launched: Array[Dictionary] = launcher.update_shaft(grid, W, SIM_HEIGHT, delta)
 		for fp: Dictionary in launched:
@@ -3000,26 +2819,6 @@ func _update_launchers_and_flying(delta: float) -> bool:
 	flying_pixels = still_flying
 	queue_redraw()
 	return modified
-
-
-func _update_proj_lights() -> void:
-	var positions: Array[Vector2] = []
-	var types: Array[float] = []
-	for fp: Dictionary in flying_pixels:
-		if positions.size() >= 8:
-			break
-		var ftype: String = fp.get("type", "")
-		if ftype == "rocket" or ftype == "bullet":
-			var p: Vector2 = fp["pos"]
-			positions.append(Vector2(p.x / float(W), p.y / float(SIM_HEIGHT)))
-			types.append(1.0 if ftype == "rocket" else 0.0)
-	var count := positions.size()
-	while positions.size() < 8:
-		positions.append(Vector2.ZERO)
-		types.append(0.0)
-	shader_mat.set_shader_parameter("proj_pos", positions)
-	shader_mat.set_shader_parameter("proj_type", types)
-	shader_mat.set_shader_parameter("proj_count", count)
 
 
 func _draw() -> void:
@@ -3228,34 +3027,16 @@ func _save_ai_screenshot() -> void:
 		MAT_DIRT: "DIRT", MAT_IRON_ORE: "IRON_ORE", MAT_GOLD_ORE: "GOLD_ORE",
 		MAT_IRON: "IRON", MAT_GOLD: "GOLD", MAT_COAL: "COAL"
 	}
-	var weapon_names: Array[String] = ["PICKAXE", "MEGA_DRILL", "RIFLE", "ROCKET", "GRAVITY_GUN"]
-	var grav_modes: Array[String] = ["off", "pull", "vacuum"]
-
 	var state: Dictionary = {
 		"timestamp": Time.get_datetime_string_from_system(),
 		"fps": Engine.get_frames_per_second(),
 		"sim_speed": sim_speed,
-		"god_mode": god_mode,
-		"player": {
-			"x": int(player.position.x),
-			"y": int(player.position.y),
-			"vel_x": snappedf(player.velocity.x, 0.01),
-			"vel_y": snappedf(player.velocity.y, 0.01),
-			"on_ground": player.on_ground,
-			"in_water": player.in_water,
-			"facing_right": player.facing_right
-		},
-		"weapon": weapon_names[current_weapon],
+		"cam_pos": {"x": int(cam_grid_pos.x), "y": int(cam_grid_pos.y)},
+		"bomb_mode": bomb_mode,
+		"placed_bombs": placed_bombs.size(),
 		"material": {
 			"selected": mat_names.get(current_material, str(current_material)),
 			"brush_size": brush_size
-		},
-		"grav_gun": {
-			"mode": grav_modes[grav_gun_mode],
-			"pos_x": grav_gun_pos.x,
-			"pos_y": grav_gun_pos.y,
-			"radius": grav_gun_radius,
-			"held_pixels": grav_held.size()
 		},
 		"build_mode": build_mode,
 		"buildings": building_pixels.size(),
@@ -3341,12 +3122,17 @@ func save_world() -> void:
 	for c in crushers:
 		file.store_32(c.grid_pos.x + c.CRUSHER_W / 2)
 		file.store_32(c.grid_pos.y + c.CRUSHER_H / 2)
-	# Raha
+	# Raha (ennen poraa — taaksepäin-yhteensopivuus)
 	file.store_32(money)
+	# Porat (uusi kenttä v2+)
+	file.store_32(drills.size())
+	for d in drills:
+		file.store_32(d.grid_pos.x + d.DRILL_W / 2)
+		file.store_32(d.grid_pos.y + d.DRILL_H / 2)
 	file.close()
-	print("Tallennettu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, $%d" % [
+	print("Tallennettu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, %d poraa, $%d" % [
 		conveyors.size(), furnaces.size(), sand_mines.size(),
-		money_exits.size(), crushers.size(), money])
+		money_exits.size(), crushers.size(), drills.size(), money])
 
 
 func load_world() -> void:
@@ -3439,14 +3225,26 @@ func load_world() -> void:
 		c.build_structure(grid, color_seed, W, SIM_HEIGHT)
 		building_layer.add_child(c)
 		crushers.append(c)
-	# Raha
+	# Raha (ennen poraa — taaksepäin-yhteensopivuus)
 	money = int(file.get_32())
+	# Porat — luetaan vain jos tiedostossa on vielä dataa (v2+ formaatti)
+	if not file.eof_reached():
+		var drill_count := file.get_32()
+		for _i in drill_count:
+			var cx := int(file.get_32())
+			var cy := int(file.get_32())
+			var d = DrillScript.new()
+			d.setup(Vector2i(cx, cy))
+			d.build_structure(grid, color_seed, W, SIM_HEIGHT)
+			building_layer.add_child(d)
+			drills.append(d)
+			_register_building_pixels(d.structure_pixels)
 	file.close()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
-	print("Ladattu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, $%d" % [
+	print("Ladattu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, %d poraa, $%d" % [
 		conveyors.size(), furnaces.size(), sand_mines.size(),
-		money_exits.size(), crushers.size(), money])
+		money_exits.size(), crushers.size(), drills.size(), money])
 
 
 # ============================================================

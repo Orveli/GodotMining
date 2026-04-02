@@ -21,6 +21,7 @@ const MAT_DIRT         := 11
 const MAT_IRON_ORE     := 12
 const MAT_GOLD_ORE     := 13
 const MAT_COAL         := 16
+const MAT_BEDROCK      := 19  # Pohjakivi — tuhoamaton reunakerros
 
 const EDGE_THICKNESS := 2
 
@@ -560,13 +561,14 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 
 
 static func _enforce_edges(grid: PackedByteArray, w: int, h: int) -> void:
+	# Kirjoitetaan bedrockia reunoihin ja pohjaan (ei kivi — bedrock on tuhoamaton)
 	for y in h:
 		for x in w:
 			if x < EDGE_THICKNESS or x >= w - EDGE_THICKNESS:
 				if float(y) > float(h) * 0.40:
-					grid[y * w + x] = MAT_STONE
+					grid[y * w + x] = MAT_BEDROCK
 			if y >= h - EDGE_THICKNESS:
-				grid[y * w + x] = MAT_STONE
+				grid[y * w + x] = MAT_BEDROCK
 
 
 # Järvet: 2 kpl, reunamarginaalilla

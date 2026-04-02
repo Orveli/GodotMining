@@ -72,7 +72,7 @@ func update_belt(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 
 		var dy_off := next_y - fp.y  # Kulmakorjaus vinoille hihnoille
 
-		# Skannaa KOKO pino lattian yläpuolella (alhaalta ylös)
+		# Skannaa pino alhaalta ylös — liikuta koko kolumni kerralla
 		for sy in range(fp.y - 1, -1, -1):
 			if fp.x < 0 or fp.x >= w or sy < 0 or sy >= h:
 				break
@@ -81,18 +81,14 @@ func update_belt(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 			if mat == 0:
 				break  # Tyhjä — pino päättyy
 			if not _is_movable(mat):
-				break  # Kiinteä materiaali — ei liiku, pino pysähtyy
-
-			# Kohde: sama korkeus pinossa, mutta seuraavan lattiapisteen kohdalla
+				break  # Kiinteä materiaali — pino pysähtyy
 			var dest_y := sy + dy_off
 			if next_x < 0 or next_x >= w or dest_y < 0 or dest_y >= h:
 				continue
-			var dest_idx := dest_y * w + next_x
-			if grid[dest_idx] != 0:
-				continue  # Kohde varattu — tämä pikseli jää paikalleen
-
-			grid[dest_idx] = mat
-			color_seed[dest_idx] = color_seed[src_idx]
+			if grid[dest_y * w + next_x] != 0:
+				continue  # Kohde varattu — simulaatiofysiikka hoitaa rinteen
+			grid[dest_y * w + next_x] = mat
+			color_seed[dest_y * w + next_x] = color_seed[src_idx]
 			grid[src_idx] = 0
 			color_seed[src_idx] = randi() % 256
 			modified = true

@@ -28,17 +28,10 @@ var build_buttons: Array[Button] = []  # kaikki rakennus-napit korostusta varten
 # Raha-näyttö
 var money_label: Label
 
-# Build-toggle-nappi (synkronoidaan B-näppäimeen)
-var btn_build_toggle: Button
-
 # Speed-napit
 var speed_buttons: Array[Button] = []
 const SPEED_VALUES: Array[float] = [1.0, 4.0, 8.0, 16.0]
 const SPEED_LABELS: Array[String] = ["1x", "4x", "8x", "16x"]
-
-# Asenapit
-var weapon_buttons: Array[Button] = []
-const WEAPON_LABELS: Array[String] = ["Hakku", "Megapora", "Rynnäkkö", "Raketti", "GravGun"]
 
 # Materiaaliskanneri — oikea alakulma
 var scanner_panel: PanelContainer
@@ -66,6 +59,8 @@ const MAT_NAMES: Dictionary = {
 	14: "Rauta",
 	15: "Kulta",
 	16: "Hiili",
+	18: "Sora",
+	19: "Pohjakivi",
 }
 const MAT_COLORS: Dictionary = {
 	1: "#dcc874",   # SAND
@@ -84,6 +79,8 @@ const MAT_COLORS: Dictionary = {
 	14: "#adadb8",  # IRON
 	15: "#e6c732",  # GOLD
 	16: "#2e2b36",  # COAL
+	18: "#6b6055",  # GRAVEL
+	19: "#2d2830",  # BEDROCK
 }
 
 
@@ -201,27 +198,6 @@ func _ready() -> void:
 		speed_box.add_child(btn)
 		speed_buttons.append(btn)
 
-	# ── Ase-ryhmä ──────────────────────────────────────────────────────────
-	hbox.add_child(_sep())
-
-	var weapon_box := HBoxContainer.new()
-	weapon_box.add_theme_constant_override("separation", 2)
-	hbox.add_child(weapon_box)
-
-	for i in WEAPON_LABELS.size():
-		var btn := _make_btn(WEAPON_LABELS[i])
-		btn.pressed.connect(func(): pixel_world.current_weapon = i)
-		weapon_box.add_child(btn)
-		weapon_buttons.append(btn)
-
-	# ── Rakennukset-toggle ─────────────────────────────────────────────────
-	hbox.add_child(_sep())
-
-	btn_build_toggle = _make_btn("Rakennukset [B] ▼")
-	btn_build_toggle.toggle_mode = true
-	btn_build_toggle.toggled.connect(_on_build_toggle)
-	hbox.add_child(btn_build_toggle)
-
 	# ── Tallennus-ryhmä ────────────────────────────────────────────────────
 	hbox.add_child(_sep())
 
@@ -274,7 +250,7 @@ func _build_dropdown_panel() -> void:
 	build_panel.offset_bottom = 84.0
 	build_panel.offset_left = 0.0
 	build_panel.offset_right = 0.0
-	build_panel.visible = false
+	build_panel.visible = true
 	get_parent().add_child.call_deferred(build_panel)  # lisätään CanvasLayer UI:hin, ei paneliin
 
 	var hbox := HBoxContainer.new()
@@ -332,6 +308,13 @@ func _build_dropdown_panel() -> void:
 		pixel_world.block_paint = true)
 	hbox.add_child(btn_crusher_build)
 	build_buttons.append(btn_crusher_build)
+
+	var btn_drill_build := _make_btn("Pora [P]")
+	btn_drill_build.pressed.connect(func():
+		pixel_world.build_mode = pixel_world.BUILD_DRILL
+		pixel_world.block_paint = true)
+	hbox.add_child(btn_drill_build)
+	build_buttons.append(btn_drill_build)
 
 
 func _build_scanner_panel() -> void:
@@ -440,24 +423,9 @@ func _process(_delta: float) -> void:
 		_scanner_frame = 0
 		update_material_scanner()
 
-	var build_open: bool = pixel_world.build_menu_visible
-
-	# Synkronoi build-toggle-nappi B-näppäimen tilaan
-	if btn_build_toggle.button_pressed != build_open:
-		btn_build_toggle.set_pressed_no_signal(build_open)
-	# Nuoli osoittaa auki/kiinni-tilan
-	btn_build_toggle.text = "Rakennukset [B] " + ("▲" if build_open else "▼")
-	# Build-paneeli näkyviin/piiloon (deferred-lisäys voi olla vielä null)
-	if build_panel != null:
-		build_panel.visible = build_open
-
 	# Korosta aktiivinen nopeus
 	for i in speed_buttons.size():
 		speed_buttons[i].modulate = Color(1.5, 1.5, 0.5) if SPEED_VALUES[i] == pixel_world.sim_speed else Color.WHITE
-
-	# Korosta aktiivinen ase
-	for i in weapon_buttons.size():
-		weapon_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == pixel_world.current_weapon else Color.WHITE
 
 	# Korosta aktiivinen rakennustila
 	var bm: int = pixel_world.build_mode
@@ -471,14 +439,13 @@ func _process(_delta: float) -> void:
 		pixel_world.BUILD_WALL_START, pixel_world.BUILD_WALL_END: active_build_idx = 5
 		pixel_world.BUILD_MONEY_EXIT:    active_build_idx = 6
 		pixel_world.BUILD_CRUSHER:       active_build_idx = 7
+		pixel_world.BUILD_DRILL:         active_build_idx = 8
 	for i in build_buttons.size():
 		build_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == active_build_idx else Color.WHITE
 
 	# Tila-teksti FPS-labelissa
 	var mode_str := ""
-	if pixel_world.build_menu_visible:
-		mode_str = " | RAKENNA: [1] Spawner [2] Hihna [3] Kaivos [4] Uuni [5] Linko [6] Seinä [7] Kassa [8] Murskaaja | MAT: [9] Multa [0] RautaMalmi"
-	elif pixel_world.build_mode == pixel_world.BUILD_SPAWNER:
+	if pixel_world.build_mode == pixel_world.BUILD_SPAWNER:
 		mode_str = " | SPAWNER [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_CONVEYOR_START:
 		mode_str = " | HIHNA: klikkaa alku"
@@ -498,9 +465,11 @@ func _process(_delta: float) -> void:
 		mode_str = " | SEINÄ: klikkaa alku"
 	elif pixel_world.build_mode == pixel_world.BUILD_WALL_END:
 		mode_str = " | SEINÄ: klikkaa loppu"
+	elif pixel_world.build_mode == pixel_world.BUILD_DRILL:
+		mode_str = " | PORA [klikkaa]"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
-	elif pixel_world.current_weapon == pixel_world.Weapon.RIFLE:
+	elif pixel_world.current_weapon == 2:  # Weapon.RIFLE = 2
 		mode_str = " | RYNNÄKKÖ [L]"
 
 	var explosion_names: Array[String] = ["Pieni", "Keski", "Iso", "Mega"]
@@ -509,8 +478,9 @@ func _process(_delta: float) -> void:
 	var furnace_str := " | Uuneja: %d" % pixel_world.furnaces.size() if not pixel_world.furnaces.is_empty() else ""
 	var mine_str := " | Kaivoksia: %d" % pixel_world.sand_mines.size() if not pixel_world.sand_mines.is_empty() else ""
 	var sling_str := " | Linkoja: %d" % pixel_world.launchers.size() if not pixel_world.launchers.is_empty() else ""
+	var drill_str := " | Poraa: %d" % pixel_world.drills.size() if not pixel_world.drills.is_empty() else ""
 	var speed_str := " | %dx" % int(pixel_world.sim_speed) if pixel_world.sim_speed > 1.0 else ""
-	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, belt_str, furnace_str, mine_str, sling_str, speed_str, mode_str]
+	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, belt_str, furnace_str, mine_str, sling_str, drill_str, speed_str, mode_str]
 	money_label.text = "$%d" % pixel_world.money
 
 
@@ -553,10 +523,8 @@ func _on_speed(speed: float) -> void:
 	pixel_world.sim_speed = speed
 
 
-func _on_build_toggle(pressed: bool) -> void:
-	pixel_world.build_menu_visible = pressed
-	if not pressed:
-		pixel_world.build_mode = pixel_world.BUILD_NONE
+func _on_build_toggle(_pressed: bool) -> void:
+	pass  # Rakennuspaneeli on aina näkyvissä
 
 
 func _on_build_spawner() -> void:

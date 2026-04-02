@@ -41,6 +41,7 @@ const uint GOLD      = 15u;
 const uint COAL      = 16u;
 const uint HELD      = 17u;  // Gravity gun -kiinnitetty — GPU ohittaa täysin
 const uint GRAVEL    = 18u;  // Sora — kiven murskautuessa syntyvä raskas jauhe
+const uint BEDROCK   = 19u;  // Pohjakivi — tuhoamaton, ei osallistu fysiikkaan
 
 uint get_mat(uint cell) { return cell & 0xFFu; }
 
@@ -174,7 +175,7 @@ void main() {
     // Staattiset ja tyhjät skipataan
     if (mat == EMPTY || mat == STONE || mat == WOOD) return;
     if (mat == GLASS || mat == IRON_ORE || mat == GOLD_ORE || mat == IRON || mat == GOLD) return;
-    if (mat == COAL || mat == HELD) return;  // HELD = gravity gun kiinnitti, ei simuloida
+    if (mat == COAL || mat == HELD || mat == BEDROCK) return;  // BEDROCK = inert pohjakivi
     // GRAVEL simuloidaan — ei ohiteta (käsitellään is_powder()-haaran kautta)
 
     // Gravity gun -veto: GPU vetää irtonaiset pikselit kohti kursoria

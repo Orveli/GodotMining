@@ -142,14 +142,15 @@ func _draw_launcher_preview() -> void:
 				draw_rect(Rect2(launcher_end.x, launcher_end.y,
 						float(LAUNCHER_SW), shaft_h),
 						Color(0.3, 0.5, 1.0, 0.9), false, 0.8)
-			# Tykkiputki hiiren puolelle
-			var barrel_x: float
-			if launcher_dir > 0.0:
-				barrel_x = launcher_end.x + float(LAUNCHER_SW)
-			else:
-				barrel_x = launcher_end.x - float(LAUNCHER_BL)
-			draw_rect(Rect2(barrel_x, launcher_end.y, float(LAUNCHER_BL), 2.0),
-					Color(1.0, 0.7, 0.0, 0.9), true)
+			# Tykkiputki hiiren puolelle — 45° diagonaalisesti ylöspäin
+			for i in range(LAUNCHER_BL):
+				var bpx: float
+				if launcher_dir > 0.0:
+					bpx = launcher_end.x + float(LAUNCHER_SW) + float(i)
+				else:
+					bpx = launcher_end.x - 1.0 - float(i)
+				var bpy: float = launcher_end.y - float(i)
+				draw_rect(Rect2(bpx, bpy, 1.0, 2.0), Color(1.0, 0.7, 0.0, 0.9), true)
 			# Suuntanuoli
 			var arrow_start := Vector2(launcher_end.x + float(LAUNCHER_SW) * 0.5,
 					launcher_end.y + 1.0)

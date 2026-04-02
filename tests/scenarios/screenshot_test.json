@@ -1,0 +1,12 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 232, "w": 416, "h": 8, "mat": 3 },
+    { "cmd": "place_conveyor", "x1": 30, "y1": 200, "x2": 320, "y2": 200 },
+    { "cmd": "place_conveyor", "x1": 30, "y1": 175, "x2": 200, "y2": 200 },
+    { "cmd": "fill_rect", "x": 30, "y": 155, "w": 80, "h": 18, "mat": 1 },
+    { "cmd": "run_frames", "n": 30 },
+    { "cmd": "screenshot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/build_view.png" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 175, "w": 320, "h": 5, "mat": 3, "label": "lattia" },
+    { "cmd": "fill_rect", "x": 130, "y": 60, "w": 60, "h": 6, "mat": 1, "label": "hiekkaa ylhäällä" },
+    { "cmd": "assert_count", "mat": 1, "min": 200, "max": 500, "label": "hiekkaa alussa" },
+    { "cmd": "set_grav_gun", "x": 160, "y": 130, "mode": 1 },
+    { "cmd": "run_frames", "n": 120 },
+    { "cmd": "clear_grav_gun" },
+    { "cmd": "assert_rect", "x": 130, "y": 100, "w": 60, "h": 50, "mat": 1, "min_pct": 5, "label": "hiekkaa liikkui alas kohti gravity gun -kohdetta" }
+  ]
+}
