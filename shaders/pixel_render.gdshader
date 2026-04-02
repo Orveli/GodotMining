@@ -44,8 +44,17 @@ uniform int darkness_mode = 0;  // 0=pois, 1=päällä (O-näppäin)
 uniform float screen_aspect = 1.778;  // Kuvasuhde (leveys/korkeus), asetetaan GDScriptistä
 uniform float surface_y_norm = 0.40;  // Pinnan sijainti UV-tilassa
 
-// Sky-visibility tekstuuri — varaus tulevalle BFS-valolle
+// Sky-visibility tekstuuri — BFS-pohjainen taivaasvalo
 uniform sampler2D visibility_tex : filter_linear, repeat_disable;
+
+// Day/night sykli
+uniform float time_of_day = 0.5;  // 0=yö, 0.25=aamu, 0.5=päivä, 0.75=ilta
+
+// Static pistemaalivalolähteet
+uniform vec2 static_light_pos[8];
+uniform vec3 static_light_color[8];
+uniform float static_light_radius[8];
+uniform int static_light_count = 0;
 
 // TEXTURE = grid data (R8, materiaali-ID per pikseli)
 // Materiaalien värit (indeksit 0-18, MAT_GRAVEL=18 mukana) — runtime-vaihdettava paletti
@@ -262,10 +271,56 @@ void fragment() {
 	vign = clamp(pow(vign, vign_base + vign_shake), 0.0, 1.0);
 	color *= vign;
 
-	// Syvyyspimeys — UV.y-pohjainen, O-näppäin togglea
+	// === VALAISTUSSYSTEEMI (darkness_mode=1 aktivoi) ===
 	if (darkness_mode == 1) {
-		float darkness = smoothstep(surface_y_norm, 1.0, UV.y);
-		color *= mix(1.0, 0.03, darkness);
+		// --- Taivasvalo BFS-kartasta ---
+		float vis_raw = texture(visibility_tex, UV).r;
+		float sky_dist = vis_raw * 255.0;
+		float sky_reach = clamp(1.0 - sky_dist / 25.0, 0.0, 1.0);
+		sky_reach = sky_reach * sky_reach;
+
+		// Päivä/yö-intensiteetti: cos-käyrä, yöllä 0.04, päivällä 1.0
+		float tod_angle = time_of_day * 6.28318;
+		float sun_intensity = clamp(cos(tod_angle) * 0.5 + 0.52, 0.04, 1.0);
+
+		// Taivasväri muuttuu kellonajan mukaan
+		vec3 sky_noon    = vec3(1.0, 0.97, 0.85);   // lämmin päivänvalo
+		vec3 sky_dusk    = vec3(1.0, 0.55, 0.2);    // oranssi ilta/aamu
+		vec3 sky_night   = vec3(0.15, 0.2, 0.45);   // kylmä sininen yö
+		// tod: 0=yö, 0.25=aamu, 0.5=päivä, 0.75=ilta
+		float day_t = clamp(cos(tod_angle) * 0.5 + 0.5, 0.0, 1.0);
+		float twilight_t = clamp(1.0 - abs(cos(tod_angle * 0.5)) * 1.6, 0.0, 1.0);
+		vec3 sky_color_tod = mix(sky_night, sky_noon, day_t);
+		sky_color_tod = mix(sky_color_tod, sky_dusk, twilight_t * 0.8);
+
+		float sky_light = sky_reach * sun_intensity;
+
+		// --- Static pistemaalivalolähteet ---
+		float point_light_total = 0.0;
+		vec3 point_color_total = vec3(0.0);
+		for (int i = 0; i < static_light_count; i++) {
+			vec2 diff = UV - static_light_pos[i];
+			diff.x *= screen_aspect;
+			float dist_l = length(diff);
+			float r = static_light_radius[i];
+			if (dist_l < r) {
+				float t = 1.0 - dist_l / r;
+				t = t * t * t;
+				point_light_total += t;
+				point_color_total += static_light_color[i] * t;
+			}
+		}
+		point_light_total = clamp(point_light_total, 0.0, 1.0);
+
+		// --- Yhdistä ---
+		float ambient = 0.035;
+		float total_light = clamp(sky_light + point_light_total + ambient, 0.0, 1.0);
+		vec3 light_tint = mix(vec3(1.0), sky_color_tod, sky_light / max(total_light, 0.001));
+		if (point_light_total > 0.001) {
+			vec3 norm_point = point_color_total / max(point_light_total, 0.001);
+			light_tint = mix(light_tint, norm_point, clamp(point_light_total * 0.6, 0.0, 1.0));
+		}
+		color *= total_light * light_tint;
 	}
 
 	COLOR = vec4(color, 1.0);

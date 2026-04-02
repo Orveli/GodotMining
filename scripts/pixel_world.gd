@@ -267,6 +267,10 @@ var flying_max_count: int = 300
 var infinite_money: bool = false
 var debug_menu_visible: bool = false
 
+# Day/night sykli
+var time_of_day: float = 0.5      # 0=yö, 0.5=päivä
+var day_duration: float = 120.0   # Täyden päivän kesto sekunteina
+
 # Linko-oletusasetukset (debug-menu synkronoi kaikki launchers näihin)
 var launcher_launch_speed: float = 120.0
 var launcher_launch_angle: float = -45.0
@@ -351,6 +355,8 @@ func _ready() -> void:
 	shader_mat.set_shader_parameter("mat_colors", PALETTE_DEFAULT)
 	shader_mat.set_shader_parameter("mat_var", PALETTE_VAR_DEFAULT)
 	shader_mat.set_shader_parameter("darkness_mode", 0)  # Pois oletuksena, O-näppäin togglea
+	shader_mat.set_shader_parameter("time_of_day", time_of_day)
+	shader_mat.set_shader_parameter("static_light_count", 0)
 	shader_mat.set_shader_parameter("proj_count", 0)
 	shader_mat.set_shader_parameter("impact_intensity", 0.0)
 	shader_mat.set_shader_parameter("screen_aspect", float(W) / float(SIM_HEIGHT))
@@ -621,6 +627,9 @@ func _process(delta: float) -> void:
 		_toast_timer -= delta
 		if _toast_timer <= 0.0:
 			_toast_label.visible = false
+
+	# Päivitä päivä/yö-sykli
+	time_of_day = fmod(time_of_day + delta / day_duration, 1.0)
 
 	frame_count += 1
 	fps_timer += delta
@@ -1921,6 +1930,26 @@ func _upload_render() -> void:
 
 	# Laser-efekti poistettu käytöstä
 	shader_mat.set_shader_parameter("laser_intensity", 0.0)
+
+	# Day/night sykli
+	shader_mat.set_shader_parameter("time_of_day", time_of_day)
+
+	# Static pistemaalivalolähteet — linkojen barrel_tipit
+	var s_pos: Array[Vector2] = []
+	var s_col: Array[Vector3] = []
+	var s_rad: Array[float] = []
+	for launcher in launchers:
+		if not launcher.broken:
+			var bt: Vector2i = launcher.barrel_tip
+			s_pos.append(Vector2(float(bt.x) / float(W), float(bt.y) / float(SIM_HEIGHT)))
+			s_col.append(Vector3(1.0, 0.88, 0.55))  # Lämmin keltainen
+			s_rad.append(40.0 / float(W))            # ~40px säde
+	var cnt := mini(s_pos.size(), 8)
+	shader_mat.set_shader_parameter("static_light_count", cnt)
+	if cnt > 0:
+		shader_mat.set_shader_parameter("static_light_pos", s_pos.slice(0, cnt))
+		shader_mat.set_shader_parameter("static_light_color", s_col.slice(0, cnt))
+		shader_mat.set_shader_parameter("static_light_radius", s_rad.slice(0, cnt))
 
 
 # Vedä irtonaiset pikselit kohti pistettä (CPU, ei duplikaatiota)
