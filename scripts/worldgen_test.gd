@@ -1,6 +1,8 @@
 # Headless maailmageneraattori-testi
 # Käyttö: godot --headless --script scripts/worldgen_test.gd
 # Tallentaa: debug_worldgen_preview.png
+# Tulostaa: kokonaistilastot, tehdasalustan/pinnan mittaukset, malmisuonten
+# tilastot + syvyysjakauma per vyöhyke, ja assert-tyyliset läpäisytarkistukset.
 extends SceneTree
 
 const W := 1664
@@ -27,6 +29,18 @@ const MAT_COLORS: Dictionary = {
 	20: Color("#B87347"),  # COPPER (patinoitunut oranssiruskea)
 	21: Color("#59BFA6"),  # RARE_EARTH (hohtava sinivihreä)
 }
+
+# Malmit joita seurataan syvyysvyöhykkeittäin (nimi + ID) — jakaumataulukkoon ja assertteihin
+const ORES: Array = [
+	["COAL", 16],
+	["IRON_ORE", 12],
+	["COPPER", 20],
+	["GOLD_ORE", 13],
+	["RARE_EARTH", 21],
+]
+
+# Normalisointiperusta (sama kuin world_gen.gd:n max_dp)
+const MAX_DP := float(H) * 0.60
 
 func _init() -> void:
 	var grid := PackedByteArray()
@@ -96,7 +110,6 @@ func _init() -> void:
 				surface_approx[x] = y
 				break
 
-	var max_dp := float(H) * 0.60
 	var ore_names: Dictionary = {12: "IRON_ORE", 13: "GOLD_ORE", 16: "COAL", 20: "COPPER", 21: "RARE_EARTH"}
 	var ore_stats: Dictionary = {}
 	for x in range(4, W - 4):
@@ -106,7 +119,7 @@ func _init() -> void:
 		for y in range(sy, H):
 			var m: int = grid[y * W + x]
 			if ore_names.has(m):
-				var dn: float = float(y - sy) / max_dp
+				var dn: float = float(y - sy) / MAX_DP
 				if not ore_stats.has(m):
 					ore_stats[m] = {"count": 0, "sum": 0.0, "min": 1e9, "max": -1e9}
 				var st: Dictionary = ore_stats[m]
@@ -127,6 +140,94 @@ func _init() -> void:
 				name, mid, cnt, pct, st["min"], st["max"], float(st["sum"]) / float(cnt)])
 		else:
 			print("%s (id=%d): 0 px — EI ESIINNY" % [name, mid])
+
+	# --- Suonijakauma syvyysvyöhykkeittäin (taulukko) ---
+	# Vyöhykkeet: normalisoitu syvyys 0.0=pinta .. 1.0=pohja (MAX_DP-perustan mukaan)
+	var zone_bounds: Array = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+	var zone_count := zone_bounds.size() - 1  # 5 vyöhykettä 0.0–1.0
+	var zone_hits: Dictionary = {}   # id -> Array(zone_count+1), viimeinen = >1.0 (bedrockin lähellä)
+	for entry in ORES:
+		var oid: int = entry[1]
+		var z := []
+		for _i in range(zone_count + 1):
+			z.append(0)
+		zone_hits[oid] = z
+
+	for x in range(4, W - 4):
+		var sy2: int = surface_approx[x]
+		if sy2 >= H:
+			continue
+		for y in range(sy2, H):
+			var m2: int = grid[y * W + x]
+			if not zone_hits.has(m2):
+				continue
+			var dn2: float = float(y - sy2) / MAX_DP
+			var placed := false
+			for zi in zone_count:
+				if dn2 < zone_bounds[zi + 1]:
+					zone_hits[m2][zi] += 1
+					placed = true
+					break
+			if not placed:
+				zone_hits[m2][zone_count] += 1
+
+	print("\n=== MALMISUONTEN JAKAUMA (px per syvyysvyöhyke) ===")
+	var header := "%-12s" % "Aine"
+	for zi in zone_count:
+		header += "%12s" % ("[%.1f-%.1f]" % [zone_bounds[zi], zone_bounds[zi + 1]])
+	header += "%12s%10s" % [">1.0", "yht."]
+	print(header)
+	for entry in ORES:
+		var ename: String = entry[0]
+		var eid: int = entry[1]
+		var row := "%-12s" % ename
+		var z: Array = zone_hits[eid]
+		var tot := 0
+		for v in z:
+			tot += v
+		for zi in zone_count:
+			row += "%12d" % z[zi]
+		row += "%12d%10d" % [z[zone_count], tot]
+		print(row)
+
+	# --- Assertit ---
+	print("\n=== ASSERTIT ===")
+	var all_pass := true
+
+	# 1. Jokaista malmia syntyy > 0 px
+	for entry in ORES:
+		var aname: String = entry[0]
+		var aid: int = entry[1]
+		var acnt: int = ore_stats[aid]["count"] if ore_stats.has(aid) else 0
+		var ok: bool = acnt > 0
+		all_pass = all_pass and ok
+		print("  [%s] %s: %d px" % ["OK" if ok else "FAIL", aname, acnt])
+
+	# 2. RARE_EARTH ei koskaan ylimmässä 60 %:ssa (norm. syvyys < 0.60)
+	var rare_min: float = ore_stats[21]["min"] if ore_stats.has(21) else 999.0
+	var rare_ok: bool = ore_stats.has(21) and rare_min >= 0.60
+	all_pass = all_pass and rare_ok
+	print("  [%s] RARE_EARTH matalin syvyys: %.2f (vaadittu >= 0.60)" %
+		["OK" if rare_ok else "FAIL", rare_min])
+
+	# 3. GOLD_ORE ei ylimmässä kolmanneksessa (norm. syvyys < 0.35)
+	var gold_min: float = ore_stats[13]["min"] if ore_stats.has(13) else 999.0
+	var gold_ok: bool = ore_stats.has(13) and gold_min >= 0.35
+	all_pass = all_pass and gold_ok
+	print("  [%s] GOLD_ORE matalin syvyys: %.2f (vaadittu >= 0.35)" %
+		["OK" if gold_ok else "FAIL", gold_min])
+
+	# 4. Ei tuntematonta materiaalia (magenta previewissä)
+	var unknown := 0
+	for m in counts.keys():
+		if not MAT_COLORS.has(m):
+			unknown += counts[m]
+	var unknown_ok: bool = unknown == 0
+	all_pass = all_pass and unknown_ok
+	print("  [%s] Tuntemattomia (magenta) pikseleitä: %d" %
+		["OK" if unknown_ok else "FAIL", unknown])
+
+	print("\nTULOS: %s" % ("KAIKKI OK" if all_pass else "VIRHEITÄ"))
 
 	# Renderöi PNG
 	var img := Image.create(W, H, false, Image.FORMAT_RGB8)
