@@ -4,6 +4,7 @@ extends Node2D
 const FURNACE_W := 12
 const FURNACE_H := 10
 const INTAKE_W := 6
+const INTAKE_DROP_H := 4  # Purkuvyöhykkeen korkeus intake-aukon yläpuolella (logistiikka)
 const FLOOR_MAT := 3  # MAT_STONE
 const SMELT_COOLDOWN := 1.5  # ~11 hiekkaa/s, vähän alle launcherin tahdin
 
@@ -133,6 +134,30 @@ func update_furnace(grid: PackedByteArray, color_seed: PackedByteArray, w: int, 
 
 func get_structure_pixels() -> Array[Vector2i]:
 	return structure_pixels
+
+
+func get_intake_center() -> Vector2i:
+	# Sisääntulon keskipiste (yläpuolelta pudotetaan materiaalia)
+	var intake_start := grid_pos.x + (FURNACE_W - INTAKE_W) / 2
+	return Vector2i(intake_start + INTAKE_W / 2, grid_pos.y - 1)
+
+
+func get_output_center() -> Vector2i:
+	# Ulostulon keskipiste (alta tippuu sulatettu materiaali; output-aukko 4px)
+	return Vector2i(output_x + 2, output_y)
+
+
+func get_input_dump() -> Dictionary:
+	# Logistiikan (lane A) rajapinta: intake-alue koneen yläpuolella + reseptin
+	# input-materiaalien bittimaski (1 << mat_id). Hauler ohjataan purkamaan
+	# raaka-aine tähän suorakulmioon. Maski johdetaan RECIPES-avaimista:
+	# Furnace = SAND | IRON_ORE | GOLD_ORE.
+	var mask := 0
+	for input_mat: int in RECIPES.keys():
+		mask |= 1 << input_mat
+	var intake_start := grid_pos.x + (FURNACE_W - INTAKE_W) / 2
+	var rect := Rect2i(intake_start, grid_pos.y - INTAKE_DROP_H, INTAKE_W, INTAKE_DROP_H)
+	return { "rect": rect, "filter_mask": mask }
 
 
 func _draw() -> void:
