@@ -32,6 +32,8 @@ const PRICES := {
 	15: 12,  # GOLD
 	16: 2,   # COAL
 	18: 1,   # GRAVEL
+	20: 4,   # COPPER_ORE  (lane C lisaa worldgeniin)
+	21: 8,   # RARE_EARTH  (lane C lisaa worldgeniin)
 }
 const DEFAULT_PRICE := 1  # Tuntematon materiaali: 1 $/px
 
@@ -39,6 +41,9 @@ var grid_pos: Vector2i = Vector2i.ZERO
 var structure_pixels: Array[Vector2i] = []
 var intake_x: Array[int] = []
 var total_earned: int = 0
+# Kumulatiivinen kokonaistulo — kasvatetaan SEKA pikselisyonnista (update_exit) ETTA
+# bottien purkamista (accept_cargo). Lane G laskee tasta liukuvan $/s-mittarin.
+var earned_total: int = 0
 var broken: bool = false
 var _flash_timer: float = 0.0
 var _label: Label
@@ -107,6 +112,7 @@ func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 				var earned: int = PRICES.get(mat_id, DEFAULT_PRICE)
 				frame_earnings += earned
 				total_earned += earned
+				earned_total += earned  # kumulatiivinen (lane G: $/s)
 				grid[idx] = 0
 				color_seed[idx] = randi() % 256
 				_flash_timer = 0.2
@@ -127,8 +133,8 @@ func get_structure_pixels() -> Array[Vector2i]:
 # --- Base-rooli (bottisimulaatio) ---
 
 # Summaa kuorman rahallisen arvon PRICES-taulusta. Tuntematon materiaali → 1 $/px.
-# EI muuta world-tilaa eikä total_earnedia — kutsuja lisää palautusarvon world.moneyyn.
-# cargo: mat_id (int) -> pikselimäärä (int).
+# EI muuta world.moneya eikä total_earnedia (label) — kutsuja lisää palautusarvon world.moneyyn.
+# Kasvattaa vain earned_total-kumulatiivilaskuria (lane G: $/s-mittari). cargo: mat_id -> px.
 func accept_cargo(cargo: Dictionary) -> int:
 	var total: int = 0
 	for mat_id in cargo:
@@ -137,6 +143,7 @@ func accept_cargo(cargo: Dictionary) -> int:
 			continue
 		var unit_price: int = PRICES.get(int(mat_id), DEFAULT_PRICE)
 		total += unit_price * amount
+	earned_total += total  # kumulatiivinen tulo (lane G laskee tasta $/s)
 	return total
 
 

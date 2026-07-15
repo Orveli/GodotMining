@@ -11,12 +11,27 @@ enum Role { MINER, HAULER }
 # Tilakone: IDLE -> MOVE -> WORK -> CARRY_MOVE -> DUMP
 enum BotState { IDLE, MOVE, WORK, CARRY_MOVE, DUMP }
 
-# Mk1-arvot (upgrade-tierit lisataan myohemmin)
-const MOVE_SPEED := 40.0   # px/s
-const MINE_RATE := 80.0    # px/s (16x16-solu = 256 px -> tayden kivisolun louhinta ~3.2 s)
-const CARRY_CAP := 40      # px
+# --- Upgrade-tierit (Mk1/Mk2/Mk3), taulukkoindeksi = tier - 1 ---
+# GDD §2.5 lahtoarvot olivat mine 25/50/90, mutta koodin nykybalanssi kayttaa jo MINE_RATE=80
+# (tayden kivisolun louhinta ~3.2 s tuntui oikealta). Sailytamme Mk1 = nykyinen 80 jottei
+# ennestaan viritetty balanssi hyppaa, ja skaalaamme Mk2/Mk3 tehtavan ohjeen mukaan 140/220
+# (~1.75x / 2.75x — sama suhteellinen kasvu-idea kuin GDD:n 25->50->90). Carry ja move_speed
+# tulevat suoraan GDD:sta (40/90/180 ja 40/70/110); Mk1 = nykyinen balanssi.
+const TIER_CARRY: Array[int] = [40, 90, 180]
+const TIER_MINE_RATE: Array[float] = [80.0, 140.0, 220.0]
+const TIER_MOVE_SPEED: Array[float] = [40.0, 70.0, 110.0]
+const MAX_TIER := 3        # Mk3 on korkein
+
+# Mk1-perusarvot vakioina — sailytetaan yhteensopivuutena (Bot.CARRY_CAP-viittaukset + testit).
+# Nama vastaavat TIER_*[0]:aa; kayta bot-instanssin carry_cap()/mine_rate()/move_speed()
+# -metodeja aina kun tier-riippuvuus on tarpeen.
+const MOVE_SPEED := 40.0   # px/s (Mk1)
+const MINE_RATE := 80.0    # px/s (Mk1; 16x16-solu = 256 px -> tayden kivisolun louhinta ~3.2 s)
+const CARRY_CAP := 40      # px  (Mk1)
 
 # --- Kontraktin mukainen julkinen tila ---
+var id: int = -1                         # pysyva tunniste (BotManager antaa add_botissa)
+var tier: int = 1                        # 1=Mk1, 2=Mk2, 3=Mk3 (upgrade_bot nostaa)
 var role: int = Role.MINER
 var state: int = BotState.IDLE
 var pos: Vector2 = Vector2.ZERO          # sim-pikselikoordinaatit
@@ -49,6 +64,28 @@ var load_pos: Vector2 = Vector2.ZERO     # kannetun kuorman painopiste
 var load_vel: Vector2 = Vector2.ZERO
 var intake_fx: Array = []                # imuvirtapartikkelit: {"from":Vector2,"mat":int,"t":float}
 var visuals_init: bool = false           # false -> ensimmaisella framella snapataan pos:iin
+
+# Hauler: valittu dumppikohde nykyiselle kuormalle (Logistics.choose_dump palauttaa taman).
+# { "kind": "base"|"dump", "pos": Vector2, "rect": Rect2i, "id": int, "accepted": int }.
+# Tyhja -> oletus = base (yhteensopiva vanhan kayttaytymisen kanssa).
+var dump_target: Dictionary = {}
+
+
+# --- Tier-riippuvaiset arvot (Mk1/Mk2/Mk3) ---
+
+# Kantokyky (px) nykyisella tierilla.
+func carry_cap() -> int:
+	return TIER_CARRY[tier - 1]
+
+
+# Louhintanopeus (px/s) nykyisella tierilla.
+func mine_rate() -> float:
+	return TIER_MINE_RATE[tier - 1]
+
+
+# Liikenopeus (px/s) nykyisella tierilla.
+func move_speed() -> float:
+	return TIER_MOVE_SPEED[tier - 1]
 
 
 func add_cargo(mat: int, n: int) -> void:
