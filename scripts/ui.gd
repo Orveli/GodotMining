@@ -19,7 +19,6 @@ var btn_spawner: Button
 var btn_conveyor: Button
 var btn_sling: Button
 var btn_wall: Button
-var btn_sand_mine_build: Button
 var btn_furnace_build: Button
 var btn_money_exit_build: Button
 var btn_crusher_build: Button
@@ -285,11 +284,6 @@ func _build_dropdown_panel() -> void:
 	hbox.add_child(btn_conveyor)
 	build_buttons.append(btn_conveyor)
 
-	btn_sand_mine_build = _make_btn("Kaivos [3]")
-	btn_sand_mine_build.pressed.connect(_on_build_sand_mine)
-	hbox.add_child(btn_sand_mine_build)
-	build_buttons.append(btn_sand_mine_build)
-
 	btn_furnace_build = _make_btn("Uuni [4]")
 	btn_furnace_build.pressed.connect(_on_build_furnace)
 	hbox.add_child(btn_furnace_build)
@@ -522,17 +516,16 @@ func _process(_delta: float) -> void:
 	match bm:
 		pixel_world.BUILD_SPAWNER:       active_build_idx = 0
 		pixel_world.BUILD_CONVEYOR_START, pixel_world.BUILD_CONVEYOR_END: active_build_idx = 1
-		pixel_world.BUILD_SAND_MINE:     active_build_idx = 2
-		pixel_world.BUILD_FURNACE:       active_build_idx = 3
-		pixel_world.BUILD_SLING:         active_build_idx = 4
-		pixel_world.BUILD_WALL_START, pixel_world.BUILD_WALL_END: active_build_idx = 5
-		pixel_world.BUILD_MONEY_EXIT:    active_build_idx = 6
-		pixel_world.BUILD_CRUSHER:       active_build_idx = 7
-		pixel_world.BUILD_DRILL:         active_build_idx = 8
-		pixel_world.BUILD_SELL:          active_build_idx = 9  # Myy-nappi
+		pixel_world.BUILD_FURNACE:       active_build_idx = 2
+		pixel_world.BUILD_SLING:         active_build_idx = 3
+		pixel_world.BUILD_WALL_START, pixel_world.BUILD_WALL_END: active_build_idx = 4
+		pixel_world.BUILD_MONEY_EXIT:    active_build_idx = 5
+		pixel_world.BUILD_CRUSHER:       active_build_idx = 6
+		pixel_world.BUILD_DRILL:         active_build_idx = 7
+		pixel_world.BUILD_SELL:          active_build_idx = 8  # Myy-nappi
 	for i in build_buttons.size():
 		# Myyntinappi korostetaan punaisella aktiivisena
-		if i == 9 and i == active_build_idx:
+		if i == 8 and i == active_build_idx:
 			build_buttons[i].modulate = Color(1.5, 0.4, 0.4)
 		else:
 			build_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == active_build_idx else Color.WHITE
@@ -545,8 +538,6 @@ func _process(_delta: float) -> void:
 		mode_str = " | HIHNA: klikkaa alku"
 	elif pixel_world.build_mode == pixel_world.BUILD_CONVEYOR_END:
 		mode_str = " | HIHNA: klikkaa loppu"
-	elif pixel_world.build_mode == pixel_world.BUILD_SAND_MINE:
-		mode_str = " | KAIVOS [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_FURNACE:
 		mode_str = " | UUNI [klikkaa]"
 	elif pixel_world.build_mode == pixel_world.BUILD_SLING:
@@ -565,8 +556,6 @@ func _process(_delta: float) -> void:
 		mode_str = " | MYYNTI: klikkaa rakennusta (ESC/M=peruuta)"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
-	elif pixel_world.current_weapon == 2:  # Weapon.RIFLE = 2
-		mode_str = " | RYNNÄKKÖ [L]"
 
 	# Designaatio-moodi (bottien louhinta-alue) — riippumaton rakennustilasta
 	if pixel_world.designation_mode:
@@ -576,11 +565,10 @@ func _process(_delta: float) -> void:
 	var exp_str := explosion_names[pixel_world.explosion_size]
 	var belt_str := " | Hihnoja: %d" % pixel_world.conveyors.size() if not pixel_world.conveyors.is_empty() else ""
 	var furnace_str := " | Uuneja: %d" % pixel_world.furnaces.size() if not pixel_world.furnaces.is_empty() else ""
-	var mine_str := " | Kaivoksia: %d" % pixel_world.sand_mines.size() if not pixel_world.sand_mines.is_empty() else ""
 	var sling_str := " | Linkoja: %d" % pixel_world.launchers.size() if not pixel_world.launchers.is_empty() else ""
 	var drill_str := " | Poraa: %d" % pixel_world.drills.size() if not pixel_world.drills.is_empty() else ""
 	var speed_str := " | %dx" % int(pixel_world.sim_speed) if pixel_world.sim_speed > 1.0 else ""
-	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, belt_str, furnace_str, mine_str, sling_str, drill_str, speed_str, mode_str]
+	fps_label.text = "FPS: %d | %s%s%s%s%s%s%s" % [Engine.get_frames_per_second(), exp_str, belt_str, furnace_str, sling_str, drill_str, speed_str, mode_str]
 	money_label.text = "$%d" % pixel_world.money
 
 
@@ -634,11 +622,6 @@ func _on_build_spawner() -> void:
 
 func _on_build_conveyor() -> void:
 	pixel_world.build_mode = pixel_world.BUILD_CONVEYOR_START
-	pixel_world.block_paint = true
-
-
-func _on_build_sand_mine() -> void:
-	pixel_world.build_mode = pixel_world.BUILD_SAND_MINE
 	pixel_world.block_paint = true
 
 
