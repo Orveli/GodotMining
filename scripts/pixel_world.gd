@@ -163,11 +163,6 @@ var _t_upload_render: float = 0.0
 var _t_gamelogic: float = 0.0
 var _perf_frame: int = 0
 
-# Laseri — funktio säilytetty mutta ei käytössä (vakiot tarvitaan kääntämiseen)
-var laser_beam_timer: int = 0
-const LASER_BEAM_DURATION := 8
-const LASER_WIDTH := 2
-
 # Kaivaustyökalun cooldown
 var pickaxe_cooldown: float = 0.0
 const PICKAXE_COOLDOWN_TIME := 0.15
@@ -224,7 +219,7 @@ const BUILD_NONE := 0
 const BUILD_SPAWNER := 1
 const BUILD_CONVEYOR_START := 2
 const BUILD_CONVEYOR_END := 3
-const BUILD_SAND_MINE := 4
+# BUILD_SAND_MINE (4) poistettu — hiekkakaivos poistettu pelistä
 const BUILD_FURNACE := 5
 const BUILD_SLING := 6
 const BUILD_WALL_START := 7
@@ -240,7 +235,6 @@ var conveyor_start_pos: Vector2 = Vector2.ZERO
 var wall_start_pos: Vector2 = Vector2.ZERO
 var conveyors: Array = []
 var furnaces: Array = []
-var sand_mines: Array = []
 var launchers: Array = []
 var money_exits: Array = []
 var crushers: Array = []
@@ -269,7 +263,6 @@ var _sell_overlay: Node2D = null              # Node2D joka piirtää korostussu
 # Rakennusten ostohinta — myynti palauttaa 50%
 const BUILDING_COSTS: Dictionary = {
 	"conveyor":    50,
-	"sand_mine":  100,
 	"furnace":    150,
 	"launcher":   200,
 	"money_exit": 250,
@@ -284,13 +277,6 @@ var infinite_money: bool = false
 var debug_menu_visible: bool = false
 var god_mode: bool = true  # God mode — pelaaja ei ota vahinkoa
 var debug_hotkeys_enabled: bool = false  # Destruktiiviset debug-näppäimet (C/R/pommit/aseet) — pois oletuksena
-
-# Ase-enum ja aktiivinen ase
-enum Weapon { PICKAXE, MEGA_DRILL, RIFLE, ROCKET, GRAVITY_GUN }
-var current_weapon: int = Weapon.PICKAXE
-
-# Pelaaja-viittaus (asetetaan player.gd:stä tai jätetään nulliksi god-modessa)
-var player: Node = null
 
 # Linko-oletusasetukset (debug-menu synkronoi kaikki launchers näihin)
 var launcher_launch_speed: float = 120.0
@@ -761,10 +747,8 @@ func _process(delta: float) -> void:
 		if _update_conveyors(delta * sim_speed):
 			grid_modified = true
 
-		# Vaihe 5.6: Uunit ja kaivokset
+		# Vaihe 5.6: Uunit
 		if _update_furnaces(delta * sim_speed):
-			grid_modified = true
-		if _update_sand_mines(delta * sim_speed):
 			grid_modified = true
 
 		# Vaihe 5.65: Money exitit, murskaajat ja porat
@@ -903,14 +887,13 @@ func _handle_input(_delta: float) -> void:
 				# Jää hihna-moodiin — valmis sijoittamaan seuraavan
 				build_mode = BUILD_CONVEYOR_START
 				block_paint = true
-			elif build_mode == BUILD_SAND_MINE:
-				_place_sand_mine(grid_pos)
-				block_paint = true
 			elif build_mode == BUILD_FURNACE:
 				_place_furnace(grid_pos)
 				block_paint = true
 			elif build_mode == BUILD_SLING:
-				_handle_launcher_click(Vector2(coords))
+				# Hissi-linko on debug-rakennus — sijoitus vaatii debug-näppäimet
+				if not _debug_hotkey_blocked():
+					_handle_launcher_click(Vector2(coords))
 				block_paint = true
 			elif build_mode == BUILD_WALL_START:
 				wall_start_pos = _snap_to_grid(grid_pos)
@@ -929,7 +912,9 @@ func _handle_input(_delta: float) -> void:
 				_place_crusher(grid_pos)
 				block_paint = true
 			elif build_mode == BUILD_DRILL:
-				_place_drill(grid_pos)
+				# Pora on debug-rakennus — sijoitus vaatii debug-näppäimet
+				if not _debug_hotkey_blocked():
+					_place_drill(grid_pos)
 				block_paint = true
 			elif build_mode == BUILD_SELL:
 				# Myy lähin rakennus klikkauksen kohdalta
@@ -1313,81 +1298,6 @@ func _bullet_impact(cx: int, cy: int) -> void:
 	paint_pending = true
 
 
-func _fire_rocket_at_cursor() -> void:
-	# Ei enää käytössä — aselogiikka poistettu
-	pass
-
-
-func _fire_laser(start: Vector2i, end: Vector2i) -> void:
-	# Bresenham-viiva paksuudella
-	var points := _bresenham_line(start.x, start.y, end.x, end.y)
-	var dx_line := float(end.x - start.x)
-	var dy_line := float(end.y - start.y)
-	var line_len := sqrt(dx_line * dx_line + dy_line * dy_line)
-	if line_len < 1.0:
-		return
-
-	# Normaali (kohtisuora viivaan)
-	var nx := -dy_line / line_len
-	var ny := dx_line / line_len
-
-	var has_stone := false
-	var min_x := mini(start.x, end.x) - LASER_WIDTH
-	var max_x := maxi(start.x, end.x) + LASER_WIDTH
-	var min_y := mini(start.y, end.y) - LASER_WIDTH
-	var max_y := maxi(start.y, end.y) + LASER_WIDTH
-
-	# Tuhoa pikselit viivan varrella
-	for p in points:
-		for offset in range(-LASER_WIDTH / 2, LASER_WIDTH / 2 + 1):
-			var px := p.x + int(nx * float(offset))
-			var py := p.y + int(ny * float(offset))
-			if px < 0 or px >= W or py < 0 or py >= SIM_HEIGHT:
-				continue
-			var idx := py * W + px
-			var mat := grid[idx]
-			if mat == MAT_EMPTY:
-				continue
-			# Suojatut rakennuspikselit eivät tuhoudu laserilla
-			if building_pixels.has(idx):
-				continue
-			match mat:
-				MAT_STONE:
-					# Kivi hajoaa laserilla: soraa
-					grid[idx] = MAT_GRAVEL
-					has_stone = true
-				MAT_WOOD, MAT_WOOD_FALLING:
-					grid[idx] = MAT_FIRE
-				MAT_OIL:
-					grid[idx] = MAT_FIRE
-				MAT_WATER:
-					grid[idx] = MAT_STEAM
-				MAT_SAND, MAT_ASH:
-					grid[idx] = MAT_EMPTY
-				MAT_FIRE, MAT_STEAM:
-					pass  # Ohita
-
-	# Kivi-split: etsi irtonaiset kappaleet
-	if has_stone:
-		var center_x := (start.x + end.x) / 2
-		var center_y := (start.y + end.y) / 2
-		var search_radius := int(line_len / 2.0) + LASER_WIDTH + 5
-		_detect_detached_stone(center_x, center_y, search_radius)
-
-	# Visuaaliset efektit
-	laser_beam_timer = LASER_BEAM_DURATION
-	add_trauma(0.06)  # Pieni recoil laserille
-
-	# Flash viivan keskipisteessä
-	var mid_x := float(start.x + end.x) * 0.5
-	var mid_y := float(start.y + end.y) * 0.5
-	flash_pos = Vector2(mid_x / float(W), mid_y / float(SIM_HEIGHT))
-	flash_radius = line_len / float(W) * 0.5
-	flash_timer = FLASH_DURATION
-
-	paint_pending = true
-
-
 # Bresenham-viiva
 func _bresenham_line(x0: int, y0: int, x1: int, y1: int) -> Array[Vector2i]:
 	var result: Array[Vector2i] = []
@@ -1649,15 +1559,14 @@ func _input(event: InputEvent) -> void:
 					build_menu_visible = false
 					block_paint = true
 					print("Rakennustila: LIUKUHIHNA — klikkaa alkupiste")
-				KEY_3:
-					build_mode = BUILD_SAND_MINE
-					build_menu_visible = false
-					block_paint = true
 				KEY_4:
 					build_mode = BUILD_FURNACE
 					build_menu_visible = false
 					block_paint = true
 				KEY_5:
+					# Hissi-linko on debug-rakennus — sijoitus vaatii debug-näppäimet
+					if _debug_hotkey_blocked():
+						return
 					build_mode = BUILD_SLING
 					launcher_phase = 1
 					build_menu_visible = false
@@ -1679,6 +1588,9 @@ func _input(event: InputEvent) -> void:
 					block_paint = true
 					print("Rakennustila: MURSKAAJA — klikkaa paikkaa")
 				KEY_P:
+					# Pora on debug-rakennus — sijoitus vaatii debug-näppäimet
+					if _debug_hotkey_blocked():
+						return
 					build_mode = BUILD_DRILL
 					build_menu_visible = false
 					block_paint = true
@@ -2574,19 +2486,6 @@ func _update_build_preview() -> void:
 		build_preview.start_marker = mouse_pos
 		# Spawnerilla ei rakennepikselejä — aina validi sijoituskohdalla
 		build_preview.is_valid = true
-	elif build_mode == BUILD_SAND_MINE:
-		# Hiekkakaivos: 4×4 siluetti snap-kohtaan (vastaa SandMine.MINE_W/MINE_H = 4/4)
-		const PREVIEW_MINE_W := 4
-		const PREVIEW_MINE_H := 4
-		var snapped := _snap_to_grid(mouse_pos)
-		var center := Vector2i(int(snapped.x), int(snapped.y))
-		var gp := Vector2i(center.x - PREVIEW_MINE_W / 2, center.y - PREVIEW_MINE_H / 2)
-		var preview_pxs: Array[Vector2i] = []
-		for dy in PREVIEW_MINE_H:
-			for dx in PREVIEW_MINE_W:
-				preview_pxs.append(Vector2i(gp.x + dx, gp.y + dy))
-		build_preview.preview_pixels = preview_pxs
-		build_preview.is_valid = _check_placement_valid(preview_pxs)
 	elif build_mode == BUILD_FURNACE:
 		# Uuni: siluetti snap-kohtaan (vastaa Furnace.FURNACE_W=12, FURNACE_H=10, INTAKE_W=6)
 		const PREVIEW_FURNACE_W := 12
@@ -2742,18 +2641,6 @@ func _clear_conveyors() -> void:
 	conveyors.clear()
 
 
-func _place_sand_mine(pos: Vector2) -> void:
-	var SandMineScript := preload("res://scripts/sand_mine.gd")
-	var mine = SandMineScript.new()
-	mine.setup(Vector2i(pos))
-	mine.build_structure(grid, color_seed, W, SIM_HEIGHT)
-	building_layer.add_child(mine)
-	sand_mines.append(mine)
-	_register_building_pixels(mine.structure_pixels)
-	paint_pending = true
-	print("Hiekkakaivos asetettu: ", pos)
-
-
 func _place_furnace(pos: Vector2) -> void:
 	var FurnaceScript := preload("res://scripts/furnace.gd")
 	var furnace = FurnaceScript.new()
@@ -2811,21 +2698,6 @@ func _spawn_smelted_body(drop_pos: Vector2i, mat: int) -> void:
 			color_seed[p.y * W + p.x] = seeds[i]
 			physics_world.body_map[p.y * W + p.x] = body.body_id
 	paint_pending = true
-
-
-func _update_sand_mines(delta: float) -> bool:
-	var modified := false
-	var alive: Array = []
-	for m in sand_mines:
-		if m.update_mine(grid, color_seed, W, SIM_HEIGHT, delta):
-			modified = true
-		if m.broken:
-			_unregister_building_pixels(m.structure_pixels)
-			m.queue_free()
-		else:
-			alive.append(m)
-	sand_mines = alive
-	return modified
 
 
 func _place_money_exit(pos: Vector2) -> void:
@@ -2966,9 +2838,6 @@ func _clear_buildings() -> void:
 	for f in furnaces:
 		f.queue_free()
 	furnaces.clear()
-	for m in sand_mines:
-		m.queue_free()
-	sand_mines.clear()
 	for me in money_exits:
 		me.queue_free()
 	money_exits.clear()
@@ -3249,16 +3118,6 @@ func _sell_nearest_building(sell_pos: Vector2) -> void:
 			best_list = furnaces
 			best_idx = i
 
-	for i in sand_mines.size():
-		var m = sand_mines[i]
-		var center := Vector2(m.grid_pos) + Vector2(m.MINE_W, m.MINE_H) * 0.5
-		var d := sell_pos.distance_to(center)
-		if d < best_dist:
-			best_dist = d
-			best_obj = m
-			best_list = sand_mines
-			best_idx = i
-
 	for i in launchers.size():
 		var s = launchers[i]
 		# Launchers: center lasketaan start_pos ja shaft-koon mukaan
@@ -3339,13 +3198,6 @@ func _find_nearest_building(grid_pos: Vector2) -> Variant:
 			best_dist = d
 			best_obj = f
 
-	for m in sand_mines:
-		var center := Vector2(m.grid_pos) + Vector2(m.MINE_W, m.MINE_H) * 0.5
-		var d := grid_pos.distance_to(center)
-		if d < best_dist:
-			best_dist = d
-			best_obj = m
-
 	for s in launchers:
 		var center := Vector2(s.start_pos) + Vector2(float(LauncherScript.SHAFT_WIDTH) * 0.5, float(s.start_pos.y - s.end_pos.y) * 0.5)
 		var d := grid_pos.distance_to(center)
@@ -3400,10 +3252,6 @@ func _sell_building_at(grid_pos: Vector2) -> void:
 		for i in furnaces.size():
 			if furnaces[i] == obj:
 				found_list = furnaces; found_idx = i; cost_key = "furnace"; break
-	if found_idx < 0:
-		for i in sand_mines.size():
-			if sand_mines[i] == obj:
-				found_list = sand_mines; found_idx = i; cost_key = "sand_mine"; break
 	if found_idx < 0:
 		for i in launchers.size():
 			if launchers[i] == obj:
@@ -3703,11 +3551,8 @@ func save_world() -> void:
 	for f in furnaces:
 		file.store_32(f.grid_pos.x + f.FURNACE_W / 2)
 		file.store_32(f.grid_pos.y + f.FURNACE_H / 2)
-	# Sand mines
-	file.store_32(sand_mines.size())
-	for m in sand_mines:
-		file.store_32(m.grid_pos.x + m.MINE_W / 2)
-		file.store_32(m.grid_pos.y + m.MINE_H / 2)
+	# Sand mines -lukumäärä — kirjoitetaan 0 taaksepäin-yhteensopivuuden vuoksi (sand_mine poistettu)
+	file.store_32(0)
 	# Spawners-lukumäärä — kirjoitetaan 0 taaksepäin-yhteensopivuuden vuoksi
 	file.store_32(0)
 	# Money exits
@@ -3728,8 +3573,8 @@ func save_world() -> void:
 		file.store_32(d.grid_pos.x + d.DRILL_W / 2)
 		file.store_32(d.grid_pos.y + d.DRILL_H / 2)
 	file.close()
-	print("Tallennettu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, %d poraa, $%d" % [
-		conveyors.size(), furnaces.size(), sand_mines.size(),
+	print("Tallennettu: %d hihnat, %d uunit, %d kassoja, %d murskaajia, %d poraa, $%d" % [
+		conveyors.size(), furnaces.size(),
 		money_exits.size(), crushers.size(), drills.size(), money])
 
 
@@ -3788,16 +3633,12 @@ func load_world() -> void:
 		f.setup(Vector2i(cx, cy))
 		building_layer.add_child(f)
 		furnaces.append(f)
-	# Sand mines — setup ilman build_structure
+	# Sand mines -data ohitetaan (sand_mine poistettu pelistä — vanhat tallennukset
+	# voivat yhä sisältää tämän kentän, luetaan ja hylätään hallitusti ettei lataus kaadu)
 	var mine_count := file.get_32()
 	for _i in mine_count:
-		var cx := int(file.get_32())
-		var cy := int(file.get_32())
-		var SandMineScript := preload("res://scripts/sand_mine.gd")
-		var m = SandMineScript.new()
-		m.setup(Vector2i(cx, cy))
-		building_layer.add_child(m)
-		sand_mines.append(m)
+		file.get_32()
+		file.get_32()
 	# Spawners-data ohitetaan (taaksepäin-yhteensopivuus, tallennus kirjoittaa 0)
 	var spawner_count := file.get_32()
 	for _i in spawner_count:
@@ -3840,8 +3681,8 @@ func load_world() -> void:
 	file.close()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
-	print("Ladattu: %d hihnat, %d uunit, %d kaivokset, %d kassoja, %d murskaajia, %d poraa, $%d" % [
-		conveyors.size(), furnaces.size(), sand_mines.size(),
+	print("Ladattu: %d hihnat, %d uunit, %d kassoja, %d murskaajia, %d poraa, $%d" % [
+		conveyors.size(), furnaces.size(),
 		money_exits.size(), crushers.size(), drills.size(), money])
 
 
