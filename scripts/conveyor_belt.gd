@@ -6,6 +6,30 @@ extends Node2D
 const BELT_SPEED := 4  # Siirrot per sekunti
 const FLOOR_MAT := 3   # MAT_STONE
 
+# Materiaali-ID:t (vastaavat simulation.glsl / pixel_world.gd -numerointia)
+const MAT_SAND := 1
+const MAT_WATER := 2
+const MAT_OIL := 6
+const MAT_STEAM := 7
+const MAT_ASH := 8
+const MAT_GLASS := 10
+const MAT_DIRT := 11
+const MAT_IRON_ORE := 12
+const MAT_GOLD_ORE := 13
+const MAT_COAL := 16
+const MAT_GRAVEL := 18
+const MAT_COPPER := 20
+const MAT_RARE_EARTH := 21
+
+# Hihnalla siirrettävät pikselimateriaalit: jauheet, nesteet, malmit ja sora.
+# HUOM: IRON(14)/GOLD(15)-harkot ovat 2×2 rigid bodyja joita physics_world
+# liikuttaa — ne EIVÄT kuulu pikselisiirtoon, joten niitä ei ole listalla.
+const MOVABLE_MATERIALS := [
+	MAT_SAND, MAT_WATER, MAT_OIL, MAT_STEAM, MAT_ASH, MAT_GLASS,
+	MAT_DIRT, MAT_IRON_ORE, MAT_GOLD_ORE, MAT_COAL, MAT_GRAVEL,
+	MAT_COPPER, MAT_RARE_EARTH,
+]
+
 
 var start_pos: Vector2i = Vector2i.ZERO
 var end_pos: Vector2i = Vector2i.ZERO
@@ -118,7 +142,7 @@ func _draw() -> void:
 
 
 func _is_movable(mat: int) -> bool:
-	return mat == 1 or mat == 2 or mat == 6 or mat == 7 or mat == 8 or mat == 10
+	return mat in MOVABLE_MATERIALS
 
 
 static func bresenham_line(from: Vector2i, to: Vector2i) -> Array[Vector2i]:

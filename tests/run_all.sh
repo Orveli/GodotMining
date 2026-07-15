@@ -19,6 +19,9 @@ done
 
 # GPU-skenaariot (CA-fysiikka vaatii Vulkan-renderin -> ajetaan ikkunallisena).
 # mvp_core_loop ohitetaan tassa; se ajetaan erikseen headlessina alla.
+# HUOM: ikkunallista Vulkania vaativat skenaariot (hihnat + koneet) ajetaan tässä
+# ilman --headless-lippua. Näihin kuuluvat conveyor_*.json ja belt_ore.json —
+# ne EIVÄT toimi headless-ympäristössä (tarvitsevat renderöivän kontekstin).
 for f in "$PROJECT/tests/scenarios"/*.json; do
   [ "$(basename "$f")" = "mvp_core_loop.json" ] && continue
   echo "--- $f"

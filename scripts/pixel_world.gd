@@ -2775,32 +2775,58 @@ func _update_drills(delta: float) -> bool:
 
 
 func _auto_connect_conveyor(building: Node) -> void:
-	# Yhdistää automaattisesti lähellä olevan konveyorin sisääntuloon tai ulostuloon
-	# Koskee vain Crusheria jolla on get_intake_center / get_output_center
-	if not building.has_method("get_intake_center"):
-		return
-	var intake_center: Vector2i = building.get_intake_center()
-	var output_center: Vector2i = building.get_output_center()
-	const AUTO_SNAP_DIST := 16  # Pikselietäisyys jolla auto-connect aktivoituu
-	for belt in conveyors:
-		# Tarkista hihnan pää → murskain intake
-		var d_end_to_intake := Vector2(belt.end_pos).distance_to(Vector2(intake_center))
-		if d_end_to_intake <= AUTO_SNAP_DIST and d_end_to_intake > 1.0:
-			var connect_start := Vector2(belt.end_pos)
-			var connect_end := Vector2(intake_center)
-			var pxs: Array[Vector2i] = ConveyorBelt.bresenham_line(Vector2i(connect_start), Vector2i(connect_end))
-			if _check_placement_valid(pxs):
-				_create_conveyor(connect_start, connect_end)
-				return
-		# Tarkista murskain output → hihnan alku
-		var d_output_to_start := Vector2(output_center).distance_to(Vector2(belt.start_pos))
-		if d_output_to_start <= AUTO_SNAP_DIST and d_output_to_start > 1.0:
-			var connect_start := Vector2(output_center)
-			var connect_end := Vector2(belt.start_pos)
-			var pxs: Array[Vector2i] = ConveyorBelt.bresenham_line(Vector2i(connect_start), Vector2i(connect_end))
-			if _check_placement_valid(pxs):
-				_create_conveyor(connect_start, connect_end)
-				return
+	# Yhdistää automaattisesti lähellä olevat hihnat koneiden sisään- ja ulostuloihin.
+	# Kattaa sekä Crusherit että Furnacet (kaikki koneet joilla on get_intake_center /
+	# get_output_center). Funktio on sweep-tyylinen: juuri asetetun rakennuksen lisäksi
+	# se käy läpi kaikki furnacet ja crusherit, joten aiemmin asetettu kone kytkeytyy
+	# kun sen viereen ilmestyy uusi kone tai hihna. Kytkennät ovat idempotentteja:
+	# jo kytketty intake/output ohitetaan, joten tuplahihnoja ei synny sweepatessa.
+	const AUTO_SNAP_DIST := 16.0  # Pikselietäisyys jolla auto-connect aktivoituu
+	const ALREADY_DIST := 2.0     # Näin lähellä oleva hihna tulkitaan jo kytketyksi
+
+	# Kerää auto-connectattavat koneet ilman duplikaatteja
+	var machines: Array = []
+	if building != null and building.has_method("get_intake_center"):
+		machines.append(building)
+	for f in furnaces:
+		if f != building and f.has_method("get_intake_center"):
+			machines.append(f)
+	for c in crushers:
+		if c != building and c.has_method("get_intake_center"):
+			machines.append(c)
+
+	for machine in machines:
+		var intake_center: Vector2i = machine.get_intake_center()
+		var output_center: Vector2i = machine.get_output_center()
+
+		# Onko intakeen/outputiin jo kytketty hihna? Estä tuplakytkennät.
+		var intake_connected := false
+		var output_connected := false
+		for belt in conveyors:
+			if Vector2(belt.end_pos).distance_to(Vector2(intake_center)) <= ALREADY_DIST:
+				intake_connected = true
+			if Vector2(belt.start_pos).distance_to(Vector2(output_center)) <= ALREADY_DIST:
+				output_connected = true
+
+		# Snapshot: _create_conveyor lisää conveyors-listaan → älä iteroi elävää listaa
+		var belts_snapshot: Array = conveyors.duplicate()
+		for belt in belts_snapshot:
+			# Hihnan pää → koneen intake
+			if not intake_connected:
+				var d_end_to_intake := Vector2(belt.end_pos).distance_to(Vector2(intake_center))
+				if d_end_to_intake <= AUTO_SNAP_DIST and d_end_to_intake > ALREADY_DIST:
+					var pxs: Array[Vector2i] = ConveyorBelt.bresenham_line(belt.end_pos, intake_center)
+					if _check_placement_valid(pxs):
+						_create_conveyor(Vector2(belt.end_pos), Vector2(intake_center))
+						intake_connected = true
+			# Koneen output → hihnan alku
+			if not output_connected:
+				var d_output_to_start := Vector2(output_center).distance_to(Vector2(belt.start_pos))
+				if d_output_to_start <= AUTO_SNAP_DIST and d_output_to_start > ALREADY_DIST:
+					var pxs2: Array[Vector2i] = ConveyorBelt.bresenham_line(output_center, belt.start_pos)
+					if _check_placement_valid(pxs2):
+						_create_conveyor(Vector2(output_center), Vector2(belt.start_pos))
+						output_connected = true
 
 
 func _update_crushers(delta: float) -> bool:

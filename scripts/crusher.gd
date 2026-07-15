@@ -4,6 +4,7 @@ extends Node2D
 const CRUSHER_W := 16
 const CRUSHER_H := 10
 const INTAKE_W := 8
+const INTAKE_DROP_H := 4  # Purkuvyöhykkeen korkeus intake-aukon yläpuolella (logistiikka)
 const FLOOR_MAT := 3  # MAT_STONE
 const CRUSH_COOLDOWN := 1.2  # Sekunteina
 
@@ -149,6 +150,18 @@ func get_intake_center() -> Vector2i:
 func get_output_center() -> Vector2i:
 	# Ulostulon keskipiste (alta tippuu murskattu materiaali)
 	return Vector2i(output_x + 4, output_y)
+
+
+func get_input_dump() -> Dictionary:
+	# Logistiikan (lane A) rajapinta: intake-alue koneen yläpuolella + reseptin
+	# input-materiaalien bittimaski (1 << mat_id). Maski johdetaan RECIPES-avaimista:
+	# Crusher = GRAVEL.
+	var mask := 0
+	for input_mat: int in RECIPES.keys():
+		mask |= 1 << input_mat
+	var intake_start := grid_pos.x + (CRUSHER_W - INTAKE_W) / 2
+	var rect := Rect2i(intake_start, grid_pos.y - INTAKE_DROP_H, INTAKE_W, INTAKE_DROP_H)
+	return { "rect": rect, "filter_mask": mask }
 
 
 func _draw() -> void:
