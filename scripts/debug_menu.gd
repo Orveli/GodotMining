@@ -170,6 +170,7 @@ func _build_ui() -> void:
 	_tab_launcher(tabs)
 	_tab_worldgen(tabs)
 	_tab_game(tabs)
+	_tab_materials(tabs)
 	_tab_testit(tabs)
 
 
@@ -470,6 +471,62 @@ func _tab_game(tabs: TabContainer) -> void:
 	_subheader(p, "Tallentaminen")
 	p.add_child(_make_btn("Tallenna debug-tiedot", _save_debug_info))
 	p.add_child(_make_btn("Kuvakaappaus", _save_screenshot))
+
+
+# ── Materiaalit-tabi ──────────────────────────────────────────────────────
+# Materiaalimaalaus siirretty pelaaja-UI:sta tänne (DEMO_PLAN §3.1 kortti B1).
+# Maalaus toimii kun debug-menu on auki: valitse materiaali → maalaa pelinäkymään.
+const _PAINT_MATS: Array = [
+	["Hiekka", 1], ["Vesi", 2], ["Kivi", 3], ["Puu", 4],
+	["Tuli", 5], ["Öljy", 6], ["Multa", 11], ["Rautamalmi", 12],
+	["Kultamalmi", 13], ["Hiili", 16], ["Kupari", 20], ["Harv.maa", 21],
+	["Kumita", 0],
+]
+
+
+func _tab_materials(tabs: TabContainer) -> void:
+	var p := _make_tab_scroll(tabs, "Materiaalit")
+	_subheader(p, "Maalattava materiaali (toimii kun debug-menu auki)")
+
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 4)
+	grid.add_theme_constant_override("v_separation", 4)
+	for m in _PAINT_MATS:
+		grid.add_child(_make_btn(m[0], _set_paint_material.bind(int(m[1]))))
+	p.add_child(grid)
+
+	p.add_child(_make_btn("Kivi (irrallinen kappale)", _set_paint_stone_dynamic))
+
+	_subheader(p, "Pensselin koko")
+	_slider_row(p, "Pensselikoko (px)", 1, 30, 1,
+		func(): return float(pixel_world.get("brush_size")) if pixel_world != null else 5.0,
+		func(v: float): if pixel_world != null: pixel_world.set("brush_size", int(v)))
+
+	_subheader(p, "Kentän muokkaus")
+	p.add_child(_make_btn("Tyhjennä kenttä [C]", func():
+		if pixel_world != null and pixel_world.has_method("clear_world"):
+			pixel_world.clear_world()))
+
+
+# Valitsee maalattavan materiaalin ja poistaa rakennus-/designaatiotilan
+func _set_paint_material(mat: int) -> void:
+	if pixel_world == null:
+		return
+	pixel_world.set("current_material", mat)
+	pixel_world.set("stone_dynamic", false)
+	pixel_world.set("build_mode", 0)          # BUILD_NONE
+	pixel_world.set("designation_mode", false)
+
+
+# Kivi irrallisena fysiikkakappaleena (stone_dynamic = true)
+func _set_paint_stone_dynamic() -> void:
+	if pixel_world == null:
+		return
+	pixel_world.set("current_material", 3)     # MAT_STONE
+	pixel_world.set("stone_dynamic", true)
+	pixel_world.set("build_mode", 0)           # BUILD_NONE
+	pixel_world.set("designation_mode", false)
 
 
 func _render_worldgen_preview() -> void:

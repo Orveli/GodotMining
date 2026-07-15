@@ -16,7 +16,7 @@ var body_count: int = 0
 var fps: float = 0.0
 var frame_count: int = 0
 
-# Materiaalinimet ID:n mukaan
+# Materiaalinimet ID:n mukaan (kattaa ID:t 0–21)
 const MAT_NAMES: Dictionary = {
 	0: "EMPTY",
 	1: "SAND",
@@ -29,9 +29,20 @@ const MAT_NAMES: Dictionary = {
 	8: "ASH",
 	9: "WOOD_FALL",
 	10: "GLASS",
+	11: "DIRT",
+	12: "IRON_ORE",
+	13: "GOLD_ORE",
+	14: "IRON",
+	15: "GOLD",
+	16: "COAL",
+	17: "HELD",
+	18: "GRAVEL",
+	19: "BEDROCK",
+	20: "COPPER",
+	21: "RARE_EARTH",
 }
 
-# Materiaalien näyttövärit overlayssa
+# Materiaalien näyttövärit overlayssa (kattaa ID:t 0–21)
 const MAT_COLORS: Dictionary = {
 	0: Color(0.4, 0.4, 0.4),
 	1: Color(0.9, 0.8, 0.4),
@@ -44,6 +55,17 @@ const MAT_COLORS: Dictionary = {
 	8: Color(0.35, 0.35, 0.35),
 	9: Color(0.65, 0.4, 0.15),
 	10: Color(0.6, 0.85, 0.9),
+	11: Color(0.45, 0.32, 0.18),
+	12: Color(0.55, 0.42, 0.38),
+	13: Color(0.72, 0.65, 0.25),
+	14: Color(0.68, 0.68, 0.72),
+	15: Color(0.90, 0.78, 0.20),
+	16: Color(0.18, 0.17, 0.21),
+	17: Color(1.0, 0.85, 0.1),
+	18: Color(0.70, 0.59, 0.45),
+	19: Color(0.25, 0.22, 0.30),
+	20: Color(0.72, 0.45, 0.28),
+	21: Color(0.35, 0.75, 0.65),
 }
 
 const PANEL_MARGIN := Vector2(10.0, 10.0)
