@@ -22,30 +22,42 @@ const MAT_IRON_ORE     := 12
 const MAT_GOLD_ORE     := 13
 const MAT_COAL         := 16
 const MAT_BEDROCK      := 19  # Pohjakivi — tuhoamaton reunakerros
+const MAT_COPPER       := 20  # Kupari — malmisuoni, keskisyvä
+const MAT_RARE_EARTH   := 21  # Rare earth — malmisuoni, syvin ja arvokkain
 
 const EDGE_THICKNESS := 2
 
 # Kertymien lukumäärä — enemmän ja tasaisemmin jaettu
-static var coal_count:  int = 10
+# (coal/iron/gold: nyt suonien lukumäärä _place_vein_set():lle, ei enää blobeja)
+static var coal_count:  int = 12
 static var iron_count:  int = 10
-static var gold_count:  int = 6
+static var gold_count:  int = 5
 static var oil_count:   int = 5
 static var water_count: int = 5
 static var sand_count:  int = 6
+static var copper_count:      int = 7  # Uusi malmi — suoni
+static var rare_earth_count:  int = 3  # Uusi malmi — suoni, harvinaisin
 
 # Mineraalien syvyysalueet — laajennettu pintaan asti
-static var coal_depth:     float = 0.10   # Hiiltä jo pintakerroksen alla
-static var coal_depth_max: float = 1.0
-static var iron_depth:     float = 0.05   # Rautaa lähes pinnalta
-static var iron_depth_max: float = 0.80
-static var gold_depth:     float = 0.45   # Kultaa vasta syvemmältä
-static var gold_depth_max: float = 1.0
+# (coal/iron/gold: suonen ALOITUSpisteen syvyysvyöhyke, ks. _place_vein_set)
+static var coal_depth:     float = 0.00   # Hiiltä jo pinnasta asti
+static var coal_depth_max: float = 0.35
+static var iron_depth:     float = 0.10   # Rautaa lähes pinnalta
+static var iron_depth_max: float = 0.55
+static var gold_depth:     float = 0.55   # Kultaa vasta syvemmältä
+static var gold_depth_max: float = 0.90
 static var oil_depth:      float = 0.30   # Öljyä jo välimaastosta
 static var oil_depth_max:  float = 1.0
 static var sand_depth:     float = 0.0
 static var sand_depth_max: float = 0.25
+static var copper_depth:      float = 0.35
+static var copper_depth_max:  float = 0.75
+static var rare_earth_depth:      float = 0.75
+static var rare_earth_depth_max:  float = 1.0
 
-# Kertymien säderajat — siistit pyöreät blobeja
+# Kertymien säderajat — käytössä enää vain blobiksi jäävillä aineilla (öljy/hiekka).
+# coal/iron/gold -säteet säilytetään debug_menu-yhteensopivuuden vuoksi mutta eivät
+# enää vaikuta generointiin (korvattu suonien thickness/vein_len-arvoilla alla).
 static var coal_r_min:  float = 16.0
 static var coal_r_max:  float = 45.0
 static var iron_r_min:  float = 14.0
@@ -57,6 +69,32 @@ static var oil_r_max:   float = 50.0
 static var sand_r_min:  float = 14.0
 static var sand_r_max:  float = 26.0
 
+# Suonien pituus (askelta) ja paksuus (px) — data-driven per malmi (spec 1.3)
+static var coal_vein_len_min:  int = 40
+static var coal_vein_len_max:  int = 70
+static var coal_thickness_min: float = 2.0
+static var coal_thickness_max: float = 3.0
+static var iron_vein_len_min:  int = 35
+static var iron_vein_len_max:  int = 60
+static var iron_thickness_min: float = 2.0
+static var iron_thickness_max: float = 3.0
+static var copper_vein_len_min:  int = 30
+static var copper_vein_len_max:  int = 50
+static var copper_thickness_min: float = 2.0
+static var copper_thickness_max: float = 2.0
+static var gold_vein_len_min:  int = 25
+static var gold_vein_len_max:  int = 40
+static var gold_thickness_min: float = 1.0
+static var gold_thickness_max: float = 2.0
+static var rare_earth_vein_len_min:  int = 20
+static var rare_earth_vein_len_max:  int = 35
+static var rare_earth_thickness_min: float = 1.0
+static var rare_earth_thickness_max: float = 2.0
+
+# Suonen mutkittelu (heading += randf_range(-x,x) per askel) ja haaroitustodennäköisyys
+static var vein_wiggle: float = 0.35
+static var vein_branch_chance: float = 0.06
+
 # Satunnainen kokovaihtelu per kertymiä (0=kiinteä, 1=±100%)
 static var size_variance: float = 0.25
 # Ellipsin epäsymmetria ja reunan epäsäännöllisyys — pienempi = siistimpi/pyöreämpi
@@ -64,6 +102,17 @@ static var perturb_strength: float = 0.18
 
 # Multakerroksen paksuus (px)
 static var dirt_thickness: int = 5
+
+# ============================================================
+# Tehdasalusta (factory platform) — tasainen alue kartan keskellä
+# pinnan tasossa, jonne base + koneet sijoitetaan (GDD luku 5.2).
+# Nämä lasketaan uudelleen generate():ssa todellisen w/h:n mukaan.
+# Oletukset vastaavat 1664×960-maailmaa.
+# ============================================================
+static var platform_w: int = 300          # alustan leveys px
+static var platform_x0: int = 682         # vasen reuna px (w/2 - platform_w/2)
+static var platform_y: int = 384          # alustan PINNAN y-taso px (h*0.40)
+static var platform_thickness: int = 6    # ohut STONE-perustus alustan alla px
 
 # Yhteensopivuusmuuttujat debug_menu.gd:lle (ei käytetä itse generoinnissa)
 static var surface_height_ratio: float = 0.40  # Approx pinnan korkeus normalisoituna
@@ -107,27 +156,45 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 	var max_dp := float(h) * 0.60
 
 	# Phase 3: Resurssit — arvokkain ensin (ei ylikirjoita)
+	# Malmit (COAL/IRON_ORE/COPPER/GOLD_ORE/RARE_EARTH) sijoitetaan mutkittelevina
+	# suonina (_place_vein_set) — syvemmällä = arvokkaampaa. Vesi/öljy/hiekka pysyvät
+	# ellipsiblobeina (_place_deposit_set).
 	_place_surface_sand(grid, w, h, surface_y, rng)
 	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_OIL,
 		oil_count, oil_depth, oil_depth_max,
 		oil_r_min, oil_r_max, max_dp)
-	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_GOLD_ORE,
+	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_RARE_EARTH,
+		rare_earth_count, rare_earth_depth, rare_earth_depth_max,
+		rare_earth_vein_len_min, rare_earth_vein_len_max,
+		rare_earth_thickness_min, rare_earth_thickness_max, max_dp)
+	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_GOLD_ORE,
 		gold_count, gold_depth, gold_depth_max,
-		gold_r_min, gold_r_max, max_dp)
+		gold_vein_len_min, gold_vein_len_max,
+		gold_thickness_min, gold_thickness_max, max_dp)
+	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_COPPER,
+		copper_count, copper_depth, copper_depth_max,
+		copper_vein_len_min, copper_vein_len_max,
+		copper_thickness_min, copper_thickness_max, max_dp)
 	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_WATER,
 		water_count, 0.20, 0.70, 8.0, 16.0, max_dp)
-	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_IRON_ORE,
+	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_IRON_ORE,
 		iron_count, iron_depth, iron_depth_max,
-		iron_r_min, iron_r_max, max_dp)
-	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_COAL,
+		iron_vein_len_min, iron_vein_len_max,
+		iron_thickness_min, iron_thickness_max, max_dp)
+	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_COAL,
 		coal_count, coal_depth, coal_depth_max,
-		coal_r_min, coal_r_max, max_dp)
+		coal_vein_len_min, coal_vein_len_max,
+		coal_thickness_min, coal_thickness_max, max_dp)
 	_place_cave_edge_deposits(grid, w, h, surface_y, rng, perturb_data, cave_paths)
 	rng.seed = world_seed + 201
 	_place_lakes(grid, w, h, rng, surface_y)
 
 	# Phase 4: Kasvillisuus
 	_grow_vegetation(grid, w, h, rng)
+
+	# Viimeistely: leimaa puhdas tehdasalusta (poistaa mahdolliset malmit/
+	# kasvit alustan päältä ja varmistaa ehjän STONE-perustuksen)
+	_stamp_platform(grid, w, h)
 
 	var empty_count := 0
 	for i in grid.size():
@@ -156,9 +223,19 @@ static func _generate_terrain(grid: PackedByteArray, w: int, h: int,
 		var low  := noise_low.get_noise_2d(fx, 0.0)
 		var mid  := noise_mid.get_noise_2d(fx, 0.0)
 		var high := noise_high.get_noise_2d(fx, 0.0)
-		# Isot amplitudit → näkyvät vuoret ja laaksot (960px korkea maailma)
-		surface_y[x] = clampf(base_y + low * 90.0 + mid * 35.0 + high * 6.0,
-			40.0, float(h) * 0.62)
+		# Loiva pinta: pienet amplitudit → korkeusvaihtelu koko kartalla alle ~60 px.
+		# Säilytetään pientä visuaalista vaihtelua kolmella taajuudella.
+		surface_y[x] = clampf(base_y + low * 20.0 + mid * 8.0 + high * 3.0,
+			base_y - 45.0, base_y + 45.0)
+
+	# --- Tehdasalusta: tasoita ~300 px levyinen alue kartan keskeltä ---
+	# Lasketaan alustan sijainti todellisen w/h:n mukaan ja tallennetaan
+	# staattisiin muuttujiin get_platform_rect():ia varten.
+	platform_y = int(base_y)
+	platform_x0 = w / 2 - platform_w / 2
+	var px_end := platform_x0 + platform_w
+	for x in range(maxi(platform_x0, 0), mini(px_end, w)):
+		surface_y[x] = float(platform_y)
 
 	# Täytä maailma maastoprofiililla
 	for y in h:
@@ -560,6 +637,141 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 					grid[pidx] = mat
 
 
+# ============================================================
+# Mineraalisuonet — worm-walk-algoritmi (syvyyspohjainen arvo)
+# Jokainen suoni alkaa satunnaisesta x-osiosta ja syvyysvyöhykkeen mukaisesta
+# y-pisteestä, etenee alaspäin painottuneeseen satunnaissuuntaan mutkitellen,
+# ja carvaa ohuen käytävän VAIN kiveen (ei ylikirjoita muita malmeja/multaa/
+# bedrockia). Pieni todennäköisyys haaroittua kerran per suoni (branch_depth<1).
+# ============================================================
+static func _place_vein_set(grid: PackedByteArray, w: int, h: int,
+		surface_y: PackedFloat32Array, rng: RandomNumberGenerator,
+		perturb_data: PackedByteArray, mat: int,
+		count: int, depth_min: float, depth_max: float,
+		vein_len_min: int, vein_len_max: int,
+		thickness_min: float, thickness_max: float,
+		max_depth_px: float) -> void:
+
+	var eff_w      := w - EDGE_THICKNESS * 4
+	var section_w  := float(eff_w) / float(count)
+
+	for i in count:
+		# Aloitus-x: osiokohtainen — suonet leviävät tasaisesti kartan levyydelle
+		var x0 := EDGE_THICKNESS * 2 + int(section_w * float(i))
+		var x1 := mini(EDGE_THICKNESS * 2 + int(section_w * float(i + 1)) - 1,
+			w - EDGE_THICKNESS * 2 - 1)
+		var start_x := rng.randi_range(x0, x1)
+
+		# Aloitus-y: satunnainen syvyysvyöhykkeellä (0=pinta, 1=pohja)
+		var dn := rng.randf_range(depth_min, depth_max)
+		var sy := surface_y[clampi(start_x, 0, w - 1)]
+		var start_y := clampf(sy + dn * max_depth_px, sy + 2.0, float(h - EDGE_THICKNESS - 1))
+
+		# Alaspäin painotettu satunnaissuunta: ~90° (suoraan alas) ± vaihtelu
+		var heading := PI * 0.5 + rng.randf_range(-0.9, 0.9)
+		var vein_len := rng.randi_range(vein_len_min, vein_len_max)
+		var thickness := rng.randf_range(thickness_min, thickness_max)
+
+		_walk_vein(grid, w, h, float(start_x), start_y, heading, vein_len,
+			thickness, mat, perturb_data, rng, 0)
+
+
+# Yksittäisen suonen (tai haaran) kävely: carvaa ellipsipoikkileikkauksen joka
+# askeleella, mutkittelee heading-kulmaa satunnaisesti, ja voi haaroittaa
+# pienellä todennäköisyydellä (vain kerran, branch_depth < 1).
+static func _walk_vein(grid: PackedByteArray, w: int, h: int,
+		start_cx: float, start_cy: float, start_heading: float, steps: int,
+		thickness: float, mat: int, perturb_data: PackedByteArray,
+		rng: RandomNumberGenerator, branch_depth: int) -> void:
+
+	var cx := start_cx
+	var cy := start_cy
+	var heading := start_heading
+
+	for _step in steps:
+		_carve_vein_disc(grid, w, h, cx, cy, thickness, mat, perturb_data)
+
+		# Haaroitus: pieni todennäköisyys, vain kerran per suoni (ei rekursiota loputtomiin)
+		if branch_depth < 1 and rng.randf() < vein_branch_chance:
+			var sub_len := maxi(6, steps / 2)
+			var sub_heading := heading + rng.randf_range(-1.2, 1.2)
+			_walk_vein(grid, w, h, cx, cy, sub_heading, sub_len,
+				thickness * 0.65, mat, perturb_data, rng, branch_depth + 1)
+
+		# Mutkittelu + eteneminen suuntaan
+		heading += rng.randf_range(-vein_wiggle, vein_wiggle)
+		cx += cos(heading)
+		cy += sin(heading)
+
+		# Clamp reunoihin — lopeta jos suoni ajautuu reunan tai pohjan ulkopuolelle
+		if cx < float(EDGE_THICKNESS + 2) or cx >= float(w - EDGE_THICKNESS - 2):
+			break
+		if cy < 0.0 or cy >= float(h - EDGE_THICKNESS - 2):
+			break
+		# Lopeta bedrockissa
+		if grid[int(cy) * w + int(cx)] == MAT_BEDROCK:
+			break
+
+
+# Carvaa pienen ellipsin (suonen poikkileikkaus) VAIN MAT_STONE-soluihin —
+# ei ylikirjoita muita malmeja, multaa, ilmaa tai bedrockia.
+static func _carve_vein_disc(grid: PackedByteArray, w: int, h: int,
+		cx: float, cy: float, radius: float, mat: int,
+		perturb_data: PackedByteArray) -> void:
+	var scan := int(ceil(radius)) + 2
+	var icx  := int(cx)
+	var icy  := int(cy)
+	for dy in range(-scan, scan + 1):
+		var py := icy + dy
+		if py < 0 or py >= h:
+			continue
+		for dx in range(-scan, scan + 1):
+			var px := icx + dx
+			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
+				continue
+			var pidx := py * w + px
+			if grid[pidx] != MAT_STONE:
+				continue
+
+			var fdx := float(px) - cx
+			var fdy := float(py) - cy
+			var dist := sqrt(fdx * fdx + fdy * fdy)
+
+			# Reunaperturbaatio orgaanista muotoa varten (kuten blob-esiintymissä)
+			var pn := float(perturb_data[pidx]) / 128.0 - 1.0  # -1..+1
+			if dist < radius + pn * perturb_strength * radius:
+				grid[pidx] = mat
+
+
+# ============================================================
+# Tehdasalusta: puhdas tasainen alue + ohut STONE-perustus.
+# - Yläpuoli tyhjennetään (EMPTY) → siisti ilmatila alustan päälle.
+# - Alustan pinnasta platform_thickness px alaspäin = STONE-perustus.
+# BEDROCKia ei ylikirjoiteta (reunasuoja).
+# ============================================================
+static func _stamp_platform(grid: PackedByteArray, w: int, h: int) -> void:
+	var x_start := maxi(platform_x0, EDGE_THICKNESS)
+	var x_end   := mini(platform_x0 + platform_w, w - EDGE_THICKNESS)
+	for x in range(x_start, x_end):
+		# Tyhjennä alustan yläpuoli (poistaa kasvit/dyynit/roskat)
+		for y in range(0, platform_y):
+			var idx := y * w + x
+			if grid[idx] != MAT_BEDROCK:
+				grid[idx] = MAT_EMPTY
+		# STONE-perustus alustan pinnasta alaspäin
+		for y in range(platform_y, mini(platform_y + platform_thickness, h)):
+			var fidx := y * w + x
+			if grid[fidx] != MAT_BEDROCK:
+				grid[fidx] = MAT_STONE
+
+
+# Tehdasalustan alue sim-pikseleinä; position.y = alustan pinnan y-taso.
+# Korkeus = ohut STONE-perustus (perustuslaatan paksuus). Integraatio sijoittaa
+# basen ja koneet alustan pinnalle (rect.position.y).
+static func get_platform_rect() -> Rect2i:
+	return Rect2i(platform_x0, platform_y, platform_w, platform_thickness)
+
+
 static func _enforce_edges(grid: PackedByteArray, w: int, h: int) -> void:
 	# Kirjoitetaan bedrockia reunoihin ja pohjaan (ei kivi — bedrock on tuhoamaton)
 	for y in h:
@@ -578,10 +790,18 @@ static func _place_lakes(grid: PackedByteArray, w: int, h: int,
 	var min_spacing := lake_w_max
 	var placed: Array[int] = []
 
+	# Tehdasalustan alue + reunapuskuri — järviä ei sijoiteta tänne
+	var plat_lo := platform_x0 - lake_w_max / 2
+	var plat_hi := platform_x0 + platform_w + lake_w_max / 2
+
 	var attempts := 0
 	while placed.size() < lake_count and attempts < 300:
 		attempts += 1
 		var cx: int = rng.randi_range(margin, w - margin - 1)
+
+		# Estä järvet tehdasalustan päälle/alle (pidä alusta puhtaana)
+		if cx > plat_lo and cx < plat_hi:
+			continue
 
 		var too_close := false
 		for prev in placed:

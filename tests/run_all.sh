@@ -17,8 +17,10 @@ for f in "$PROJECT/tests/unit"/test_*.gd; do
   fi
 done
 
-# GPU-skenaariot
+# GPU-skenaariot (CA-fysiikka vaatii Vulkan-renderin -> ajetaan ikkunallisena).
+# mvp_core_loop ohitetaan tassa; se ajetaan erikseen headlessina alla.
 for f in "$PROJECT/tests/scenarios"/*.json; do
+  [ "$(basename "$f")" = "mvp_core_loop.json" ] && continue
   echo "--- $f"
   output=$("$GODOT" --path "$PROJECT" -- --scenario="res://tests/scenarios/$(basename $f)" 2>&1)
   echo "$output"
@@ -28,6 +30,21 @@ for f in "$PROJECT/tests/scenarios"/*.json; do
     PASS=$((PASS+1))
   fi
 done
+
+# E2E-bottiskenaario (GDD Vaihe 1) — CPU-bottisimulaatio, EI vaadi GPU:ta.
+# Ajetaan headlessina: gpu_ready=false -> pixel_world ajaa bottisimulaation + CPU-CA:n
+# (cpu_ca=true) kiintealla aika-askeleella (deterministinen). Miner muuntaa STONE->GRAVEL /
+# loysentaa granulaarit, CA valuttaa irtomateriaalin kuopan pohjalle, hauler imuroi ja purkaa
+# baseen. Kynnykset sidottu designaation kokoon (osuus-assert) -> todistaa etenevan louhinnan
+# ja BLOCKED-reaktivoinnin (ei frontier-jumia).
+echo "--- $PROJECT/tests/scenarios/mvp_core_loop.json (headless)"
+output=$("$GODOT" --headless --path "$PROJECT" -- --scenario="res://tests/scenarios/mvp_core_loop.json" 2>&1)
+echo "$output"
+if echo "$output" | grep -q "ScenarioRunner: FAIL\|failed=[^0]"; then
+  FAIL=$((FAIL+1))
+else
+  PASS=$((PASS+1))
+fi
 
 echo ""
 echo "========================="

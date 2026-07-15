@@ -1,0 +1,26 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "E2E: GDD Vaihe 1 Definition of Done. Boottaa (base + 1 miner + 1 hauler pinnalla), designoi louhinta-alue alustan viereen, ajaa bottisimulaatiota kiintealla aika-askeleella (deterministinen) ja todistaa MITTAKAAVASSA etta ydinsilmukka etenee: miner louhii frontier-soluja, hauler tuo saaliin baseen ja raha nousee, JA ettei louhinta jumita frontieriin (BLOCKED-solut reaktivoituvat kun hauler avaa navin -> designoitu alue tyhjenee ~kokonaan). Aja headless: gpu_ready=false -> pelkka CPU-bottisimulaatio (CA ei tarvita; miner muuntaa STONE->GRAVEL / WOOD->ASH paikallaan ja loysentaa granulaarit, hauler imuroi ja purkaa baseen). Alue on tarkoituksella pieni ja frame-budjetti suuri, jotta silmukka ehtii tyhjentaa sen ja kynnykset voidaan sitoa designaation kokoon (osuus-assert).",
+  "steps": [
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/mvp_t0.png", "label": "boot: base + 2 bottia pinnalla" },
+
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 48, "margin": 12, "depth": 36 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "assert_money_gt", "min": 150, "label": "raha noussut louhinnasta+kuljetuksesta (mittakaavassa, ei vain kynnyksen yli)" },
+    { "cmd": "assert_bots_moved", "min_dist": 30, "label": "molemmat botit siirtyneet >30 px spawnista" },
+    { "cmd": "assert_desig_consumed_pct", "min_pct": 70, "label": "designoidusta alueesta >=70% kulutettu (todistaa etenevan louhinnan + BLOCKED-reaktivoinnin, ei frontier-jumia)" },
+
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/mvp_t1.png", "label": "lopputila: kaivettu alue + botit" }
+  ]
+}

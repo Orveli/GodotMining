@@ -46,11 +46,11 @@ Käyttäjä kertoo mitä haluaa tehdä. Sinä orkestroit työn automaattisesti o
 
 ## Materiaalit
 
-EMPTY=0, SAND=1, WATER=2, STONE=3, WOOD=4, FIRE=5, OIL=6, STEAM=7, ASH=8, WOOD_FALLING=9
+EMPTY=0, SAND=1, WATER=2, STONE=3, WOOD=4, FIRE=5, OIL=6, STEAM=7, ASH=8, WOOD_FALLING=9, GLASS=10, DIRT=11, IRON_ORE=12, GOLD_ORE=13, IRON=14, GOLD=15, COAL=16, HELD=17 (poistettu käytöstä), GRAVEL=18, BEDROCK=19
 
 ## Simulaatioruudukko
 
-320×180 pikseliä, näytetään 1280×720 ikkunassa (4x skaalaus, nearest-filter)
+1664×960 pikseliä (`SIM_WIDTH`/`SIM_HEIGHT` scripts/pixel_world.gd), ikkuna 1664×960 (1:1, nearest-filter)
 
 ## Koodauskonventiot
 
@@ -81,7 +81,7 @@ Jos tiedostoja ei löydy: pyydä käyttäjää painamaan I pelissä ensin.
 ## Tärkeät rajoitteet
 
 - Compute shader käyttää push constanteja (max 128 tavua)
-- GPU-bufferi on 320×180×4 = 230KB, ladataan kokonaan joka maalauksen jälkeen
+- GPU-bufferi on 1664×960×4 ≈ 6,4 MB, ladataan kokonaan joka maalauksen jälkeen
 - Margolus-offset vaihtuu joka passilla — älä riko offset-logiikkaa
 - RenderingDevice luodaan _ready():ssa ja vapautetaan NOTIFICATION_PREDELETE:ssä
 

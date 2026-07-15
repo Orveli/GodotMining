@@ -42,6 +42,8 @@ const uint COAL      = 16u;
 const uint HELD      = 17u;  // Gravity gun -kiinnitetty — GPU ohittaa täysin
 const uint GRAVEL    = 18u;  // Sora — kiven murskautuessa syntyvä raskas jauhe
 const uint BEDROCK   = 19u;  // Pohjakivi — tuhoamaton, ei osallistu fysiikkaan
+const uint COPPER      = 20u;  // Kupari-malmi — putoava jauhe, pysyy kivessä paikallaan
+const uint RARE_EARTH  = 21u;  // Rare earth -malmi — putoava jauhe, pysyy kivessä paikallaan
 
 uint get_mat(uint cell) { return cell & 0xFFu; }
 
@@ -55,7 +57,8 @@ uint hash(uint x) {
 }
 
 bool falls(uint mat) {
-    return mat == SAND || mat == WATER || mat == OIL || mat == ASH || mat == WOOD_FALLING || mat == DIRT || mat == GRAVEL;
+    return mat == SAND || mat == WATER || mat == OIL || mat == ASH || mat == WOOD_FALLING || mat == DIRT || mat == GRAVEL
+        || mat == IRON_ORE || mat == GOLD_ORE || mat == COAL || mat == COPPER || mat == RARE_EARTH;
 }
 
 bool is_liquid(uint mat) {
@@ -63,7 +66,8 @@ bool is_liquid(uint mat) {
 }
 
 bool is_powder(uint mat) {
-    return mat == SAND || mat == ASH || mat == DIRT || mat == GRAVEL;
+    return mat == SAND || mat == ASH || mat == DIRT || mat == GRAVEL
+        || mat == IRON_ORE || mat == GOLD_ORE || mat == COAL || mat == COPPER || mat == RARE_EARTH;
 }
 
 // Yritä siirtää solu src_idx -> dst_idx atomisesti
@@ -174,9 +178,9 @@ void main() {
 
     // Staattiset ja tyhjät skipataan
     if (mat == EMPTY || mat == STONE || mat == WOOD) return;
-    if (mat == GLASS || mat == IRON_ORE || mat == GOLD_ORE || mat == IRON || mat == GOLD) return;
-    if (mat == COAL || mat == HELD || mat == BEDROCK) return;  // BEDROCK = inert pohjakivi
-    // GRAVEL simuloidaan — ei ohiteta (käsitellään is_powder()-haaran kautta)
+    if (mat == GLASS || mat == IRON || mat == GOLD) return;
+    if (mat == HELD || mat == BEDROCK) return;  // BEDROCK = inert pohjakivi
+    // GRAVEL, IRON_ORE, GOLD_ORE, COAL simuloidaan putoavina jauheina (is_powder()-haara)
 
     // Gravity gun -veto: GPU vetää irtonaiset pikselit kohti kursoria
     if (p.grav_gun_mode > 0u && falls(mat)) {

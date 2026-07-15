@@ -1,11 +1,14 @@
 {
   "auto_exit": true,
+  "cpu_ca": true,
   "steps": [
     { "cmd": "clear" },
 
     { "cmd": "fill_rect", "x": 0, "y": 225, "w": 416, "h": 15, "mat": 3 },
 
     { "cmd": "place_conveyor", "x": 50, "y": 150, "w": 300, "dir": "right" },
+
+    { "cmd": "set_sim_speed", "speed": 16.0 },
 
     { "cmd": "fill_rect", "x": 50, "y": 130, "w": 30, "h": 18, "mat": 1 },
 

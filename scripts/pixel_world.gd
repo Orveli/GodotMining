@@ -26,6 +26,8 @@ const MAT_COAL := 16
 const MAT_HELD := 17  # Poistettu käytöstä — säilytetään yhteensopivuuden vuoksi
 const MAT_GRAVEL := 18  # Sora — kiven murskautuessa syntyvä jauhe
 const MAT_BEDROCK := 19  # Pohjakivi — tuhoamaton, worldgen kirjoittaa reunoihin/pohjaan
+const MAT_COPPER := 20  # Kupari — malmi, syvyysvyöhyke keskisyvä
+const MAT_RARE_EARTH := 21  # Rare earth — harvinaisin ja arvokkain malmi, syvimmällä
 
 const SIM_WIDTH := 1664
 const SIM_HEIGHT := 960
@@ -67,6 +69,10 @@ var seed_image: Image
 var seed_texture: ImageTexture
 var shader_mat: ShaderMaterial
 
+# Fog of war -valokenttä (alaskaalattu näkyvyys/valo) + asetellut lamput
+var light_field: LightField
+var lamps: Array[Vector2i] = []
+
 # Väripaletit — runtime-vaihdettava
 const PALETTE_DEFAULT: Array = [
 	Vector3(0.08, 0.08, 0.12),   # 0 EMPTY
@@ -87,8 +93,10 @@ const PALETTE_DEFAULT: Array = [
 	Vector3(0.90, 0.78, 0.20),   # 15 GOLD
 	Vector3(0.18, 0.17, 0.21),   # 16 COAL
 	Vector3(1.0, 0.85, 0.1),     # 17 HELD
-	Vector3(0.55, 0.50, 0.45),   # 18 GRAVEL
+	Vector3(0.70, 0.59, 0.45),   # 18 GRAVEL
 	Vector3(0.25, 0.22, 0.30),   # 19 BEDROCK (tumma harmaa-violetti)
+	Vector3(0.72, 0.45, 0.28),   # 20 COPPER (patinoitunut oranssiruskea)
+	Vector3(0.35, 0.75, 0.65),   # 21 RARE_EARTH (hohtava sinivihreä)
 ]
 
 const PALETTE_DEEP: Array = [
@@ -110,13 +118,15 @@ const PALETTE_DEEP: Array = [
 	Vector3(0.85, 0.7, 0.15),    # 15 GOLD
 	Vector3(0.12, 0.11, 0.14),   # 16 COAL
 	Vector3(1.0, 0.85, 0.1),     # 17 HELD
-	Vector3(0.42, 0.37, 0.32),   # 18 GRAVEL (tummempi syvyydessä)
+	Vector3(0.56, 0.47, 0.36),   # 18 GRAVEL (tummempi syvyydessä)
 	Vector3(0.18, 0.16, 0.22),   # 19 BEDROCK (vielä tummempi syvyydessä)
+	Vector3(0.5, 0.32, 0.20),    # 20 COPPER (himmeämpi syvyydessä)
+	Vector3(0.25, 0.55, 0.50),   # 21 RARE_EARTH (himmeämpi mutta yhä erottuva)
 ]
 
 const PALETTE_VAR_DEFAULT: Array = [
 	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03,
-	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.04, 0.03
+	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.07, 0.03, 0.04, 0.05
 ]
 
 var current_palette: Array = PALETTE_DEFAULT
@@ -129,7 +139,7 @@ var gpu_passes: int = 8  # Adaptiivinen passimäärä (4-12); Margolus vaatii mi
 var sim_speed: float = 1.0  # 1=normaali, 4/8/16=nopea
 var _logic_frame_counter: int = 0
 var logic_frame_interval: int = 4  # CPU game logic ajetaan joka 4. frame
-var ui_panel: Control  # Asetetaan ui.gd:stä — tarkistetaan rektillä
+var ui_panels: Array[Control] = []  # Asetetaan ui.gd:stä — tarkistetaan rektillä (lista kaikista UI-paneeleista)
 var _toast_label: Label       # Ruudulla näytettävä lyhyt ilmoitus
 var _toast_timer: float = 0.0 # Kuinka kauan ilmoitus on näkyvissä
 var gpu_time_ms: float = 0.0  # Edellisen framen GPU-aika
@@ -222,6 +232,7 @@ const BUILD_WALL_END := 8
 const BUILD_MONEY_EXIT := 9
 const BUILD_CRUSHER := 10
 const BUILD_DRILL := 11
+const BUILD_SELL := 12      # Myyntimoodi — klikkaus myy lähimmän rakennuksen
 const GRID_SIZE := 8  # Rakennusgridi pikseleinä
 var build_mode: int = BUILD_NONE
 var build_menu_visible := false
@@ -236,11 +247,35 @@ var crushers: Array = []
 var drills: Array = []
 var money: int = 0
 var building_pixels: Dictionary = {}  # idx -> true, kaikki rakennusten pikselit
+
+# === BOTTISIMULAATIO (MVP Vaihe 1) ===
+var nav: NavGrid                      # navigaatiogridi + A* (lentavat botit)
+var desig: DesignationGrid            # louhinta-designaatiot (pelaajan maalaamat)
+var base: MoneyExit                   # tehdasbase (money_exits-listassa myos)
+var bot_manager: BotManager           # bottien tilakone + tyonjako
+var bot_overlay: Node2D               # designaatio- + botti-piirto (building_layerin lapsi)
+var designation_mode: bool = false    # V-nappain: louhinta-alueen maalaus paalla/pois
+var _bot_logic_accum: float = 0.0     # kumuloitu delta bottien logiikkatikkia varten
 var launcher_phase: int = 0    # 0=ei aktiivinen, 1=pohja, 2=katto, 3=suunta
 var launcher_start: Vector2i = Vector2i.ZERO
 var launcher_end: Vector2i = Vector2i.ZERO
 var flying_pixels: Array[Dictionary] = []
 var flying_gravity: float = 140.0   # px/s²
+
+# Myyntimoodi
+var _sell_highlight_building: Variant = null  # Viittaus korostettavaan rakennukseen
+var _sell_overlay: Node2D = null              # Node2D joka piirtää korostussuorakulmion
+
+# Rakennusten ostohinta — myynti palauttaa 50%
+const BUILDING_COSTS: Dictionary = {
+	"conveyor":    50,
+	"sand_mine":  100,
+	"furnace":    150,
+	"launcher":   200,
+	"money_exit": 250,
+	"crusher":    120,
+	"drill":      180,
+}
 const FLYING_MAX_AGE := 4.0
 var flying_max_count: int = 300
 
@@ -248,6 +283,7 @@ var flying_max_count: int = 300
 var infinite_money: bool = false
 var debug_menu_visible: bool = false
 var god_mode: bool = true  # God mode — pelaaja ei ota vahinkoa
+var debug_hotkeys_enabled: bool = false  # Destruktiiviset debug-näppäimet (C/R/pommit/aseet) — pois oletuksena
 
 # Ase-enum ja aktiivinen ase
 enum Weapon { PICKAXE, MEGA_DRILL, RIFLE, ROCKET, GRAVITY_GUN }
@@ -285,6 +321,15 @@ var _scenario_active: bool = false
 var _scenario_auto_exit: bool = false
 var _scenario_failures: int = 0
 var _scenario_tests: int = 0
+# Headless CPU-CA: kun skenaario asettaa cpu_ca=true, ajetaan CPU-puolinen falling sand
+# + liukuhihnat headlessina (ei Vulkania). Ikkunallinen peli kayttaa aina GPU:ta.
+var _cpu_ca_enabled: bool = false
+# CA:n aktiivinen rajaus — vain talla px-alueella iteroidaan (muu grid on skenaarioissa tyhjaa).
+# Union kaikista fill_rect/place-alueista + marginaali; pitaa iteroinnin kevyena (ei koko 1664x960).
+var _ca_bounds: Rect2i = Rect2i(0, 0, 0, 0)
+# MVP-skenaarion (mvp_core_loop) apurit
+var _scenario_desig_rect: Rect2i = Rect2i(0, 0, 0, 0)  # designoitu alue px
+var _scenario_desig_count0: int = 0                    # designoitujen (ei-NONE) solujen lkm heti maalauksen jalkeen
 
 # === SUORITUSKYKYTESTI ===
 # Tallennetaan viimeiset 60 framen delta-ajat millisekunteina ring-puskuriin
@@ -317,7 +362,7 @@ func _ready() -> void:
 	_perf_delta_ring.resize(_PERF_RING_SIZE)
 	_perf_delta_ring.fill(0.0)
 
-	print("GodotMining valmis — C = tyhjennä, R = uusi maailma, P = suorituskykytesti")
+	print("GodotMining valmis — C/R/P = debug-näppäimet (pois käytöstä; F4-valikko → Peli)")
 
 	# CPU-puolen fallback-tekstuurit (käytetään jos render compute ei käynnisty)
 	grid_image = Image.create_from_data(W, SIM_HEIGHT, false, Image.FORMAT_R8, grid)
@@ -339,6 +384,11 @@ func _ready() -> void:
 	shader_mat.set_shader_parameter("screen_aspect", float(W) / float(SIM_HEIGHT))
 	material = shader_mat
 
+	# Fog of war: alusta valokenttä ja kytke light_tex-uniform (päivitetään _process():ssa).
+	light_field = LightField.new()
+	light_field.setup(W, SIM_HEIGHT)
+	shader_mat.set_shader_parameter("light_tex", light_field.texture)
+
 	# Fysiikkamoottori
 	physics_world = PhysicsWorld.new()
 
@@ -356,6 +406,16 @@ func _ready() -> void:
 	# GPU compute setup
 	_setup_compute()
 
+	# Bottisimulaation gridit + overlay (luodaan ennen worldgenia)
+	nav = NavGrid.new()
+	desig = DesignationGrid.new()
+	bot_manager = BotManager.new()
+	bot_overlay = Node2D.new()
+	bot_overlay.name = "BotOverlay"
+	bot_overlay.z_index = 15
+	building_layer.add_child(bot_overlay)
+	bot_overlay.draw.connect(Callable(self, "_draw_bot_overlay"))
+
 	# Toast-ilmoitus (I-näppäin ja muut pikailmoitukset) — lisätään scene rootiin jotta
 	# näkyy kaiken päällä eikä clippaannu TextureRectin sisään
 	_toast_label = Label.new()
@@ -368,6 +428,13 @@ func _ready() -> void:
 	_toast_label.z_index = 100
 	_toast_label.visible = false
 	get_tree().root.add_child.call_deferred(_toast_label)
+
+	# Generoi maailma + tehdasbase + botit (MVP-kaynnistys)
+	_boot_world()
+
+	# Laske aloitusvalokenttä heti, ettei ensimmäinen frame vilaa mustana.
+	if light_field != null:
+		light_field.update(grid, _collect_light_emitters())
 
 	# Scenario runner — tarkista cmdline-argumentit
 	var args := OS.get_cmdline_user_args()
@@ -590,6 +657,15 @@ func _show_toast(msg: String, duration: float = 2.5) -> void:
 	_toast_timer = duration
 
 
+# Palauttaa true jos destruktiivinen debug-näppäin on estetty (ja näyttää toastin).
+# Käytetään gatetamaan tuhoavat debug-näppäimet (C/R/pommi/räjähdys/suorituskykytesti).
+func _debug_hotkey_blocked() -> bool:
+	if not debug_hotkeys_enabled:
+		_show_toast("Debug-näppäin pois käytöstä (F4-valikko → Peli)")
+		return true
+	return false
+
+
 func _process(delta: float) -> void:
 	if _toast_timer > 0.0:
 		_toast_timer -= delta
@@ -705,6 +781,26 @@ func _process(delta: float) -> void:
 				grid_modified = true
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
+		# Vaihe 5.8: Bottisimulaatio — CPU-logiikka joka 4. frame (kumuloitu delta).
+		# Botit lukevat grid:ia (juuri ladattu GPU:lta) ja kirjoittavat mvp_write_pixelilla
+		# joka asettaa paint_pending -> muutokset menevat GPU:lle Vaihe 6:n latauksessa.
+		if bot_manager != null and base != null and is_instance_valid(base):
+			_bot_logic_accum += delta
+			_logic_frame_counter += 1
+			if _logic_frame_counter >= logic_frame_interval:
+				_logic_frame_counter = 0
+				nav.update_dirty(grid)
+				bot_manager.tick(_bot_logic_accum)
+				_bot_logic_accum = 0.0
+			# Visuaalifysiikka JOKA frame oikealla frame-deltalla: silota bot.pos-nykays
+			# (render_pos) + integroi jousi-vaimennettu kuorma (load_pos) + imuvirtapartikkelit.
+			# Logiikka tikkaa vain ~15 Hz mutta tama pyorii per frame -> kuorma laahaa/heiluu sulavasti.
+			bot_manager.update_visuals(delta)
+			# Piirra botit JOKA frame (logiikka tikkaa vain ~15 Hz). Piirto on halpaa
+			# (2-50 bottia) ja tekee leijuntahuojunnasta sulavan eika nykivan.
+			if bot_overlay != null:
+				bot_overlay.queue_redraw()
+
 		# Vaihe 6: Lataa CPU:n muutokset GPU:lle — yhdistetty lataus
 		# paint_pending voi asettua uudelleen logiikan aikana (esim. explode())
 		# grid_modified = fysiikka/logiikka muutti gridiä
@@ -712,10 +808,39 @@ func _process(delta: float) -> void:
 		if grid_modified or paint_pending:
 			_upload_paint_to_gpu()
 			paint_pending = false
+	else:
+		# Headless / GPU-eton polku (esim. --headless-testiajo): CA ei paivity, joten grid
+		# pysyy worldgenin + bottikirjoitusten mukaisena CPU:lla. Aja pelkka bottisimulaatio
+		# jotta E2E-skenaario (mvp_core_loop) voi todistaa Vaihe 1:n ilman GPU:ta.
+		# Normaalipeli (gpu_ready = true) ei koskaan tule tanne — kayttaytyminen sailyy ennallaan.
+		# CPU-CA: kun skenaario pyytaa (cpu_ca=true), simuloidaan falling sand + hihnat CPU:lla
+		# kiintealla aika-askeleella (deterministinen, ei riipu headless-fps:sta).
+		if _cpu_ca_enabled:
+			var _fdt := 1.0 / 60.0
+			_step_cpu_ca()
+			# Hihnat kulkevat sim_speed-kertoimella (sama pelin pikakelaus kuin GPU-polussa),
+			# jotta kuljetus ehtii valmistua headless-skenaarion frame-budjetissa.
+			_update_conveyors(_fdt * sim_speed)
+		if bot_manager != null and base != null and is_instance_valid(base):
+			# Headless: kiintea aika-askel (1/60 s / frame) bottisimulaatiolle, jotta
+			# skenaariotulos on deterministinen eika riipu headless-fps:sta (uncapped ->
+			# muuten delta olisi mikroskooppinen ja botit etenisivat tuskin lainkaan).
+			_bot_logic_accum += 1.0 / 60.0
+			_logic_frame_counter += 1
+			if _logic_frame_counter >= logic_frame_interval:
+				_logic_frame_counter = 0
+				nav.update_dirty(grid)
+				bot_manager.tick(_bot_logic_accum)
+				_bot_logic_accum = 0.0
 
 	# Scenario runner — ajetaan ennen renderöintiä jotta fill_rect näkyy heti
 	if _scenario_active:
 		_scenario_tick()
+
+	# Fog of war: päivitä valokenttä ~20 Hz (blur on kallein osa). Vain GPU-polussa
+	# (headless-testit eivät renderöi). Explored-muisti kertyy botti/kaivaus-etenemästä.
+	if gpu_ready and light_field != null and frame_count % 3 == 0:
+		light_field.update(grid, _collect_light_emitters())
 
 	var _t0_ul := Time.get_ticks_usec()
 	_upload_render()
@@ -730,14 +855,30 @@ func _process(delta: float) -> void:
 
 
 func _handle_input(_delta: float) -> void:
-	# Estä toiminnot kun hiiri on UI-paneelin päällä
-	if ui_panel and ui_panel.get_global_rect().has_point(get_viewport().get_mouse_position()):
-		prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-		return
+	# Estä toiminnot kun hiiri on jonkin UI-paneelin päällä
+	var mouse_screen_pos := get_viewport().get_mouse_position()
+	for panel: Control in ui_panels:
+		if is_instance_valid(panel) and panel.get_global_rect().has_point(mouse_screen_pos):
+			prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+			return
 	var left_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	var right_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
 	var left_just := left_pressed and not prev_left_pressed
 	var right_just := right_pressed and not prev_right_pressed
+
+	# Designaatio-moodi: vasen maalaa louhinta-alueen, oikea poistaa.
+	# Tavallinen materiaalimaalaus/kaivuu EI aktivoidu tassa moodissa.
+	if designation_mode:
+		if left_pressed or right_pressed:
+			var dc := _mouse_to_grid()
+			if dc.x >= 0 and desig != null:
+				var old_ver: int = desig.version
+				desig.paint_px_rect(_brush_px_rect(dc.x, dc.y), left_pressed)
+				if desig.version != old_ver and bot_overlay != null:
+					bot_overlay.queue_redraw()
+		prev_left_pressed = left_pressed
+		prev_right_pressed = right_pressed
+		return
 
 	# Oikea hiiri — kaivaa aina
 	if right_pressed:
@@ -790,6 +931,19 @@ func _handle_input(_delta: float) -> void:
 			elif build_mode == BUILD_DRILL:
 				_place_drill(grid_pos)
 				block_paint = true
+			elif build_mode == BUILD_SELL:
+				# Myy lähin rakennus klikkauksen kohdalta
+				_sell_building_at(grid_pos)
+				block_paint = true
+
+	# Myyntimoodi: päivitä korostus joka frame hiiren aseman mukaan
+	if build_mode == BUILD_SELL:
+		var coords := _mouse_to_grid()
+		if coords.x >= 0:
+			_sell_highlight_building = _find_nearest_building(Vector2(coords))
+		else:
+			_sell_highlight_building = null
+		_update_sell_overlay()
 
 	# Vasen klikkaus: pommi-moodi sijoittaa pommin, muuten maalataan
 	if left_just and bomb_mode and build_mode == BUILD_NONE and not block_paint:
@@ -818,6 +972,9 @@ func _handle_input(_delta: float) -> void:
 func _handle_explosion_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_MIDDLE:
+			# Räjähdys — destruktiivinen debug-toiminto, gatettu
+			if _debug_hotkey_blocked():
+				return
 			var coords := _mouse_to_grid()
 			if coords.x >= 0:
 				var size_idx := explosion_size
@@ -825,11 +982,15 @@ func _handle_explosion_input(event: InputEvent) -> void:
 					size_idx = 3  # Mega aina Shiftillä
 				var radius: int = EXPLOSION_RADII[clampi(size_idx, 0, 3)]
 				explode(coords.x, coords.y, radius)
-		# Scroll: Shift = räjähdyskoko, normaali = zoom
+		# Scroll: Shift = räjähdyskoko (debug, gatettu), normaali = zoom (aina)
 		elif event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			if not debug_hotkeys_enabled:
+				return
 			explosion_size = mini(explosion_size + 1, 3)
 			print("Räjähdyskoko: %d (r=%d)" % [explosion_size, EXPLOSION_RADII[explosion_size]])
 		elif event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			if not debug_hotkeys_enabled:
+				return
 			explosion_size = maxi(explosion_size - 1, 0)
 			print("Räjähdyskoko: %d (r=%d)" % [explosion_size, EXPLOSION_RADII[explosion_size]])
 		elif not event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -847,6 +1008,54 @@ func _mouse_to_grid() -> Vector2i:
 	if gx < 0 or gx >= W or gy < 0 or gy >= SIM_HEIGHT:
 		return Vector2i(-1, -1)
 	return Vector2i(gx, gy)
+
+
+# Kokoaa fog-of-war-valonlähteet: base, botit, koneet ja asetellut lamput.
+# Sijainnit sim-pikselikoordinaatteina (LightField olettaa sim-koordinaatit).
+func _collect_light_emitters() -> Array:
+	var emitters: Array = []
+	# Base — kirkas, laaja valo tehdasalustalla
+	if base != null and is_instance_valid(base):
+		emitters.append({"position": Vector2i(base.spawn_pos()), "radius": 90.0, "intensity": 1.0})
+	# Botit — pieni kannettava valo joka paljastaa kaivauskohteet
+	if bot_manager != null:
+		for b in bot_manager.bots:
+			if is_instance_valid(b):
+				emitters.append({"position": Vector2i(b.pos), "radius": 48.0, "intensity": 0.85})
+	# Koneet (uunit, murskaajat, porat) — keskikokoinen valo
+	for m in furnaces:
+		if is_instance_valid(m):
+			emitters.append(_building_emitter(m, 60.0, 0.8))
+	for m in crushers:
+		if is_instance_valid(m):
+			emitters.append(_building_emitter(m, 60.0, 0.8))
+	for m in drills:
+		if is_instance_valid(m):
+			emitters.append(_building_emitter(m, 60.0, 0.8))
+	# Asetellut lamput — pysyvät kirkkaat valonlähteet
+	for lp in lamps:
+		emitters.append({"position": lp, "radius": 80.0, "intensity": 1.0})
+	return emitters
+
+
+# Rakennuksen emitteri: keskipiste lasketaan structure_pixels-keskiarvona.
+func _building_emitter(node: Node, radius: float, intensity: float) -> Dictionary:
+	var c := Vector2i.ZERO
+	if not is_instance_valid(node):
+		return {"position": c, "radius": radius, "intensity": intensity}
+	var sp_var: Variant = node.get("structure_pixels")
+	if sp_var is Array:
+		var sp: Array = sp_var
+		var n: int = sp.size()
+		if n > 0:
+			var sx: int = 0
+			var sy: int = 0
+			for i in n:
+				var pv: Vector2i = sp[i]
+				sx += pv.x
+				sy += pv.y
+			c = Vector2i(sx / n, sy / n)
+	return {"position": c, "radius": radius, "intensity": intensity}
 
 
 func set_palette(palette: Array) -> void:
@@ -873,9 +1082,16 @@ func clear_world() -> void:
 	physics_initialized = false
 	_clear_conveyors()
 	_clear_buildings()
+	base = null  # _clear_buildings vapautti basen; bottitikki ohitetaan kunnes se luodaan uudelleen
 	building_pixels.clear()
+	# Fog of war: tyhjä kenttä → nollaa lamput ja tutkimusmuisti
+	lamps.clear()
+	if light_field != null:
+		light_field.clear_explored()
+	_clear_sell_overlay()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
+	_ca_bounds = Rect2i(0, 0, 0, 0)  # CA-rajaus nollataan; fill_rect kasvattaa uudelleen
 
 
 # === SCREENSHAKE ===
@@ -1216,9 +1432,94 @@ func regenerate_world() -> void:
 	physics_initialized = false
 	_clear_conveyors()
 	_clear_buildings()
+	base = null  # _clear_buildings vapautti basen — luodaan uusi _init_bot_sim():ssa
+	building_pixels.clear()
+	_clear_sell_overlay()
 	build_mode = BUILD_NONE
 	build_menu_visible = false
+	# Fog of war: nollaa tutkimusmuisti ja lamput uutta maailmaa varten
+	lamps.clear()
+	if light_field != null:
+		light_field.clear_explored()
+	# Uudelleeninitoi bottisimulaatio uuteen maailmaan
+	_init_bot_sim()
 	print("Maailma regeneroitu!")
+
+
+# Kaynnistys: generoi maailma ja alusta bottisimulaatio (kutsutaan _ready():sta).
+func _boot_world() -> void:
+	grid.fill(0)
+	for i in TOTAL:
+		color_seed[i] = randi() % 256
+	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
+	paint_pending = true
+	physics_initialized = false
+	_init_bot_sim()
+	# Kamera alustan kohdalle
+	var prect: Rect2i = WorldGen.get_platform_rect()
+	cam_grid_pos = Vector2(
+		float(prect.position.x) + float(prect.size.x) * 0.5,
+		float(prect.position.y)
+	)
+
+
+# Luo tehdasbase alustan keskelle, rakenna nav-gridi ja spawnaa botit.
+# Turvallinen kutsua uudelleen (regenerate/reset) — vapauttaa vanhan basen jos jai roikkumaan.
+func _init_bot_sim() -> void:
+	if nav == null or desig == null or bot_manager == null:
+		return
+	# Nollaa designaatiot uuteen maailmaan
+	desig.cells.fill(DesignationGrid.D_NONE)
+	desig.version += 1
+	# Poista vanha base jos se on yha listassa (esim. clear_world jalkeen)
+	if is_instance_valid(base):
+		if base in money_exits:
+			money_exits.erase(base)
+		_unregister_building_pixels(base.structure_pixels)
+		base.queue_free()
+	base = null
+	# Luo base alustan keskelle (sama mekanismi kuin _place_money_exit)
+	var prect: Rect2i = WorldGen.get_platform_rect()
+	var center_x := prect.position.x + prect.size.x / 2
+	# Basen keskikohta niin etta rakenne istuu alustan pinnan paalla
+	var center_y := prect.position.y - MoneyExit.EXIT_H / 2 - 2
+	var me: MoneyExit = MoneyExit.new()
+	me.setup(Vector2i(center_x, center_y))
+	me.build_structure(grid, color_seed, W, SIM_HEIGHT)
+	building_layer.add_child(me)
+	money_exits.append(me)
+	_register_building_pixels(me.structure_pixels)
+	base = me
+	paint_pending = true
+	# Rakenna navigaatiokartta valmiista gridista
+	nav.rebuild_full(grid)
+	# Alusta bottimanageri ja spawnaa 1 miner + 1 hauler basen ylapuolelle
+	bot_manager.bots.clear()
+	bot_manager.dig_sites.clear()
+	bot_manager.setup(self)
+	# Hajauta spawnit ettei botit ole paallekkain yhtena taplana (miner vasemmalle, hauler oikealle)
+	bot_manager.add_bot(Bot.Role.MINER, base.spawn_pos() + Vector2(-14, 0))
+	bot_manager.add_bot(Bot.Role.HAULER, base.spawn_pos() + Vector2(14, 0))
+	_bot_logic_accum = 0.0
+	_logic_frame_counter = 0
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+
+
+# Kirjoita yksi pikseli botti-/simulaatiologiikasta. Rajatarkistus + suojaukset.
+# EI kirjoita BEDROCKin eika building_pixels-pikselien paalle.
+func mvp_write_pixel(x: int, y: int, mat: int) -> void:
+	if x < 0 or x >= W or y < 0 or y >= SIM_HEIGHT:
+		return
+	var idx := y * W + x
+	if building_pixels.has(idx):
+		return
+	if grid[idx] == MAT_BEDROCK:
+		return
+	grid[idx] = mat
+	if mat != MAT_EMPTY:
+		color_seed[idx] = randi() % 256
+	paint_pending = true
 
 
 # Suorituskykytesti: generoi maailma → odota asettumista → räjäytä 3 kertaa → mittaa frame-spiikit.
@@ -1407,15 +1708,53 @@ func _input(event: InputEvent) -> void:
 				print("Kaivaustyökalu: %s" % tool_names[current_tool])
 			KEY_P:
 				# Suorituskykytesti: generoi maailma → räjäytä 3 kertaa → mittaa frame-spiikit
+				# Destruktiivinen debug-näppäin — gatettu debug_hotkeys_enabled-lipun taakse
+				if _debug_hotkey_blocked():
+					return
 				_run_perf_explosion_test()
 			KEY_G:
-				# Pommi-moodi toggle
+				# Pommi-moodi toggle — destruktiivinen debug-näppäin, gatettu
+				if _debug_hotkey_blocked():
+					return
 				bomb_mode = not bomb_mode
 				print("Pommi-moodi: %s" % ("ON — klikkaa sijoittaaksesi" if bomb_mode else "OFF"))
-			KEY_C: clear_world()
-			KEY_R: regenerate_world()
+			KEY_V:
+				# Designaatio-moodi toggle (louhinta-alueen maalaus boteille)
+				designation_mode = not designation_mode
+				if designation_mode:
+					build_mode = BUILD_NONE
+					bomb_mode = false
+					_show_toast("Louhinta-alue: PÄÄLLÄ  (vasen=merkkaa, oikea=poista)")
+				else:
+					_show_toast("Louhinta-alue: POIS")
+			KEY_L:
+				# Aseta lamppu kursorin kohdalle (fog-of-war-valonlähde)
+				var lg := _mouse_to_grid()
+				if lg.x >= 0:
+					lamps.append(lg)
+					_show_toast("Lamppu asetettu — yhteensä %d" % lamps.size())
+			KEY_M:
+				# Myyntimoodi toggle
+				if build_mode == BUILD_SELL:
+					_clear_sell_overlay()
+					build_mode = BUILD_NONE
+					print("Myyntimoodi pois")
+				else:
+					build_mode = BUILD_SELL
+					block_paint = true
+					print("Myyntimoodi ON — klikkaa rakennusta myydäksesi (ESC/M = peruuta)")
+			KEY_C:
+				# Tyhjennä kenttä — destruktiivinen debug-näppäin, gatettu
+				if not _debug_hotkey_blocked():
+					clear_world()
+			KEY_R:
+				# Regeneroi maailma — destruktiivinen debug-näppäin, gatettu
+				if not _debug_hotkey_blocked():
+					regenerate_world()
 			KEY_ESCAPE:
 				if build_mode != BUILD_NONE:
+					if build_mode == BUILD_SELL:
+						_clear_sell_overlay()
 					build_mode = BUILD_NONE
 					print("Rakennustila peruttu")
 				elif bomb_mode:
@@ -1494,7 +1833,6 @@ func _cut(cx: int, cy: int) -> void:
 						changed = true
 	if changed:
 		paint_pending = true
-		visibility_dirty = true
 		# check_damage hoitaa kappaleiden halkeamisen automaattisesti
 
 
@@ -2982,6 +3320,264 @@ func _sell_nearest_building(sell_pos: Vector2) -> void:
 	print("Rakennus myyty!")
 
 
+# Palauttaa viitteen lähimpään rakennukseen tai null jos etäisyys > 60px
+func _find_nearest_building(grid_pos: Vector2) -> Variant:
+	var best_dist := 60.0
+	var best_obj: Variant = null
+
+	for belt in conveyors:
+		var center := (Vector2(belt.start_pos) + Vector2(belt.end_pos)) * 0.5
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = belt
+
+	for f in furnaces:
+		var center := Vector2(f.grid_pos) + Vector2(f.FURNACE_W, f.FURNACE_H) * 0.5
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = f
+
+	for m in sand_mines:
+		var center := Vector2(m.grid_pos) + Vector2(m.MINE_W, m.MINE_H) * 0.5
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = m
+
+	for s in launchers:
+		var center := Vector2(s.start_pos) + Vector2(float(LauncherScript.SHAFT_WIDTH) * 0.5, float(s.start_pos.y - s.end_pos.y) * 0.5)
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = s
+
+	for me in money_exits:
+		var center := Vector2(me.grid_pos) + Vector2(me.EXIT_W, me.EXIT_H) * 0.5
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = me
+
+	for c in crushers:
+		var center := Vector2(c.grid_pos) + Vector2(c.CRUSHER_W, c.CRUSHER_H) * 0.5
+		var d := grid_pos.distance_to(center)
+		if d < best_dist:
+			best_dist = d
+			best_obj = c
+
+	for d_obj in drills:
+		var center := Vector2(d_obj.grid_pos) + Vector2(d_obj.DRILL_W, d_obj.DRILL_H) * 0.5
+		var dist := grid_pos.distance_to(center)
+		if dist < best_dist:
+			best_dist = dist
+			best_obj = d_obj
+
+	return best_obj
+
+
+# Myy rakennuksen grid-koordinaatin läheltä, palauttaa 50% ostohinnasta
+func _sell_building_at(grid_pos: Vector2) -> void:
+	var obj: Variant = _find_nearest_building(grid_pos)
+	if obj == null:
+		_show_toast("Ei rakennusta lähellä!")
+		return
+
+	if obj.broken:
+		_show_toast("Rikkinäistä rakennusta ei voi myydä")
+		return
+
+	# Selvitä listaan ja hintatyyppiin kuuluminen
+	var found_list: Array = []
+	var found_idx: int = -1
+	var cost_key: String = ""
+
+	for i in conveyors.size():
+		if conveyors[i] == obj:
+			found_list = conveyors; found_idx = i; cost_key = "conveyor"; break
+	if found_idx < 0:
+		for i in furnaces.size():
+			if furnaces[i] == obj:
+				found_list = furnaces; found_idx = i; cost_key = "furnace"; break
+	if found_idx < 0:
+		for i in sand_mines.size():
+			if sand_mines[i] == obj:
+				found_list = sand_mines; found_idx = i; cost_key = "sand_mine"; break
+	if found_idx < 0:
+		for i in launchers.size():
+			if launchers[i] == obj:
+				found_list = launchers; found_idx = i; cost_key = "launcher"; break
+	if found_idx < 0:
+		for i in money_exits.size():
+			if money_exits[i] == obj:
+				found_list = money_exits; found_idx = i; cost_key = "money_exit"; break
+	if found_idx < 0:
+		for i in crushers.size():
+			if crushers[i] == obj:
+				found_list = crushers; found_idx = i; cost_key = "crusher"; break
+	if found_idx < 0:
+		for i in drills.size():
+			if drills[i] == obj:
+				found_list = drills; found_idx = i; cost_key = "drill"; break
+
+	if found_idx < 0:
+		push_warning("_sell_building_at: rakennusta ei löydy listalta")
+		return
+
+	# Poista rakennuksen pikselit gridistä ja building_pixels-suojauksesta
+	if obj is ConveyorBelt:
+		# Hihna käyttää floor_pixels-taulukkoa
+		_unregister_building_pixels(obj.floor_pixels)
+		for fp: Vector2i in obj.floor_pixels:
+			for dy in 3:
+				var fy := fp.y + dy
+				if fy < SIM_HEIGHT and fp.x >= 0 and fp.x < W:
+					grid[fy * W + fp.x] = MAT_EMPTY
+					color_seed[fy * W + fp.x] = randi() % 256
+	else:
+		# Muut rakennukset: structure_pixels
+		if obj.has_method("get_structure_pixels"):
+			var pxs: Array = obj.get_structure_pixels()
+			_unregister_building_pixels(pxs)
+			for sp: Vector2i in pxs:
+				if sp.x >= 0 and sp.x < W and sp.y >= 0 and sp.y < SIM_HEIGHT:
+					grid[sp.y * W + sp.x] = MAT_EMPTY
+					color_seed[sp.y * W + sp.x] = randi() % 256
+		elif obj.get("structure_pixels") != null:
+			_unregister_building_pixels(obj.structure_pixels)
+			for sp: Vector2i in obj.structure_pixels:
+				if sp.x >= 0 and sp.x < W and sp.y >= 0 and sp.y < SIM_HEIGHT:
+					grid[sp.y * W + sp.x] = MAT_EMPTY
+					color_seed[sp.y * W + sp.x] = randi() % 256
+		# Launcher: myös jalusta-pikselit
+		if obj.get("_jalusta_pixels") != null:
+			_unregister_building_pixels(obj._jalusta_pixels)
+			for sp: Vector2i in obj._jalusta_pixels:
+				if sp.x >= 0 and sp.x < W and sp.y >= 0 and sp.y < SIM_HEIGHT:
+					grid[sp.y * W + sp.x] = MAT_EMPTY
+					color_seed[sp.y * W + sp.x] = randi() % 256
+
+	# Maksa 50% takaisin
+	var base_cost: int = BUILDING_COSTS.get(cost_key, 0)
+	var refund: int = base_cost / 2
+	money += refund
+
+	found_list.remove_at(found_idx)
+	_sell_highlight_building = null
+	_clear_sell_overlay()
+	obj.queue_free()
+	paint_pending = true
+
+	var msg := "Myyty! +$%d (50%% takaisin)" % refund if refund > 0 else "Myyty!"
+	_show_toast(msg, 2.0)
+	print("Rakennus myyty, palautus: $%d" % refund)
+
+
+# Päivittää myyntimoodin korostuspiirron (punainen suorakulmio lähimmän rakennuksen päälle)
+func _update_sell_overlay() -> void:
+	# Luo overlay-solmu tarvittaessa (käytetään queue_redraw suoraan)
+	if _sell_overlay == null:
+		_sell_overlay = Node2D.new()
+		_sell_overlay.name = "SellOverlay"
+		_sell_overlay.z_index = 20
+		building_layer.add_child(_sell_overlay)
+		# Yhdistetään draw-signaali piirtoforwarderiin
+		_sell_overlay.draw.connect(Callable(self, "_draw_sell_overlay"))
+
+	_sell_overlay.queue_redraw()
+
+
+# Poistaa myyntikorostuksen kun moodista poistutaan
+func _clear_sell_overlay() -> void:
+	_sell_highlight_building = null
+	if is_instance_valid(_sell_overlay):
+		_sell_overlay.queue_free()
+	_sell_overlay = null
+
+
+# Piirtää punaisen läpinäkyvän korostussuorakulmion korostetun rakennuksen päälle
+# — kutsutaan _sell_overlay.draw-signaalista
+func _draw_sell_overlay() -> void:
+	if _sell_overlay == null or not is_instance_valid(_sell_overlay):
+		return
+	if _sell_highlight_building == null:
+		return
+	var obj: Variant = _sell_highlight_building
+
+	# Laske rakennuksen bounding box grid-koordinaateissa
+	var rect := Rect2()
+	if obj is ConveyorBelt:
+		var s := Vector2(obj.start_pos)
+		var e := Vector2(obj.end_pos)
+		var top_left := s.min(e) - Vector2(1, 1)
+		var bottom_right := s.max(e) + Vector2(3, 3)
+		rect = Rect2(top_left, bottom_right - top_left)
+	elif obj.get("grid_pos") != null:
+		var gp := Vector2(obj.grid_pos)
+		var bw: int = 8
+		var bh: int = 8
+		# Etsi leveys ja korkeus — jokainen rakennustyyppi käyttää eri vakiota
+		if obj.get("FURNACE_W") != null:
+			bw = obj.FURNACE_W; bh = obj.FURNACE_H
+		elif obj.get("MINE_W") != null:
+			bw = obj.MINE_W; bh = obj.MINE_H
+		elif obj.get("EXIT_W") != null:
+			bw = obj.EXIT_W; bh = obj.EXIT_H
+		elif obj.get("CRUSHER_W") != null:
+			bw = obj.CRUSHER_W; bh = obj.CRUSHER_H
+		elif obj.get("DRILL_W") != null:
+			bw = obj.DRILL_W; bh = obj.DRILL_H
+		rect = Rect2(gp - Vector2(1, 1), Vector2(bw + 2, bh + 2))
+	elif obj.get("start_pos") != null:
+		# Launcher — pystysuuntainen kuilu
+		var sp := Vector2(obj.start_pos)
+		var ep := Vector2(obj.end_pos)
+		rect = Rect2(ep - Vector2(2, 0), Vector2(LauncherScript.SHAFT_WIDTH + 4, sp.y - ep.y + 4))
+	else:
+		return
+
+	# Piirretään rakennuskerroksessa joka on jo skaalattu grid→screen
+	_sell_overlay.draw_rect(rect, Color(1.0, 0.15, 0.15, 0.35), true)
+	_sell_overlay.draw_rect(rect, Color(1.0, 0.3, 0.3, 0.9), false, 1.0)
+
+
+# Pensselin px-suorakulmio designaatiomaalaukseen (nelio, brush_size-sade).
+func _brush_px_rect(cx: int, cy: int) -> Rect2i:
+	var b: int = maxi(brush_size, 1)
+	return Rect2i(cx - b, cy - b, 2 * b + 1, 2 * b + 1)
+
+
+# Piirtaa designaatiosolut + botit. Kutsutaan bot_overlay.draw-signaalista.
+# bot_overlay on building_layerin lapsi -> canvasin lokaalit koordinaatit = sim-pikselit.
+func _draw_bot_overlay() -> void:
+	if bot_overlay == null or not is_instance_valid(bot_overlay):
+		return
+	# Designaatiosolut (vain ei-NONE)
+	if desig != null and desig.cells.size() >= DesignationGrid.GW * DesignationGrid.GH:
+		var cell := float(DesignationGrid.CELL)
+		for dy in DesignationGrid.GH:
+			var row := dy * DesignationGrid.GW
+			for dx in DesignationGrid.GW:
+				var v: int = desig.cells[row + dx]
+				if v == DesignationGrid.D_NONE:
+					continue
+				var col: Color
+				match v:
+					DesignationGrid.D_QUEUED:
+						col = Color(1.0, 0.9, 0.2, 0.25)   # keltainen
+					DesignationGrid.D_BLOCKED:
+						col = Color(0.7, 0.2, 0.2, 0.22)   # himmea punainen
+					_:
+						col = Color(0.2, 0.9, 0.35, 0.30)  # CLAIMED/MINING vihrea
+				bot_overlay.draw_rect(
+					Rect2(float(dx) * cell, float(dy) * cell, cell, cell), col, true
+				)
+	# Botit
+	if bot_manager != null:
+		bot_manager.draw_bots(bot_overlay)
+
+
 func _save_debug_image(path: String) -> void:
 	var img := Image.create(W, SIM_HEIGHT, false, Image.FORMAT_RGB8)
 	var colors := {
@@ -3025,7 +3621,9 @@ func _save_ai_screenshot() -> void:
 		MAT_WOOD: "WOOD", MAT_FIRE: "FIRE", MAT_OIL: "OIL", MAT_STEAM: "STEAM",
 		MAT_ASH: "ASH", MAT_WOOD_FALLING: "WOOD_FALLING", MAT_GLASS: "GLASS",
 		MAT_DIRT: "DIRT", MAT_IRON_ORE: "IRON_ORE", MAT_GOLD_ORE: "GOLD_ORE",
-		MAT_IRON: "IRON", MAT_GOLD: "GOLD", MAT_COAL: "COAL"
+		MAT_IRON: "IRON", MAT_GOLD: "GOLD", MAT_COAL: "COAL",
+		MAT_GRAVEL: "GRAVEL", MAT_BEDROCK: "BEDROCK",
+		MAT_COPPER: "COPPER", MAT_RARE_EARTH: "RARE_EARTH"
 	}
 	var state: Dictionary = {
 		"timestamp": Time.get_datetime_string_from_system(),
@@ -3271,6 +3869,9 @@ func _load_scenario(path: String) -> void:
 	_scenario_failures = 0
 	_scenario_tests = 0
 	_scenario_active = true
+	_cpu_ca_enabled = data.get("cpu_ca", false)
+	if _cpu_ca_enabled:
+		print("ScenarioRunner: cpu_ca=true — CA + hihnat ajetaan CPU:lla (headless)")
 	print("ScenarioRunner: ladattu %d askelta tiedostosta %s" % [_scenario_steps.size(), path])
 
 
@@ -3463,6 +4064,8 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 					_:
 						cx2 = cx1 + cw; cy2 = cy1
 			_create_conveyor(Vector2(cx1, cy1), Vector2(cx2, cy2))
+			# Laajenna CA-rajaus hihnan yli (lattia 3px paksu) jotta pinolla oleva materiaali simuloituu
+			_ca_expand_bounds(Rect2i(mini(cx1, cx2), mini(cy1, cy2), absi(cx2 - cx1) + 1, absi(cy2 - cy1) + 4))
 			print("ScenarioRunner: place_conveyor (%d,%d) → (%d,%d)" % [cx1, cy1, cx2, cy2])
 		"place_launcher":
 			# Luo launcher suoraan: {"cmd":"place_launcher","start_x":200,"start_y":180,"end_y":120,"dir":1}
@@ -3494,9 +4097,151 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			grav_held.clear()
 			grav_held_written.clear()
 			print("ScenarioRunner: clear_grav_gun")
+		"designate_rect":
+			_scenario_designate_rect(step)
+		"assert_money_gt":
+			var mmin: int = step.get("min", 0)
+			var mlabel: String = step.get("label", "")
+			if money > mmin:
+				print("ScenarioRunner: PASS  [%s] money=%d > %d" % [mlabel, money, mmin])
+			else:
+				print("ScenarioRunner: FAIL  [%s] money=%d, odotettu > %d" % [mlabel, money, mmin])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_bots_moved":
+			var min_dist: float = step.get("min_dist", 30.0)
+			var blabel: String = step.get("label", "")
+			var all_moved := true
+			var detail := ""
+			if bot_manager == null or bot_manager.bots.is_empty():
+				all_moved = false
+				detail = "ei botteja"
+			else:
+				for b in bot_manager.bots:
+					var cur_d: float = b.pos.distance_to(b.spawn_pos)
+					# "jossain vaiheessa > min_dist" TAI "ei spawnissa lopussa"
+					var moved: bool = b.max_dist_from_spawn > min_dist or cur_d > min_dist
+					detail += " [rooli=%d max=%.0f nyt=%.0f %s]" % [b.role, b.max_dist_from_spawn, cur_d, "OK" if moved else "EI"]
+					if not moved:
+						all_moved = false
+			if all_moved:
+				print("ScenarioRunner: PASS  [%s]%s" % [blabel, detail])
+			else:
+				print("ScenarioRunner: FAIL  [%s] jokin botti ei liikkunut >%.0f px:%s" % [blabel, min_dist, detail])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_desig_consumed":
+			var dmin: int = step.get("min", 1)
+			var dlabel: String = step.get("label", "")
+			var active := _scenario_count_active_desig()
+			var consumed := _scenario_desig_count0 - active
+			if consumed >= dmin:
+				print("ScenarioRunner: PASS  [%s] kulutettu=%d (alku=%d, jaljella=%d)" % [dlabel, consumed, _scenario_desig_count0, active])
+			else:
+				print("ScenarioRunner: FAIL  [%s] kulutettu=%d, odotettu >=%d (alku=%d, jaljella=%d)" % [dlabel, consumed, dmin, _scenario_desig_count0, active])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_desig_consumed_pct":
+			# Kulutettujen designaatiosolujen OSUUS alkuperaisesta (sitoo kynnyksen alueen kokoon).
+			# Korkea min_pct todistaa etta myos BLOCKED-alue reaktivoituu ja tyhjenee eika louhinta
+			# jumita frontieriin — jaljella olevat solut = 100% - kulutettu%.
+			var pmin: float = step.get("min_pct", 50.0)
+			var plabel: String = step.get("label", "")
+			var pactive := _scenario_count_active_desig()
+			var pconsumed := _scenario_desig_count0 - pactive
+			var ppct := 0.0
+			if _scenario_desig_count0 > 0:
+				ppct = 100.0 * float(pconsumed) / float(_scenario_desig_count0)
+			if ppct >= pmin:
+				print("ScenarioRunner: PASS  [%s] kulutettu=%.1f%% (%d/%d, jaljella=%d) >= %.0f%%" % [plabel, ppct, pconsumed, _scenario_desig_count0, pactive, pmin])
+			else:
+				print("ScenarioRunner: FAIL  [%s] kulutettu=%.1f%% (%d/%d, jaljella=%d), odotettu >= %.0f%%" % [plabel, ppct, pconsumed, _scenario_desig_count0, pactive, pmin])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"mvp_shot":
+			var mpath: String = step.get("path", "user://mvp_shot.png")
+			var mlabel2: String = step.get("label", "")
+			_scenario_mvp_render(mpath, mlabel2)
+		"dump_bots":
+			_scenario_dump_bots()
 		_:
 			push_warning("ScenarioRunner: tuntematon komento '%s'" % cmd)
 	return false
+
+
+# === CPU-PUOLINEN CELLULAR AUTOMATON (vain headless-testiajot, cpu_ca=true) ===
+# Karkea Noita-tyylinen falling sand: irtomateriaali putoaa alas + vinottain, nesteet
+# leviavat lisaksi vaakasuunnassa. EI koske BEDROCKia, rakennuspikseleita eika kiintaita
+# materiaaleja (STONE/WOOD/GLASS/IRON/GOLD_solid...). Ikkunallinen peli ei kayta tata —
+# se ajaa CA:n aina GPU:lla. Tarkoitus: mahdollistaa CA-riippuvaiset skenaariot ilman Vulkania.
+func _step_cpu_ca() -> void:
+	if _ca_bounds.size.x <= 0 or _ca_bounds.size.y <= 0:
+		return
+	# Rajaa iterointi aktiiviselle alueelle (skenaarioissa muu grid on tyhjaa) — muuten koko
+	# 1664x960 skannaus GDScriptissa olisi liian hidas (~1 fps). Kasitellaan alhaalta ylos, jotta
+	# kukin solu liikkuu korkeintaan yhden askeleen/frame. Vuorotellaan vaakaskannaus symmetrian vuoksi.
+	var x_lo: int = maxi(_ca_bounds.position.x, 1)                       # x-1 pysyy rajoissa
+	var x_hi: int = mini(_ca_bounds.position.x + _ca_bounds.size.x, W - 1)  # exclusive; x+1 pysyy rajoissa
+	var y_lo: int = maxi(_ca_bounds.position.y, 0)
+	var y_hi: int = mini(_ca_bounds.position.y + _ca_bounds.size.y, SIM_HEIGHT - 1)  # exclusive; below pysyy rajoissa
+	if x_lo >= x_hi or y_lo >= y_hi:
+		return
+	var flip := (frame_count & 1) == 1
+	var y := y_hi - 1
+	while y >= y_lo:
+		var row := y * W
+		var xs := -1 if flip else 1
+		var x := (x_hi - 1) if flip else x_lo
+		var x_end := (x_lo - 1) if flip else x_hi
+		while x != x_end:
+			var idx := row + x
+			var mat: int = grid[idx]
+			# Nopea ohitus: vain irtomateriaali/nesteet liikkuvat (inline, ei funktiokutsua/solu)
+			var granular := mat == MAT_SAND or mat == MAT_ASH or mat == MAT_DIRT \
+				or mat == MAT_GRAVEL or mat == MAT_IRON_ORE or mat == MAT_GOLD_ORE \
+				or mat == MAT_GOLD or mat == MAT_COAL
+			var liquid := mat == MAT_WATER or mat == MAT_OIL
+			if granular or liquid:
+				var below := idx + W
+				if grid[below] == MAT_EMPTY:
+					_ca_move(idx, below)
+				else:
+					var dl_ok := grid[below - 1] == MAT_EMPTY
+					var dr_ok := grid[below + 1] == MAT_EMPTY
+					if dl_ok or dr_ok:
+						var go_left := dl_ok
+						if dl_ok and dr_ok:
+							go_left = (randi() & 1) == 0
+						_ca_move(idx, below - 1 if go_left else below + 1)
+					elif liquid:
+						var l_ok := grid[idx - 1] == MAT_EMPTY
+						var r_ok := grid[idx + 1] == MAT_EMPTY
+						if l_ok or r_ok:
+							var left2 := l_ok
+							if l_ok and r_ok:
+								left2 = (randi() & 1) == 0
+							_ca_move(idx, idx - 1 if left2 else idx + 1)
+			x += xs
+		y -= 1
+
+
+func _ca_move(src: int, dst: int) -> void:
+	grid[dst] = grid[src]
+	color_seed[dst] = color_seed[src]
+	grid[src] = MAT_EMPTY
+	color_seed[src] = randi() % 256
+
+
+# Laajenna CA:n aktiivista rajausta kattamaan px-suorakulmion (+ marginaali). No-op jos CA ei paalla.
+func _ca_expand_bounds(r: Rect2i) -> void:
+	if not _cpu_ca_enabled:
+		return
+	var m := 2
+	var grown := Rect2i(r.position.x - m, r.position.y - m, r.size.x + 2 * m, r.size.y + 2 * m)
+	if _ca_bounds.size.x <= 0 or _ca_bounds.size.y <= 0:
+		_ca_bounds = grown
+	else:
+		_ca_bounds = _ca_bounds.merge(grown)
 
 
 func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
@@ -3512,6 +4257,7 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 			grid[idx] = mat
 			color_seed[idx] = randi() % 256
 	paint_pending = true
+	_ca_expand_bounds(Rect2i(x, y, w, h))
 
 
 func _scenario_place_body(x: int, y: int, w: int, h: int, mat: int) -> void:
@@ -3564,6 +4310,195 @@ func _scenario_screenshot(path: String) -> void:
 		push_error("ScenarioRunner: screenshot-tallennus epäonnistui (%d): %s" % [err, path])
 
 
+# --- MVP-skenaarion (mvp_core_loop) apurit ---------------------------------
+
+# Designoi louhinta-alue tehdasalustan viereen (WorldGen.get_platform_rect).
+# Skannaa TODELLISEN maanpinnan target-sarakkeista (worldgen on satunnainen joka boot),
+# jotta alue alkaa heti kiinteasta materiaalista — miner ei tuhlaa aikaa ilman louhintaan
+# ja hauler saa poimittavaa nopeasti. Robusti kaikille seedeille.
+# JSON-parametrit (kaikki valinnaisia):
+#   side   : "left"/"right" — kummalle puolelle alustaa (oletus "left")
+#   gap    : px alustan reunasta sivuun (oletus 24)
+#   width  : alueen leveys px (oletus 104)
+#   margin : px pinnan YLApuolelle (avoin ilma -> frontier aukeaa) (oletus 16)
+#   depth  : px pinnasta ALAS kiinteaan (louhittavaa) (oletus 104)
+func _scenario_designate_rect(step: Dictionary) -> void:
+	if desig == null:
+		push_warning("ScenarioRunner: designate_rect — desig == null")
+		return
+	var prect: Rect2i = WorldGen.get_platform_rect()
+	var side: String = step.get("side", "left")
+	var gap: int = step.get("gap", 24)
+	var width: int = step.get("width", 104)
+	var margin: int = step.get("margin", 16)
+	var depth: int = step.get("depth", 104)
+	var rx: int
+	if side == "right":
+		rx = prect.position.x + prect.size.x + gap
+	else:
+		rx = prect.position.x - gap - width
+	# Etsi matalin (pienin y) louhittava kiintea pikseli target-sarakkeista.
+	var shallow := SIM_HEIGHT
+	for x in range(rx, rx + width):
+		if x < 0 or x >= W:
+			continue
+		for y in SIM_HEIGHT:
+			if _scenario_is_mineable(grid[y * W + x]):
+				if y < shallow:
+					shallow = y
+				break
+	if shallow >= SIM_HEIGHT:
+		shallow = prect.position.y  # ei kiinteaa loytynyt -> alustan pinnan taso
+	var ry: int = shallow - margin
+	var rh: int = margin + depth
+	var rect := Rect2i(rx, ry, width, rh)
+	desig.paint_px_rect(rect, true)
+	# Laajenna CPU-CA:n aktiivinen rajaus kattamaan louhinta-alue (+ hieman alle, jotta
+	# loysennetty/muunnettu irtomateriaali valuu painovoimaisesti kuopan pohjalle haulerin
+	# poimittavaksi ja ylemmat solut aukeavat -> frontier etenee eika jumita). No-op jos cpu_ca=false.
+	_ca_expand_bounds(Rect2i(rect.position.x, rect.position.y, rect.size.x, rect.size.y + 32))
+	_scenario_desig_rect = rect
+	_scenario_desig_count0 = _scenario_count_active_desig()
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+	print("ScenarioRunner: designate_rect side=%s pinta_y=%d rect=%s aktiiviset_solut=%d" % [side, shallow, str(rect), _scenario_desig_count0])
+
+
+func _scenario_is_mineable(mat: int) -> bool:
+	# Miner louhii nama (vastaa BotManager._build_luts _mineable_lut:ia).
+	return mat == MAT_STONE or mat == MAT_DIRT or mat == MAT_SAND \
+		or mat == MAT_IRON_ORE or mat == MAT_GOLD_ORE or mat == MAT_COAL or mat == MAT_WOOD
+
+
+# Laske ei-D_NONE-designaatiosolujen lkm koko gridista.
+func _scenario_count_active_desig() -> int:
+	if desig == null:
+		return 0
+	var n := 0
+	for i in desig.cells.size():
+		if desig.cells[i] != DesignationGrid.D_NONE:
+			n += 1
+	return n
+
+
+func _scenario_dump_bots() -> void:
+	if bot_manager == null:
+		print("BOTS: (ei bottimanageria)")
+		return
+	var arr: Array = []
+	for b in bot_manager.bots:
+		arr.append({
+			"role": b.role,
+			"state": b.state,
+			"pos": {"x": int(b.pos.x), "y": int(b.pos.y)},
+			"max_dist": int(b.max_dist_from_spawn),
+			"cargo_total": b.cargo_total,
+		})
+	print("BOTS: " + JSON.stringify({
+		"money": money,
+		"dig_sites": bot_manager.dig_sites.size(),
+		"active_desig": _scenario_count_active_desig(),
+		"bots": arr,
+	}))
+
+
+# CPU-puolinen debug-renderi (toimii headless — ei GPU:ta/viewportia).
+# Piirtaa materiaalit + designaatio-overlayn + botit yhteen PNG:hen jotta
+# kaivettu alue ja botit voidaan silmamaaraisesti varmistaa ilman GPU-renderia.
+func _scenario_mvp_render(path: String, label: String) -> void:
+	var img := Image.create(W, SIM_HEIGHT, false, Image.FORMAT_RGB8)
+	# Materiaalipaletti (kattaa kaivosmateriaalit — ei magentaa DIRT/GRAVEL/malmeille).
+	var pal := {
+		MAT_EMPTY: Color(0.05, 0.06, 0.09),
+		MAT_SAND: Color(0.86, 0.78, 0.45),
+		MAT_WATER: Color(0.20, 0.40, 0.85),
+		MAT_STONE: Color(0.45, 0.45, 0.47),
+		MAT_WOOD: Color(0.40, 0.25, 0.10),
+		MAT_FIRE: Color(1.0, 0.35, 0.05),
+		MAT_OIL: Color(0.12, 0.09, 0.05),
+		MAT_STEAM: Color(0.80, 0.80, 0.90),
+		MAT_ASH: Color(0.28, 0.28, 0.30),
+		MAT_WOOD_FALLING: Color(0.60, 0.35, 0.15),
+		MAT_GLASS: Color(0.65, 0.85, 0.90),
+		MAT_DIRT: Color(0.45, 0.32, 0.18),
+		MAT_IRON_ORE: Color(0.70, 0.55, 0.45),
+		MAT_GOLD_ORE: Color(0.85, 0.72, 0.25),
+		MAT_IRON: Color(0.75, 0.76, 0.80),
+		MAT_GOLD: Color(0.95, 0.82, 0.20),
+		MAT_COAL: Color(0.14, 0.14, 0.16),
+		MAT_GRAVEL: Color(0.70, 0.59, 0.45),
+		MAT_BEDROCK: Color(0.10, 0.10, 0.12),
+		MAT_COPPER: Color(0.72, 0.45, 0.28),
+		MAT_RARE_EARTH: Color(0.35, 0.75, 0.65),
+	}
+	for y in SIM_HEIGHT:
+		var row := y * W
+		for x in W:
+			var mat: int = grid[row + x]
+			img.set_pixel(x, y, pal.get(mat, Color(1, 0, 1)))
+	# Designaatio-overlay (puoliksi sekoitettuna) solujen paalle.
+	if desig != null and desig.cells.size() >= DesignationGrid.GW * DesignationGrid.GH:
+		var cell := DesignationGrid.CELL
+		for dy in DesignationGrid.GH:
+			var drow := dy * DesignationGrid.GW
+			for dx in DesignationGrid.GW:
+				var v: int = desig.cells[drow + dx]
+				if v == DesignationGrid.D_NONE:
+					continue
+				var oc: Color
+				match v:
+					DesignationGrid.D_QUEUED: oc = Color(1.0, 0.85, 0.2)
+					DesignationGrid.D_BLOCKED: oc = Color(0.9, 0.2, 0.2)
+					DesignationGrid.D_CLAIMED: oc = Color(0.3, 0.8, 1.0)
+					DesignationGrid.D_MINING: oc = Color(0.4, 1.0, 0.4)
+					_: oc = Color(1.0, 1.0, 1.0)
+				var px0 := dx * cell
+				var py0 := dy * cell
+				for yy in cell:
+					var gy := py0 + yy
+					if gy < 0 or gy >= SIM_HEIGHT:
+						continue
+					for xx in cell:
+						var gx := px0 + xx
+						if gx < 0 or gx >= W:
+							continue
+						var base_c := img.get_pixel(gx, gy)
+						img.set_pixel(gx, gy, base_c.lerp(oc, 0.35))
+	# Base-rakenne korostus (vihertava).
+	if base != null and is_instance_valid(base):
+		for sp in base.structure_pixels:
+			if sp.x >= 0 and sp.x < W and sp.y >= 0 and sp.y < SIM_HEIGHT:
+				img.set_pixel(sp.x, sp.y, Color(0.25, 0.85, 0.45))
+	# Botit (miner amber, hauler sininen) — iso 13x13 laatikko + kirkas valkoinen reunus,
+	# jotta ne erottuvat selkeasti taysikokoisessa 1664x960-kuvassa.
+	if bot_manager != null:
+		var half := 6
+		for b in bot_manager.bots:
+			var col: Color = Color(1.0, 0.75, 0.1) if b.role == Bot.Role.MINER else Color(0.2, 0.55, 1.0)
+			var bx := int(b.pos.x)
+			var by := int(b.pos.y)
+			for oy in range(-half, half + 1):
+				for ox in range(-half, half + 1):
+					var gx := bx + ox
+					var gy := by + oy
+					if gx < 0 or gx >= W or gy < 0 or gy >= SIM_HEIGHT:
+						continue
+					var d: int = maxi(absi(ox), absi(oy))
+					var c: Color
+					if d >= half - 1:
+						c = Color(1, 1, 1)              # kirkas valkoinen reunus
+					elif d >= half - 2:
+						c = Color(0.05, 0.05, 0.07)     # tumma sisareunus
+					else:
+						c = col
+					img.set_pixel(gx, gy, c)
+	var err := img.save_png(path)
+	if err == OK:
+		print("MVP_SHOT: %s  [%s]  money=%d" % [path, label, money])
+	else:
+		push_error("ScenarioRunner: mvp_shot-tallennus epäonnistui (%d): %s" % [err, path])
+
+
 func _autofill_test() -> void:
 	# Täytä 25% maailmasta hiekalla mittausta varten
 	var rng := RandomNumberGenerator.new()
@@ -3578,8 +4513,6 @@ func _autofill_test() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
-		if _vis_thread != null and _vis_thread.is_alive():
-			_vis_thread.wait_to_finish()
 		if gpu_ready and rd != null:
 			rd.free_rid(pipeline)
 			rd.free_rid(uniform_set)

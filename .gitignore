@@ -4,3 +4,12 @@
 .mcp.json
 game_view.png
 game_state.json
+game_view.png.import
+debug_*.png
+debug_*.png.import
+screenshot*.png
+screenshot*.png.import
+tests/output/
+.claude/settings.local.json
+.claude/worktrees/
+.claude/agent-memory/

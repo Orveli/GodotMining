@@ -45,6 +45,8 @@ const uint COAL        = 16u;
 const uint HELD        = 17u;
 const uint GRAVEL      = 18u;
 const uint BEDROCK     = 19u;
+const uint COPPER      = 20u;
+const uint RARE_EARTH  = 21u;
 
 // Materiaalien perusvärit (sama kuin pixel_render.gdshader MAT_COLORS)
 // Tallennettu 0-255 uint-arvoina
@@ -66,8 +68,10 @@ uvec3 mat_base_color(uint mat) {
     if (mat == GOLD)         return uvec3(229u, 198u, 51u);
     if (mat == COAL)         return uvec3(46u,  43u,  53u);
     if (mat == HELD)         return uvec3(255u, 216u, 25u);
-    if (mat == GRAVEL)       return uvec3(140u, 127u, 114u);
+    if (mat == GRAVEL)       return uvec3(178u, 150u, 116u);
     if (mat == BEDROCK)      return uvec3(63u,  56u,  76u);
+    if (mat == COPPER)       return uvec3(184u, 115u, 71u);
+    if (mat == RARE_EARTH)   return uvec3(89u,  191u, 166u);
     return uvec3(20u, 20u, 30u);  // EMPTY ja tuntemattomat
 }
 
@@ -89,8 +93,10 @@ uint mat_variation(uint mat) {
     if (mat == IRON)         return 5u;    // 0.02
     if (mat == GOLD)         return 5u;    // 0.02
     if (mat == COAL)         return 12u;   // 0.05
-    if (mat == GRAVEL)       return 10u;   // 0.04
+    if (mat == GRAVEL)       return 20u;   // 0.08
     if (mat == BEDROCK)      return 7u;    // 0.03
+    if (mat == COPPER)       return 10u;   // 0.04
+    if (mat == RARE_EARTH)   return 13u;   // 0.05
     return 0u;
 }
 
@@ -115,8 +121,8 @@ void main() {
     uint mat  = cell & 0xFFu;
     uint seed = (cell >> 8u) & 0xFFu;
 
-    // Rajaa materiaali-ID tunnettuun väliin (0-19)
-    if (mat > 19u) mat = 0u;
+    // Rajaa materiaali-ID tunnettuun väliin (0-21)
+    if (mat > 21u) mat = 0u;
 
     uvec3 color = mat_base_color(mat);
     uint  var_  = mat_variation(mat);

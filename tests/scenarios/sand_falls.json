@@ -1,5 +1,6 @@
 {
   "auto_exit": true,
+  "cpu_ca": true,
   "steps": [
     { "cmd": "clear" },
     { "cmd": "fill_rect", "x": 0, "y": 235, "w": 416, "h": 5, "mat": 3 },

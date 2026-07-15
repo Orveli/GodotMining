@@ -456,6 +456,9 @@ func _tab_game(tabs: TabContainer) -> void:
 	_toggle_row(p, "Ääretön raha",
 		func(): return bool(pixel_world.get("infinite_money")) if pixel_world != null else false,
 		func(v: bool): pixel_world.set("infinite_money", v))
+	_toggle_row(p, "Debug-näppäimet (C/R/pommit/räjähdys)",
+		func(): return bool(pixel_world.get("debug_hotkeys_enabled")) if pixel_world != null else false,
+		func(v: bool): pixel_world.set("debug_hotkeys_enabled", v))
 	p.add_child(_make_btn("Poista kaikki rakennukset", _delete_all_buildings))
 	p.add_child(_make_btn("Tyhjennä kenttä [C]", func():
 		if pixel_world != null and pixel_world.has_method("clear_world"):

@@ -28,6 +28,10 @@ var build_buttons: Array[Button] = []  # kaikki rakennus-napit korostusta varten
 # Raha-näyttö
 var money_label: Label
 
+# Aloitusopaste — iso keskitetty vihje kunnes ensimmäinen louhinta-alue on maalattu
+var start_hint_panel: PanelContainer
+var _hint_dismissed: bool = false     # kertaluonteinen lippu: kun designaatio maalattu, opaste ei palaa
+
 # Speed-napit
 var speed_buttons: Array[Button] = []
 const SPEED_VALUES: Array[float] = [1.0, 4.0, 8.0, 16.0]
@@ -100,8 +104,8 @@ func _make_btn(label: String, font_size: int = 12) -> Button:
 
 
 func _ready() -> void:
-	# UI-esto: anna pixel_world viittaus tähän paneeliin (rektitarkistus)
-	pixel_world.ui_panel = self
+	# UI-esto: anna pixel_world viittaus kaikkiin UI-paneeleihin (rektitarkistus)
+	pixel_world.ui_panels.append(self)
 
 	# Pääcontainer: yksi vaakariivi koko palkin leveydeltä
 	var hbox := HBoxContainer.new()
@@ -240,6 +244,12 @@ func _ready() -> void:
 	# ── Materiaaliskanneri (oikea alakulma) ────────────────────────────────
 	_build_scanner_panel()
 
+	# ── Aloitusopaste (keskitetty, ylakolmannes) ───────────────────────────
+	_build_start_hint()
+
+	# Rekisteröi lisäpaneelit UI-estoon (deferred koska lisätään call_deferred:lla)
+	_register_ui_panels.call_deferred()
+
 
 func _build_dropdown_panel() -> void:
 	# Luo erillinen PanelContainer palkin alapuolelle (offset_top = 50)
@@ -259,7 +269,7 @@ func _build_dropdown_panel() -> void:
 
 	# Ohjeteksti vasemmalla
 	var hint_lbl := Label.new()
-	hint_lbl.text = "Sijoita:"
+	hint_lbl.text = "Sijoita:  (V = louhinta-alue boteille)"
 	hint_lbl.add_theme_font_size_override("font_size", 12)
 	hint_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
 	hint_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -316,6 +326,31 @@ func _build_dropdown_panel() -> void:
 	hbox.add_child(btn_drill_build)
 	build_buttons.append(btn_drill_build)
 
+	# Erotin ennen myyntinappia
+	var sell_sep := VSeparator.new()
+	hbox.add_child(sell_sep)
+
+	# Myynti-nappi — aktivoi BUILD_SELL-moodin [M]
+	var btn_sell := _make_btn("Myy [M]")
+	btn_sell.add_theme_color_override("font_color", Color(1.0, 0.5, 0.5))
+	btn_sell.pressed.connect(func():
+		if pixel_world.build_mode == pixel_world.BUILD_SELL:
+			pixel_world._clear_sell_overlay()
+			pixel_world.build_mode = pixel_world.BUILD_NONE
+		else:
+			pixel_world.build_mode = pixel_world.BUILD_SELL
+			pixel_world.block_paint = true)
+	hbox.add_child(btn_sell)
+	build_buttons.append(btn_sell)
+
+
+func _register_ui_panels() -> void:
+	# Lisää rakennuspaneeli ja skanneri UI-estoon (kutsutaan deferred jotta ne on luotu)
+	if is_instance_valid(build_panel) and not pixel_world.ui_panels.has(build_panel):
+		pixel_world.ui_panels.append(build_panel)
+	if is_instance_valid(scanner_panel) and not pixel_world.ui_panels.has(scanner_panel):
+		pixel_world.ui_panels.append(scanner_panel)
+
 
 func _build_scanner_panel() -> void:
 	# Luo erillinen paneeli oikeaan alakulmaan — lisätään CanvasLayer UI:hin
@@ -350,6 +385,57 @@ func _build_scanner_panel() -> void:
 	scanner_panel.add_child(scanner_label)
 
 	get_parent().add_child.call_deferred(scanner_panel)
+
+
+func _build_start_hint() -> void:
+	# Iso keskitetty aloitusvihje ruudun ylakolmannekseen. Nakyy kunnes pelaaja on
+	# maalannut ensimmaisen louhinta-alueen. EI saa napata hiiriklikkauksia (maalaus
+	# tapahtuu sen takaa) -> mouse_filter = IGNORE, EIKA rekisteroida ui_panels-listaan.
+	start_hint_panel = PanelContainer.new()
+	start_hint_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	start_hint_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	start_hint_panel.grow_vertical = Control.GROW_DIRECTION_END
+	start_hint_panel.offset_top = 96.0
+	start_hint_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	# Puoliläpinäkyvä tumma taustapaneeli
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.05, 0.05, 0.08, 0.78)
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	style.content_margin_left = 18.0
+	style.content_margin_right = 18.0
+	style.content_margin_top = 12.0
+	style.content_margin_bottom = 12.0
+	start_hint_panel.add_theme_stylebox_override("panel", style)
+
+	var lbl := Label.new()
+	lbl.text = "Paina V ja maalaa louhinta-alue — botit kaivavat ja tuovat rahat baseen"
+	lbl.add_theme_font_size_override("font_size", 22)
+	lbl.add_theme_color_override("font_color", Color(0.95, 0.95, 0.85))
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	start_hint_panel.add_child(lbl)
+
+	get_parent().add_child.call_deferred(start_hint_panel)
+
+
+func _update_start_hint() -> void:
+	# Nakyvyys: opaste nakyy vain kun designaatiogridissa ei ole yhtaan aktiivista solua
+	# JA designation_mode == false. Piiloutuu heti kun jompikumpi ehto muuttuu.
+	# Kun ensimmainen designaatio on maalattu -> kertaluonteinen lippu, opaste ei enaa palaa.
+	if _hint_dismissed:
+		return
+	if not is_instance_valid(start_hint_panel):
+		return
+	if pixel_world.desig != null and pixel_world.desig.any_active():
+		_hint_dismissed = true
+		start_hint_panel.visible = false
+		return
+	# Ei viela maalattu: nayta paitsi maalaustilassa (V painettu -> piilota heti)
+	start_hint_panel.visible = not pixel_world.designation_mode
 
 
 func update_material_scanner() -> void:
@@ -423,6 +509,9 @@ func _process(_delta: float) -> void:
 		_scanner_frame = 0
 		update_material_scanner()
 
+	# Aloitusopasteen näkyvyys (kevyt; skannaus katkeaa ekaan aktiiviseen soluun)
+	_update_start_hint()
+
 	# Korosta aktiivinen nopeus
 	for i in speed_buttons.size():
 		speed_buttons[i].modulate = Color(1.5, 1.5, 0.5) if SPEED_VALUES[i] == pixel_world.sim_speed else Color.WHITE
@@ -440,8 +529,13 @@ func _process(_delta: float) -> void:
 		pixel_world.BUILD_MONEY_EXIT:    active_build_idx = 6
 		pixel_world.BUILD_CRUSHER:       active_build_idx = 7
 		pixel_world.BUILD_DRILL:         active_build_idx = 8
+		pixel_world.BUILD_SELL:          active_build_idx = 9  # Myy-nappi
 	for i in build_buttons.size():
-		build_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == active_build_idx else Color.WHITE
+		# Myyntinappi korostetaan punaisella aktiivisena
+		if i == 9 and i == active_build_idx:
+			build_buttons[i].modulate = Color(1.5, 0.4, 0.4)
+		else:
+			build_buttons[i].modulate = Color(0.5, 1.5, 0.5) if i == active_build_idx else Color.WHITE
 
 	# Tila-teksti FPS-labelissa
 	var mode_str := ""
@@ -467,10 +561,16 @@ func _process(_delta: float) -> void:
 		mode_str = " | SEINÄ: klikkaa loppu"
 	elif pixel_world.build_mode == pixel_world.BUILD_DRILL:
 		mode_str = " | PORA [klikkaa]"
+	elif pixel_world.build_mode == pixel_world.BUILD_SELL:
+		mode_str = " | MYYNTI: klikkaa rakennusta (ESC/M=peruuta)"
 	elif pixel_world.grav_gun_mode > 0:
 		mode_str = " | GRAVITY GUN"
 	elif pixel_world.current_weapon == 2:  # Weapon.RIFLE = 2
 		mode_str = " | RYNNÄKKÖ [L]"
+
+	# Designaatio-moodi (bottien louhinta-alue) — riippumaton rakennustilasta
+	if pixel_world.designation_mode:
+		mode_str += " | LOUHINTA-ALUE [V]: vasen=merkkaa oikea=poista"
 
 	var explosion_names: Array[String] = ["Pieni", "Keski", "Iso", "Mega"]
 	var exp_str := explosion_names[pixel_world.explosion_size]

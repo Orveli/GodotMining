@@ -32,14 +32,18 @@ uniform int impact_type = 0;           // 0=luoti, 1=raketti, 2=hakku
 uniform float screen_aspect = 1.778;
 
 // TEXTURE = grid data (R8, materiaali-ID per pikseli)
-// Materiaalien värit (indeksit 0-19, MAT_BEDROCK=19 mukana) — runtime-vaihdettava paletti
-uniform vec3 mat_colors[20];
-uniform float mat_var[20];
+// Materiaalien värit (indeksit 0-21, MAT_COPPER=20/MAT_RARE_EARTH=21 mukana) — runtime-vaihdettava paletti
+uniform vec3 mat_colors[22];
+uniform float mat_var[22];
+
+// Fog of war -valokenttä (alaskaalattu, filter_linear).
+// 0 = musta tutkimaton, 1 = täysi valo. Ylläpidetään LightField-luokassa CPU:lla.
+uniform sampler2D light_tex : filter_linear;
 
 void fragment() {
 	// Lue materiaali-ID suoraan (ei screen-wide CA)
 	float mat_raw = texture(TEXTURE, UV).r;
-	int mat_id = clamp(int(mat_raw * 255.0 + 0.5), 0, 19);
+	int mat_id = clamp(int(mat_raw * 255.0 + 0.5), 0, 21);
 
 	float seed_val = texture(seed_tex, UV).r;
 	vec3 color = mat_colors[mat_id];
@@ -50,6 +54,11 @@ void fragment() {
 	color.r = clamp(color.r + offset, 0.0, 1.0);
 	color.g = clamp(color.g + offset * 0.8, 0.0, 1.0);
 	color.b = clamp(color.b + offset * 0.6, 0.0, 1.0);
+
+	// Fog of war — himmennä terrain-väri valokentällä ennen efektikerroksia.
+	// Tuli, flash, laser, grav gun ja iskuefektit piirtyvät tämän jälkeen täydellä
+	// kirkkaudella → ne hehkuvat läpi pimeän. Tutkimaton maanalainen = musta.
+	color *= clamp(texture(light_tex, UV).r, 0.0, 1.0);
 
 	// Lokaali chromatic aberration — vain osumakohdan ympärillä
 	if (impact_intensity > 0.01) {
@@ -64,8 +73,8 @@ void fragment() {
 			vec2 ca_offset = (UV - impact_uv) * ca_str;
 			float r_s = texture(TEXTURE, clamp(UV + ca_offset, vec2(0.0), vec2(1.0))).r;
 			float b_s = texture(TEXTURE, clamp(UV - ca_offset, vec2(0.0), vec2(1.0))).r;
-			int r_id = clamp(int(r_s * 255.0 + 0.5), 0, 19);
-			int b_id = clamp(int(b_s * 255.0 + 0.5), 0, 19);
+			int r_id = clamp(int(r_s * 255.0 + 0.5), 0, 21);
+			int b_id = clamp(int(b_s * 255.0 + 0.5), 0, 21);
 			color.r = mix(color.r, mat_colors[r_id].r, local_t * impact_intensity);
 			color.b = mix(color.b, mat_colors[b_id].b, local_t * impact_intensity);
 		}

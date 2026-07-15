@@ -1,3 +1,13 @@
+# MoneyExit — kaksoisroolissa.
+#
+# 1) Alkuperäinen rooli (säilyy): itsenäinen "kassa"-rakennus, joka syö
+#    intake-aukosta valuvat pikselit rahaksi (update_exit). Toimii jatkossa
+#    liukuhihnaintegraationa — hihna tuo materiaalin intake-aukolle.
+# 2) Base-rooli (bottisimulaatio): sama instanssi toimii tehtaan basena.
+#    - Haulerit purkavat kuormansa tänne → accept_cargo() summaa arvon
+#      PRICES-taulusta (kutsuja lisää tuloksen world.moneyyn).
+#    - Bottien spawn-piste (spawn_pos) ja haulerin dump-lentokohde (intake_pos).
+#    Molemmat roolit jakavat saman PRICES-hinnaston.
 class_name MoneyExit
 extends Node2D
 
@@ -6,15 +16,24 @@ const EXIT_H := 10
 const INTAKE_W := 6
 const FLOOR_MAT := 3  # MAT_STONE
 
-# Hinnat per pikseli — kaikki materiaalit tuottavat vähintään 1 rahan
-# Jalostus nostaa arvoa
+# Hinnat per pikseli — $/px, kontraktin mukaiset (GDD §4.1, §8 mapping).
+# Kaikki tuntemattomat materiaalit → DEFAULT_PRICE. Jalostus nostaa arvoa.
+# Sama taulu palvelee sekä update_exitiä (pikselinsyönti) että accept_cargoa (botit).
 const PRICES := {
-	0:  0,   # EMPTY — ei mitään
-	10: 3,   # GLASS → 3
-	14: 5,   # IRON  → 5
-	15: 12,  # GOLD  → 12
+	0:  0,   # EMPTY    — ei mitään
+	1:  1,   # SAND
+	3:  1,   # STONE
+	8:  1,   # ASH
+	10: 3,   # GLASS
+	11: 1,   # DIRT
+	12: 3,   # IRON_ORE
+	13: 5,   # GOLD_ORE
+	14: 5,   # IRON
+	15: 12,  # GOLD
+	16: 2,   # COAL
+	18: 1,   # GRAVEL
 }
-const DEFAULT_PRICE := 1  # Kaikki muut materiaalit: 1 raha
+const DEFAULT_PRICE := 1  # Tuntematon materiaali: 1 $/px
 
 var grid_pos: Vector2i = Vector2i.ZERO
 var structure_pixels: Array[Vector2i] = []
@@ -103,6 +122,32 @@ func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 
 func get_structure_pixels() -> Array[Vector2i]:
 	return structure_pixels
+
+
+# --- Base-rooli (bottisimulaatio) ---
+
+# Summaa kuorman rahallisen arvon PRICES-taulusta. Tuntematon materiaali → 1 $/px.
+# EI muuta world-tilaa eikä total_earnedia — kutsuja lisää palautusarvon world.moneyyn.
+# cargo: mat_id (int) -> pikselimäärä (int).
+func accept_cargo(cargo: Dictionary) -> int:
+	var total: int = 0
+	for mat_id in cargo:
+		var amount: int = int(cargo[mat_id])
+		if amount <= 0:
+			continue
+		var unit_price: int = PRICES.get(int(mat_id), DEFAULT_PRICE)
+		total += unit_price * amount
+	return total
+
+
+# Bottien spawn-piste: basen yläpuolella ~20 px, rakenteen keskilinjalla.
+func spawn_pos() -> Vector2:
+	return Vector2(float(grid_pos.x) + float(EXIT_W) * 0.5, float(grid_pos.y) - 20.0)
+
+
+# Haulerin dump-lentokohde: basen yläreunan keskikohta (intake-aukon kohdalla).
+func intake_pos() -> Vector2:
+	return Vector2(float(grid_pos.x) + float(EXIT_W) * 0.5, float(grid_pos.y))
 
 
 func _draw() -> void:
