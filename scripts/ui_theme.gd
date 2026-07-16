@@ -25,6 +25,10 @@ const FONT_PATH_BOLD := "res://assets/ui/fonts/Silkscreen-Bold.ttf"
 
 const DEFAULT_FONT_SIZE := 14
 
+# ── 9-slice-paneelikehykset (UI-REDESIGN Vaihe 3, assets/ui/panels/) ────────
+const PANEL_FRAME_PATH := "res://assets/ui/panels/panel_frame.png"   # 48×48, marginaalit 12px
+const BUTTON_FRAME_PATH := "res://assets/ui/panels/button_frame.png"  # 24×24, marginaalit 8px
+
 
 # Rakentaa ja palauttaa yhden yhteisen Theme-resurssin. Kutsutaan kerran
 # UI-juuren _ready():ssa (ui.gd: `theme = UiTheme.build_theme()`).
@@ -71,6 +75,44 @@ static func panel_style_box(bg: Color, border: Color, border_w: int = 1, margin:
 	sb.set_border_width_all(border_w)
 	sb.border_color = border
 	sb.set_corner_radius_all(0)
+	sb.set_content_margin_all(margin)
+	return sb
+
+
+# 9-slice-paneelikehys isoille kontekstuaalisille paneeleille (trayt, popoverit):
+# panel_frame.png, 48×48, kulmat pysyvät terävinä 12px-marginaaleilla. Palauttaa null jos
+# assettia ei löydy (kutsuja käyttää silloin UiTheme.panel_style_box()-fallbackia).
+static func panel_frame_style_box(margin: float = 12.0) -> StyleBoxTexture:
+	if not ResourceLoader.exists(PANEL_FRAME_PATH):
+		return null
+	var tex := load(PANEL_FRAME_PATH) as Texture2D
+	if tex == null:
+		return null
+	var sb := StyleBoxTexture.new()
+	sb.texture = tex
+	sb.texture_margin_left = margin
+	sb.texture_margin_right = margin
+	sb.texture_margin_top = margin
+	sb.texture_margin_bottom = margin
+	sb.set_content_margin_all(margin)
+	return sb
+
+
+# 9-slice-kehys yksittäisille napeille (actionbar-työkalunapit): button_frame.png, 24×24,
+# marginaalit 8px. Pienissä (<40px) napeissa StyleBoxFlat voi näyttää siistimmältä —
+# kutsuja päättää kummalla käyttötapaus toimii paremmin (ks. ui.gd toolbar-kommentit).
+static func button_frame_style_box(margin: float = 8.0) -> StyleBoxTexture:
+	if not ResourceLoader.exists(BUTTON_FRAME_PATH):
+		return null
+	var tex := load(BUTTON_FRAME_PATH) as Texture2D
+	if tex == null:
+		return null
+	var sb := StyleBoxTexture.new()
+	sb.texture = tex
+	sb.texture_margin_left = margin
+	sb.texture_margin_right = margin
+	sb.texture_margin_top = margin
+	sb.texture_margin_bottom = margin
 	sb.set_content_margin_all(margin)
 	return sb
 

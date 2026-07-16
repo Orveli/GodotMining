@@ -1,0 +1,71 @@
+extends Control
+# ═══════════════════════════════════════════════════════════════════════════
+# UI_BOT_STATUS_OVERLAY — botin tila diegeettisesti maailmassa
+# (UI_REDESIGN_PLAN.md Vaihe 4, kohta 10: "botti-status maailmaan")
+#
+# Piirtää jokaisen botin yläpuolelle pienen kuormapalkin (täyttöaste) ja himmentää
+# IDLE-botit. Roolierottelu (miner=amber/hauler=sininen) on jo botin runkovärissä
+# (bot_manager.gd draw_bots()) — tämä overlay VAIN täydentää sitä, EI koske
+# bottien tilakoneeseen tai piirtologiikkaan millään tavalla (erillinen Control,
+# lukee vain get_fleet_stats()-datan).
+#
+# Koordinaatit: get_fleet_stats()["bots"][i]["pos"] on sim-pikselikoordinaatti.
+# pixel_world.grid_to_screen() muuntaa sen ruutukoordinaatiksi (huomioi zoom/pan).
+# Tämä Control lisätään "UI"-CanvasLayeriin (sama taso kuin muu HUD) — ei
+# building_layerin lapseksi, koska sen skaalaus vastaisi vain zoomia eikä
+# CanvasLayerin omaa (aina 1:1) koordinaatistoa.
+# ═══════════════════════════════════════════════════════════════════════════
+
+var pixel_world: TextureRect = null
+
+# Bot.Role / Bot.BotState -kopiot (vältetään riippuvuus class_name-cacheen, ks.
+# CLAUDE.md: Godot Testing Gotchas — preload-viittaus olisi turha tässä koska
+# tarvitaan vain kaksi kokonaislukuvakiota).
+const ROLE_MINER := 0
+const BOT_STATE_IDLE := 0
+
+const BAR_W := 14.0
+const BAR_H := 3.0
+const BAR_OFFSET_Y := -11.0
+const COL_BAR_BG := Color(0.05, 0.05, 0.08, 0.85)
+const COL_BAR_MINER := Color(0.88, 0.66, 0.25, 0.95)
+const COL_BAR_HAULER := Color(0.35, 0.62, 0.95, 0.95)
+const IDLE_ALPHA := 0.35   # himmennys kun botti on IDLE (ei töissä)
+
+
+func setup(world: TextureRect) -> void:
+	pixel_world = world
+	mouse_filter = Control.MOUSE_FILTER_IGNORE   # ei koskaan estä klikkauksia maailmaan
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+
+func _process(_delta: float) -> void:
+	# Botit liikkuvat joka frame -> piirretään uudelleen joka frame. Botteja on
+	# vähän (kymmeniä), draw_rect-kutsut ovat halpoja.
+	queue_redraw()
+
+
+func _draw() -> void:
+	if pixel_world == null or not is_instance_valid(pixel_world):
+		return
+	var bm = pixel_world.get("bot_manager")
+	if bm == null or not bm.has_method("get_fleet_stats"):
+		return
+	var stats: Dictionary = bm.get_fleet_stats()
+	for b in stats.get("bots", []):
+		if not (b.has("pos") and b.has("cargo_total") and b.has("carry_cap")):
+			continue   # vanhempi backend ilman additiivisia kenttiä -> ohita hiljaa
+		var pos: Vector2 = b["pos"]
+		var screen: Vector2 = pixel_world.grid_to_screen(pos)
+		var idle: bool = int(b.get("state", 0)) == BOT_STATE_IDLE
+		var alpha: float = IDLE_ALPHA if idle else 1.0
+		var cap: int = maxi(int(b["carry_cap"]), 1)
+		var frac: float = clampf(float(b["cargo_total"]) / float(cap), 0.0, 1.0)
+		var role_col: Color = COL_BAR_MINER if int(b.get("role", 0)) == ROLE_MINER else COL_BAR_HAULER
+
+		var bar_pos := screen + Vector2(-BAR_W * 0.5, BAR_OFFSET_Y)
+		draw_rect(Rect2(bar_pos, Vector2(BAR_W, BAR_H)),
+			Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * alpha))
+		if frac > 0.0:
+			draw_rect(Rect2(bar_pos, Vector2(BAR_W * frac, BAR_H)),
+				Color(role_col.r, role_col.g, role_col.b, role_col.a * alpha))

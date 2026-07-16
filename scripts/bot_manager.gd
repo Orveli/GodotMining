@@ -239,7 +239,12 @@ func get_fleet_stats() -> Dictionary:
 			haulers += 1
 			if active:
 				haulers_active += 1
-		bot_list.append({"id": b.id, "role": b.role, "tier": b.tier, "state": b.state})
+		# pos/cargo_total/carry_cap: additiivisia read-only-kenttiä (UI-REDESIGN Vaihe 4,
+		# scripts/ui_bot_status_overlay.gd) — eivät vaikuta bottilogiikkaan, vain UI lukee niitä.
+		bot_list.append({
+			"id": b.id, "role": b.role, "tier": b.tier, "state": b.state,
+			"pos": b.pos, "cargo_total": b.cargo_total, "carry_cap": b.carry_cap(),
+		})
 	return {
 		"miners": miners, "haulers": haulers,
 		"miners_active": miners_active, "haulers_active": haulers_active,

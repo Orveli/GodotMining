@@ -266,6 +266,11 @@ const START_MONEY := 0
 # Demo-kaari: tier-valitavoitteet (milestone) + demo complete. Signaalit UI kuuntelee.
 signal milestone(text: String)
 signal demo_complete()
+# UI-REDESIGN Vaihe 4: diegeettinen maailmaklikkaus (base/kone/vyöhyke). Emittöidään
+# _handle_input():sta kun mikään työkalu ei ole aktiivinen ja klikkaus osuu rekisteröityyn
+# kohteeseen — UI avaa kontekstipaneelin. kind: "base" | "furnace" | "crusher" | "zone".
+# data: { "kind": String, "obj": Object } (koneet/base) tai { "kind": "zone", "zone": Dictionary }.
+signal world_object_clicked(kind: String, data: Dictionary)
 var _milestones_fired: Dictionary = {}  # avain -> true (kukin valitavoite kerran)
 var _demo_completed: bool = false
 var _rare_earth_sold: bool = false      # RARE_EARTH toimitettu baseen -> demo complete
@@ -989,6 +994,25 @@ func _handle_input(_delta: float) -> void:
 		if coords.x >= 0:
 			placed_bombs.append({ "pos": coords, "timer": 3.0, "radius": bomb_radius })
 
+	elif left_just and not bomb_mode and build_mode == BUILD_NONE and not block_paint:
+		# UI-REDESIGN Vaihe 4: kun mikään työkalu ei ole aktiivinen (ei designaatiota,
+		# ei rakennustilaa, ei vyöhykesijoitusta — kaikki suljettu pois yllä olevilla early
+		# returneilla/ehdoilla), klikkaus rekisteröidyn diegeettisen kohteen (base/kone/
+		# vyöhyke) päällä ohjautuu AINA kontekstipaneeliin eikä koskaan hiekkamaalaukseen.
+		# Tarkoituksellinen valinta: kohteet ovat pieniä eivätkä peitä juuri mitään
+		# maalattavaa pintaa, ja Factorio-tyylinen "klikkaa kone -> GUI" on selkeämpi
+		# kuin arvailla milloin maalaus voittaisi. block_paint pidetään päällä koko
+		# painalluksen ajan (nollautuu irrotuksessa alla) ettei veto jatku maalauksena.
+		var coords := _mouse_to_grid()
+		var hit := _hit_test_world_target(coords) if coords.x >= 0 else {}
+		if not hit.is_empty():
+			world_object_clicked.emit(String(hit["kind"]), hit)
+			block_paint = true
+		elif coords.x >= 0:
+			if current_material == MAT_STONE:
+				is_painting_stone = true
+			_paint(coords.x, coords.y, current_material)
+
 	elif left_pressed and not block_paint and build_mode == BUILD_NONE and not bomb_mode:
 		var coords := _mouse_to_grid()
 		if coords.x >= 0:
@@ -1046,6 +1070,18 @@ func _mouse_to_grid() -> Vector2i:
 	if gx < 0 or gx >= W or gy < 0 or gy >= SIM_HEIGHT:
 		return Vector2i(-1, -1)
 	return Vector2i(gx, gy)
+
+
+# Käänteisoperaatio _mouse_to_grid():lle — muuntaa sim-pikselikoordinaatin ruutukoordinaatiksi
+# (huomioi zoomin/panorin, sillä ne asetetaan tämän Controlin transformiin _update_camera():ssa).
+# UI-REDESIGN Vaihe 4: käytetään kontekstipaneelien (base/kone/vyöhyke-popover, bottien
+# tilapalkit) sijoittamiseen maailmakohteen viereen. UI-juuri (CanvasLayer "UI") ei käytä
+# Camera2D:ia eikä omaa skaalausta, joten globaali transformi vastaa suoraan ruutupikseleitä.
+func grid_to_screen(grid_pos: Vector2) -> Vector2:
+	if size.x <= 0.0 or size.y <= 0.0:
+		return grid_pos
+	var local := Vector2(grid_pos.x / float(W) * size.x, grid_pos.y / float(SIM_HEIGHT) * size.y)
+	return get_global_transform() * local
 
 
 # Kokoaa fog-of-war-valonlähteet: base, botit, koneet ja asetellut lamput.
@@ -3015,6 +3051,60 @@ func _unregister_machine_zones(machine: Node) -> void:
 	if machine.has_meta("pickup_zone_id"):
 		logistics.remove_zone(int(machine.get_meta("pickup_zone_id")))
 		machine.remove_meta("pickup_zone_id")
+
+
+# ============================================================
+#  UI-REDESIGN Vaihe 4: diegeettinen maailmaklikkaus
+# ============================================================
+
+# Osumatestaa sim-pikselikoordinaatin rekisteröityihin diegeettisiin kohteisiin
+# (koneet -> base -> vyöhykkeet, pienimmästä jalanjäljestä suurimpaan). Palauttaa
+# tyhjän Dictionaryn jos mikään ei osu (kutsuja jatkaa normaalilla maalauksella).
+func _hit_test_world_target(coords: Vector2i) -> Dictionary:
+	for f in furnaces:
+		if is_instance_valid(f) and Rect2i(f.grid_pos, Vector2i(f.FURNACE_W, f.FURNACE_H)).has_point(coords):
+			return {"kind": "furnace", "obj": f}
+	for c in crushers:
+		if is_instance_valid(c) and Rect2i(c.grid_pos, Vector2i(c.CRUSHER_W, c.CRUSHER_H)).has_point(coords):
+			return {"kind": "crusher", "obj": c}
+	# Base (bottien koti) — vain 'base'-viite, ei muita myytäviä money_exit-rakennuksia
+	# (niitä ei voi tällä hetkellä sijoittaa ilman debug-näppäimiä, mutta suljetaan pois
+	# selvyyden vuoksi jos joskus muuttuu).
+	if base != null and is_instance_valid(base) and base in money_exits:
+		if Rect2i(base.grid_pos, Vector2i(base.EXIT_W, base.EXIT_H)).has_point(coords):
+			return {"kind": "base", "obj": base}
+	# Vyöhykkeet — pois lukien koneiden omat auto-rekisteröidyt intake/output-vyöhykkeet
+	# (niitä ei saa poistaa/suodattaa yleisellä vyöhykepopoverilla, ne kuuluvat koneelle).
+	if logistics != null:
+		var machine_zone_ids := _machine_zone_ids()
+		for z in logistics.get_zones():
+			if machine_zone_ids.has(int(z["id"])):
+				continue
+			var rect: Rect2i = z["rect"]
+			if rect.has_point(coords):
+				return {"kind": "zone", "zone": z}
+	return {}
+
+
+# Kokoaa kaikkien koneiden (furnace/crusher) logistiikkavyöhyke-ID:t poissuljettaviksi
+# yleisestä vyöhykeklikkauksesta (ks. _hit_test_world_target).
+func _machine_zone_ids() -> Dictionary:
+	var ids: Dictionary = {}
+	for f in furnaces:
+		if not is_instance_valid(f):
+			continue
+		if f.has_meta("dump_zone_id"):
+			ids[int(f.get_meta("dump_zone_id"))] = true
+		if f.has_meta("pickup_zone_id"):
+			ids[int(f.get_meta("pickup_zone_id"))] = true
+	for c in crushers:
+		if not is_instance_valid(c):
+			continue
+		if c.has_meta("dump_zone_id"):
+			ids[int(c.get_meta("dump_zone_id"))] = true
+		if c.has_meta("pickup_zone_id"):
+			ids[int(c.get_meta("pickup_zone_id"))] = true
+	return ids
 
 
 func _place_furnace(pos: Vector2) -> void:
