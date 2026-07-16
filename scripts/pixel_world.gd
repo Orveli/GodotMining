@@ -488,7 +488,11 @@ func _setup_compute() -> void:
 		return
 
 	# Poista Godotin #[compute] marker — RDShaderSource ei tarvitse sitä
-	glsl_source = glsl_source.replace("#[compute]\n", "")
+	# Normalisoi rivinvaihdot ENSIN: Windows-checkout (git autocrlf=true, ei .gitattributesia)
+	# tuottaa CRLF:n, jolloin "#[compute]\n"-strip ei osu -> marker jaa lahteeseen -> GLSL-
+	# kaannin kaatuu ("0:1: '#' invalid directive") -> gpu_ready=false -> peli putoaa headless-
+	# polulle ikkunallisenakin. CRLF->LF ensin, sitten marker pois.
+	glsl_source = glsl_source.replace("\r\n", "\n").replace("#[compute]\n", "")
 
 	var shader_source := RDShaderSource.new()
 	shader_source.source_compute = glsl_source
@@ -539,7 +543,11 @@ func _setup_transfer() -> void:
 		print("WARNING: Ei voitu lukea transfer.glsl — käytetään CPU-fallbackia")
 		return
 
-	glsl_source = glsl_source.replace("#[compute]\n", "")
+	# Normalisoi rivinvaihdot ENSIN: Windows-checkout (git autocrlf=true, ei .gitattributesia)
+	# tuottaa CRLF:n, jolloin "#[compute]\n"-strip ei osu -> marker jaa lahteeseen -> GLSL-
+	# kaannin kaatuu ("0:1: '#' invalid directive") -> gpu_ready=false -> peli putoaa headless-
+	# polulle ikkunallisenakin. CRLF->LF ensin, sitten marker pois.
+	glsl_source = glsl_source.replace("\r\n", "\n").replace("#[compute]\n", "")
 
 	var shader_source := RDShaderSource.new()
 	shader_source.source_compute = glsl_source
@@ -598,7 +606,11 @@ func _setup_render_compute() -> void:
 		print("WARNING: Ei voitu lukea render_compute.glsl — käytetään CPU-renderöintiä")
 		return
 
-	glsl_source = glsl_source.replace("#[compute]\n", "")
+	# Normalisoi rivinvaihdot ENSIN: Windows-checkout (git autocrlf=true, ei .gitattributesia)
+	# tuottaa CRLF:n, jolloin "#[compute]\n"-strip ei osu -> marker jaa lahteeseen -> GLSL-
+	# kaannin kaatuu ("0:1: '#' invalid directive") -> gpu_ready=false -> peli putoaa headless-
+	# polulle ikkunallisenakin. CRLF->LF ensin, sitten marker pois.
+	glsl_source = glsl_source.replace("\r\n", "\n").replace("#[compute]\n", "")
 
 	var shader_source := RDShaderSource.new()
 	shader_source.source_compute = glsl_source
@@ -837,6 +849,9 @@ func _process(delta: float) -> void:
 		if _cpu_ca_enabled:
 			var _fdt := 1.0 / 60.0
 			_step_cpu_ca()
+			# Money exitit: putoavat pikselit syodaan rahaksi myos headless-cpu_ca-ajossa
+			# (GPU-polussa tama tehdaan Vaihe 5.65:ssa; headless-haara jai ilman -> lisataan tahan).
+			_update_money_exits(_fdt * sim_speed)
 			# Hihnat kulkevat sim_speed-kertoimella (sama pelin pikakelaus kuin GPU-polussa),
 			# jotta kuljetus ehtii valmistua headless-skenaarion frame-budjetissa.
 			_update_conveyors(_fdt * sim_speed)
