@@ -76,17 +76,15 @@ func _process(_delta: float) -> void:
 		gpu_t = float(gpu_val)
 	var conv_arr = pixel_world.get("conveyors")
 	var furn_arr = pixel_world.get("furnaces")
-	var mine_arr = pixel_world.get("sand_mines")
 	var laun_arr = pixel_world.get("launchers")
 	var fly_arr = pixel_world.get("flying_pixels")
 	_info_label.text = (
 		"FPS: %d   GPU: %.1fms   Kappaleet: %d   "
-		+ "Hihnoja: %d   Uuneja: %d   Kaivoksia: %d   Linkoja: %d   Lentäviä: %d"
+		+ "Hihnoja: %d   Uuneja: %d   Linkoja: %d   Lentäviä: %d"
 	) % [
 		fps, gpu_t, bodies,
 		conv_arr.size() if conv_arr != null else 0,
 		furn_arr.size() if furn_arr != null else 0,
-		mine_arr.size() if mine_arr != null else 0,
 		laun_arr.size() if laun_arr != null else 0,
 		fly_arr.size() if fly_arr != null else 0,
 	]
@@ -685,7 +683,7 @@ func _delete_all_buildings() -> void:
 	if pixel_world == null:
 		return
 	var grid_data = pixel_world.get("grid")
-	for arr_name in ["launchers", "conveyors", "furnaces", "sand_mines"]:
+	for arr_name in ["launchers", "conveyors", "furnaces"]:
 		var arr = pixel_world.get(arr_name)
 		if arr == null:
 			continue

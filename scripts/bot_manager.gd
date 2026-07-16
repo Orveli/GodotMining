@@ -399,9 +399,9 @@ func _crowd_neighbors(b: Bot, radius: float) -> Array:
 	return res
 
 
-# Ruuhkakerroin 0..1 KERROSTA 3 varten (EI viela kaytossa tuotantologiikassa). Hidastaa
-# tyotahtia tungoksessa: n = muut botit CONGEST_RADIUS-sateella. Kayra: 0-1 naapuria -> 1.0;
-# 2 -> ~0.714; 3 -> ~0.556; paljon -> lattia CONGEST_FLOOR (0.25).
+# Ruuhkakerroin 0..1 (KERROS 3): kaytossa imussa ja dumpissa (_work_vacuum/_st_dump).
+# Hidastaa tyotahtia tungoksessa: n = muut botit CONGEST_RADIUS-sateella. Kayra: 0-1 naapuria
+# -> 1.0; 2 -> ~0.714; 3 -> ~0.556; paljon -> lattia CONGEST_FLOOR (0.25).
 func _crowd_factor(b: Bot) -> float:
 	var n := _crowd_neighbors(b, CONGEST_RADIUS).size()
 	return maxf(1.0 / (1.0 + CONGEST_K * float(maxi(0, n - CONGEST_FREE))), CONGEST_FLOOR)
