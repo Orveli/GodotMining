@@ -250,6 +250,41 @@ var bot_manager: BotManager           # bottien tilakone + tyonjako
 var bot_overlay: Node2D               # designaatio- + botti-piirto (building_layerin lapsi)
 var designation_mode: bool = false    # V-nappain: louhinta-alueen maalaus paalla/pois
 var _bot_logic_accum: float = 0.0     # kumuloitu delta bottien logiikkatikkia varten
+
+# === DEMO-KAARI & TALOUS (Lane G) ===
+# Logistiikan datamalli (pickup/dump/base-filtteri). bot_manager poimii taman
+# world.get("logistics"):lla. Luodaan _init_bot_sim():ssa ennen bot_manager.setupia.
+var logistics: Logistics
+# Tulomittari: 10 s liukuva keskiarvo money_exitien earned_total-deltasta (UI:n $/s).
+var income_per_s: float = 0.0
+var _income_window: Array = []        # [{ "t": float, "d": float }] per-frame tulodeltat
+var _income_time: float = 0.0         # kumulatiivinen aika income-ikkunalle
+var _income_last_total: int = 0       # edellisen framen money_exitien earned_total-summa
+const INCOME_WINDOW_S := 10.0         # liukuvan keskiarvon ikkuna
+# Aloitusraha: 2 aloitusbottia tuottaa ~3 $/s pinnalla; botti maksaa 300 -> eka osto ~2-3 min.
+const START_MONEY := 0
+# Demo-kaari: tier-valitavoitteet (milestone) + demo complete. Signaalit UI kuuntelee.
+signal milestone(text: String)
+signal demo_complete()
+var _milestones_fired: Dictionary = {}  # avain -> true (kukin valitavoite kerran)
+var _demo_completed: bool = false
+var _rare_earth_sold: bool = false      # RARE_EARTH toimitettu baseen -> demo complete
+var _bots_carrying_rare: Dictionary = {}  # bot_id -> true (seuraa kuorman purkua)
+var _refined_first: bool = false        # eka harkko jalostettu (furnace-output)
+# Rakennuksen/vyohykkeen sijoituksen rahavaraus (peruutus palauttaa). Committoituu kun sijoitettu.
+var _build_reserved_cost: int = 0
+var _zone_reserved_cost: int = 0
+const ZONE_COST_PICKUP := 80
+const ZONE_COST_DUMP := 60
+# Designaatiotyokalun moodi: 0=pensseli (hold+brush), 1=laatikkoveto, 2=yksittaissolu.
+var designation_tool_mode: int = 0
+var _desig_drag_active: bool = false
+var _desig_drag_start: Vector2i = Vector2i.ZERO
+var _desig_drag_add: bool = true
+# Vyohyke-sijoitustila: -1=ei, 0=pickup, 1=dump. Veto-suorakulmio kuten laatikkodesignaatio.
+var zone_placement_type: int = -1
+var _zone_drag_active: bool = false
+var _zone_drag_start: Vector2i = Vector2i.ZERO
 var launcher_phase: int = 0    # 0=ei aktiivinen, 1=pohja, 2=katto, 3=suunta
 var launcher_start: Vector2i = Vector2i.ZERO
 var launcher_end: Vector2i = Vector2i.ZERO
@@ -817,6 +852,13 @@ func _process(delta: float) -> void:
 				bot_manager.tick(_bot_logic_accum)
 				_bot_logic_accum = 0.0
 
+	# Talousmittari (liukuva $/s) + demo-kaaren tier-valitavoitteet joka frame.
+	_update_economy(delta)
+
+	# Piirra vyohyke-/laatikkoveto-esikatselu jatkuvasti vedon aikana.
+	if (_zone_drag_active or _desig_drag_active) and bot_overlay != null:
+		bot_overlay.queue_redraw()
+
 	# Scenario runner — ajetaan ennen renderöintiä jotta fill_rect näkyy heti
 	if _scenario_active:
 		_scenario_tick()
@@ -850,16 +892,23 @@ func _handle_input(_delta: float) -> void:
 	var left_just := left_pressed and not prev_left_pressed
 	var right_just := right_pressed and not prev_right_pressed
 
-	# Designaatio-moodi: vasen maalaa louhinta-alueen, oikea poistaa.
-	# Tavallinen materiaalimaalaus/kaivuu EI aktivoidu tassa moodissa.
+	# Vyohyke-sijoitustila: veto-suorakulmio pickup/dump-vyohykkeelle (oikea/Esc peruu).
+	if zone_placement_type >= 0:
+		_handle_zone_placement_input(left_pressed, right_pressed, left_just, right_just)
+		prev_left_pressed = left_pressed
+		prev_right_pressed = right_pressed
+		return
+
+	# Designaatio-moodi: 3 tyokalumoodia (pensseli/laatikko/solu). Kaivuu ei aktivoidu.
 	if designation_mode:
-		if left_pressed or right_pressed:
-			var dc := _mouse_to_grid()
-			if dc.x >= 0 and desig != null:
-				var old_ver: int = desig.version
-				desig.paint_px_rect(_brush_px_rect(dc.x, dc.y), left_pressed)
-				if desig.version != old_ver and bot_overlay != null:
-					bot_overlay.queue_redraw()
+		_handle_designation_input(left_pressed, right_pressed, left_just, right_just)
+		prev_left_pressed = left_pressed
+		prev_right_pressed = right_pressed
+		return
+
+	# Oikea hiiri peruu vireilla olevan rakennuksen sijoituksen (palauttaa rahat) — ei kaiva.
+	if right_just and build_mode != BUILD_NONE and build_mode != BUILD_SELL:
+		_cancel_pending_build()
 		prev_left_pressed = left_pressed
 		prev_right_pressed = right_pressed
 		return
@@ -884,12 +933,14 @@ func _handle_input(_delta: float) -> void:
 				var end_pos := _snap_to_belt_end(_snap_to_grid(grid_pos))
 				end_pos = _constrain_45(conveyor_start_pos, end_pos)
 				_create_conveyor(conveyor_start_pos, end_pos)
-				# Jää hihna-moodiin — valmis sijoittamaan seuraavan
+				# Segmentti maksettu (kulutettu varauksesta). Varaa seuraava hihna per segmentti.
 				build_mode = BUILD_CONVEYOR_START
 				block_paint = true
+				_reserve_next_conveyor()
 			elif build_mode == BUILD_FURNACE:
 				_place_furnace(grid_pos)
 				block_paint = true
+				_finish_single_placement()
 			elif build_mode == BUILD_SLING:
 				# Hissi-linko on debug-rakennus — sijoitus vaatii debug-näppäimet
 				if not _debug_hotkey_blocked():
@@ -908,9 +959,11 @@ func _handle_input(_delta: float) -> void:
 			elif build_mode == BUILD_MONEY_EXIT:
 				_place_money_exit(grid_pos)
 				block_paint = true
+				_finish_single_placement()
 			elif build_mode == BUILD_CRUSHER:
 				_place_crusher(grid_pos)
 				block_paint = true
+				_finish_single_placement()
 			elif build_mode == BUILD_DRILL:
 				# Pora on debug-rakennus — sijoitus vaatii debug-näppäimet
 				if not _debug_hotkey_blocked():
@@ -1403,10 +1456,30 @@ func _init_bot_sim() -> void:
 	paint_pending = true
 	# Rakenna navigaatiokartta valmiista gridista
 	nav.rebuild_full(grid)
+	# Luo tuore logistiikkamalli (nollaa vyohykkeet + base-filtteri uuteen peliin).
+	# Asetetaan bot_managerille suoraan, jotta regenerate ei jata vanhaa viitetta roikkumaan.
+	logistics = Logistics.new()
 	# Alusta bottimanageri ja spawnaa 1 miner + 1 hauler basen ylapuolelle
 	bot_manager.bots.clear()
 	bot_manager.dig_sites.clear()
+	bot_manager.logistics = logistics
 	bot_manager.setup(self)
+	# Nollaa talous- ja demo-kaaren tila uuteen peliin
+	money = START_MONEY
+	income_per_s = 0.0
+	_income_window.clear()
+	_income_time = 0.0
+	_income_last_total = 0
+	_milestones_fired.clear()
+	_demo_completed = false
+	_rare_earth_sold = false
+	_bots_carrying_rare.clear()
+	_refined_first = false
+	_build_reserved_cost = 0
+	_zone_reserved_cost = 0
+	zone_placement_type = -1
+	_desig_drag_active = false
+	_zone_drag_active = false
 	# Hajauta spawnit ettei botit ole paallekkain yhtena taplana (miner vasemmalle, hauler oikealle)
 	bot_manager.add_bot(Bot.Role.MINER, base.spawn_pos() + Vector2(-14, 0))
 	bot_manager.add_bot(Bot.Role.HAULER, base.spawn_pos() + Vector2(14, 0))
@@ -1430,6 +1503,272 @@ func mvp_write_pixel(x: int, y: int, mat: int) -> void:
 	if mat != MAT_EMPTY:
 		color_seed[idx] = randi() % 256
 	paint_pending = true
+
+
+# ============================================================
+#  Talouden sulku & sijoitus-API (Lane G — API_CONTRACT_demo.md)
+#  UI (ui.gd) kutsuu naita has_method-guardin takaa.
+# ============================================================
+
+# Rakennuksen ostohinta build_mode-vakion perusteella; -1 = ei hinnoiteltu (debug-rakennus).
+func _build_cost_for(build_type: int) -> int:
+	match build_type:
+		BUILD_FURNACE: return BUILDING_COSTS.get("furnace", 0)
+		BUILD_CRUSHER: return BUILDING_COSTS.get("crusher", 0)
+		BUILD_CONVEYOR_START, BUILD_CONVEYOR_END: return BUILDING_COSTS.get("conveyor", 0)
+		BUILD_MONEY_EXIT: return BUILDING_COSTS.get("money_exit", 0)
+		BUILD_DRILL: return BUILDING_COSTS.get("drill", 0)
+		BUILD_SLING: return BUILDING_COSTS.get("launcher", 0)
+	return -1
+
+
+# Osta rakennus: can_afford + money -=. UI kutsuu ENNEN sijoitustilaa. Varaus (_build_reserved_cost)
+# palautetaan peruutuksessa (Esc/oikea hiiri) ja nollataan kun rakennus tosiasiassa sijoitetaan.
+# Hihna veloitetaan per segmentti: jokainen valmistunut hihna varaa seuraavan (ks. _handle_input).
+func try_buy_building(build_type: int) -> bool:
+	var cost := _build_cost_for(build_type)
+	if cost <= 0:
+		return true  # ei hinnoiteltu (debug) -> salli ilman veloitusta
+	if not (infinite_money or money >= cost):
+		return false
+	if not infinite_money:
+		money -= cost
+		_build_reserved_cost = cost
+	else:
+		_build_reserved_cost = 0
+	return true
+
+
+# Peruuta vireilla oleva rakennuksen sijoitus ja palauta varatut rahat.
+func _cancel_pending_build() -> void:
+	if _build_reserved_cost > 0:
+		money += _build_reserved_cost
+		_build_reserved_cost = 0
+	build_mode = BUILD_NONE
+	block_paint = false
+
+
+# Kertaostoisen rakennuksen sijoitus valmistui: committoi varaus ja poistu sijoitustilasta.
+# Vain kun ostettu UI:sta (varaus > 0) — debug-nappainpolku (varaus 0) sailyttaa vanhan
+# monisijoitus-kayttaytymisen.
+func _finish_single_placement() -> void:
+	if _build_reserved_cost > 0:
+		_build_reserved_cost = 0
+		build_mode = BUILD_NONE
+
+
+# Hihna veloitetaan per segmentti: kun segmentti valmistui, committoi varaus ja varaa seuraava.
+# Jos seuraavaan ei ole varaa, poistu hihnamoodista (viimeista varausta ei jaa roikkumaan).
+func _reserve_next_conveyor() -> void:
+	_build_reserved_cost = 0  # juuri sijoitettu segmentti maksettu
+	if infinite_money:
+		return
+	var cost := _build_cost_for(BUILD_CONVEYOR_START)
+	if cost <= 0:
+		return
+	if money >= cost:
+		money -= cost
+		_build_reserved_cost = cost
+	else:
+		build_mode = BUILD_NONE
+		block_paint = false
+		_show_toast("Ei varaa seuraavaan hihnaan ($%d)" % cost)
+
+
+# Aloita logistiikkavyohykkeen sijoitus (0=pickup 80, 1=dump 60). Veloittaa heti; peruutus
+# (Esc/oikea hiiri) palauttaa. Sijoitus: vasen hiiri veto -> suorakulmio -> logistics.add_*.
+func begin_zone_placement(zone_type: int) -> void:
+	if logistics == null:
+		return
+	var cost := ZONE_COST_PICKUP if zone_type == 0 else ZONE_COST_DUMP
+	if not (infinite_money or money >= cost):
+		_show_toast("Ei varaa vyöhykkeeseen ($%d)" % cost)
+		return
+	if not infinite_money:
+		money -= cost
+		_zone_reserved_cost = cost
+	else:
+		_zone_reserved_cost = 0
+	zone_placement_type = zone_type
+	build_mode = BUILD_NONE
+	designation_mode = false
+	_desig_drag_active = false
+	_show_toast("Sijoita %s: vasen hiiri veto, oikea/Esc peruu" % ("pickup" if zone_type == 0 else "dump"))
+
+
+func _cancel_zone_placement() -> void:
+	if _zone_reserved_cost > 0:
+		money += _zone_reserved_cost
+		_zone_reserved_cost = 0
+	zone_placement_type = -1
+	_zone_drag_active = false
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+
+
+# Designaatiotyokalun moodi (0=pensseli, 1=laatikkoveto, 2=yksittaissolu).
+func set_designation_tool_mode(mode: int) -> void:
+	designation_tool_mode = clampi(mode, 0, 2)
+	_desig_drag_active = false
+
+
+# ============================================================
+#  Talousmittari + demo-kaari (joka frame _processissa)
+# ============================================================
+
+func _update_economy(delta: float) -> void:
+	if base == null or not is_instance_valid(base):
+		return
+	_update_income(delta)
+	_update_demo_arc()
+
+
+# 10 s liukuva tulokeskiarvo money_exitien earned_total-summasta. Kestaa basen
+# uudelleenluonnin (negatiivinen delta clampataan nollaan).
+func _update_income(delta: float) -> void:
+	_income_time += delta
+	var total := 0
+	for me in money_exits:
+		if is_instance_valid(me):
+			total += me.earned_total
+	var d := total - _income_last_total
+	_income_last_total = total
+	if d < 0:
+		d = 0  # base regeneroitu -> ohita negatiivinen hyppy
+	_income_window.append({"t": _income_time, "d": float(d)})
+	while not _income_window.is_empty() and _income_time - float(_income_window[0]["t"]) > INCOME_WINDOW_S:
+		_income_window.pop_front()
+	var sum := 0.0
+	for s in _income_window:
+		sum += float(s["d"])
+	var span: float = minf(_income_time, INCOME_WINDOW_S)
+	income_per_s = sum / maxf(span, 1.0)
+
+
+func _fire_milestone(key: String, text: String) -> void:
+	if _milestones_fired.has(key):
+		return
+	_milestones_fired[key] = true
+	milestone.emit(text)
+
+
+# Tier-valitavoitteet + demo complete. Kukin valitavoite laukeaa kerran (idempotentti).
+func _update_demo_arc() -> void:
+	if desig != null and desig.any_active():
+		_fire_milestone("first_desig", "Ensimmäinen louhinta-alue merkattu!")
+	if money >= 100:
+		_fire_milestone("m100", "$100 kasassa — kohta ensimmäinen lisäbotti!")
+	if bot_manager != null and bot_manager.bot_count() > 2:
+		_fire_milestone("first_bot", "Ensimmäinen ostettu botti — lauma kasvaa!")
+	if furnaces.size() + crushers.size() > 0:
+		_fire_milestone("first_machine", "Ensimmäinen jalostuskone rakennettu!")
+	if _refined_first:
+		_fire_milestone("first_ingot", "Ensimmäinen harkko jalostettu! Jalostettu myy enemmän.")
+	# Kupari/harvinaismaa loytyy botin kuormasta; harvinaismaan purku baseen -> demo complete.
+	if bot_manager != null:
+		for b in bot_manager.bots:
+			if int(b.cargo.get(MAT_COPPER, 0)) > 0:
+				_fire_milestone("copper", "Kuparia löytyi syvyyksistä!")
+			var re: int = int(b.cargo.get(MAT_RARE_EARTH, 0))
+			if re > 0:
+				_fire_milestone("rare", "Harvinaista maametallia löytyi!")
+				_bots_carrying_rare[b.id] = true
+			elif _bots_carrying_rare.has(b.id):
+				# Kuormassa ei enaa harvinaismaata -> purettu (baseen) -> myyty.
+				_bots_carrying_rare.erase(b.id)
+				_rare_earth_sold = true
+	if money >= 1000:
+		_fire_milestone("m1000", "$1000 — tehdas rullaa!")
+	if money >= 5000:
+		_fire_milestone("m5000", "$5000 — kohti demo-maalia!")
+	if not _demo_completed and (money >= 10000 or _rare_earth_sold):
+		_demo_completed = true
+		demo_complete.emit()
+
+
+# ============================================================
+#  Designaatio- ja vyohyke-input (kutsutaan _handle_inputista)
+# ============================================================
+
+# Muodosta pikselisuorakulmio kahdesta solu/pikselipisteesta; min-koko varmistaa klik-sijoituksen.
+func _rect_from_points(a: Vector2i, b: Vector2i, min_size: int) -> Rect2i:
+	var x0: int = mini(a.x, b.x)
+	var y0: int = mini(a.y, b.y)
+	var x1: int = maxi(a.x, b.x)
+	var y1: int = maxi(a.y, b.y)
+	var w: int = x1 - x0 + 1
+	var h: int = y1 - y0 + 1
+	if w < min_size:
+		x0 = a.x - min_size / 2
+		w = min_size
+	if h < min_size:
+		y0 = a.y - min_size / 2
+		h = min_size
+	return Rect2i(x0, y0, w, h)
+
+
+# Designaatiomaalaus kolmessa moodissa. Palauttaa true jos overlay pitaa piirtaa uudelleen.
+func _handle_designation_input(left_pressed: bool, right_pressed: bool, left_just: bool, right_just: bool) -> void:
+	if desig == null:
+		return
+	var dc := _mouse_to_grid()
+	match designation_tool_mode:
+		2:  # Yksittaissolu: klik togglaa yhden solun, oikea poistaa
+			if left_just and dc.x >= 0:
+				var cx := dc.x / DesignationGrid.CELL
+				var cy := dc.y / DesignationGrid.CELL
+				var cur := desig.get_cell(cx, cy)
+				desig.set_cell(cx, cy, DesignationGrid.D_NONE if cur != DesignationGrid.D_NONE else DesignationGrid.D_QUEUED)
+				if bot_overlay != null:
+					bot_overlay.queue_redraw()
+			elif right_just and dc.x >= 0:
+				desig.set_cell(dc.x / DesignationGrid.CELL, dc.y / DesignationGrid.CELL, DesignationGrid.D_NONE)
+				if bot_overlay != null:
+					bot_overlay.queue_redraw()
+		1:  # Laatikkoveto: paina-vedä-vapauta -> suorakulmio
+			if (left_just or right_just) and dc.x >= 0:
+				_desig_drag_active = true
+				_desig_drag_start = dc
+				_desig_drag_add = left_just
+			if _desig_drag_active and not left_pressed and not right_pressed:
+				_desig_drag_active = false
+				var end := dc if dc.x >= 0 else _desig_drag_start
+				var rect := _rect_from_points(_desig_drag_start, end, DesignationGrid.CELL)
+				var old_ver: int = desig.version
+				desig.paint_px_rect(rect, _desig_drag_add)
+				if desig.version != old_ver and bot_overlay != null:
+					bot_overlay.queue_redraw()
+		_:  # 0 = pensseli: pidä pohjassa + maalaa säteellä
+			if (left_pressed or right_pressed) and dc.x >= 0:
+				var old_ver: int = desig.version
+				desig.paint_px_rect(_brush_px_rect(dc.x, dc.y), left_pressed)
+				if desig.version != old_ver and bot_overlay != null:
+					bot_overlay.queue_redraw()
+
+
+# Vyohykkeen sijoitus (pickup/dump): veto-suorakulmio, oikea/Esc peruu ja palauttaa rahat.
+func _handle_zone_placement_input(left_pressed: bool, right_pressed: bool, left_just: bool, right_just: bool) -> void:
+	if right_just:
+		_cancel_zone_placement()
+		return
+	var dc := _mouse_to_grid()
+	if left_just and dc.x >= 0:
+		_zone_drag_active = true
+		_zone_drag_start = dc
+	if _zone_drag_active and not left_pressed:
+		_zone_drag_active = false
+		var end := dc if dc.x >= 0 else _zone_drag_start
+		var rect := _rect_from_points(_zone_drag_start, end, 24)
+		if logistics != null:
+			if zone_placement_type == 0:
+				logistics.add_pickup_point(rect, 0)
+			else:
+				logistics.add_dump_point(rect, 0)
+		_zone_reserved_cost = 0
+		zone_placement_type = -1
+		_show_toast("Vyöhyke sijoitettu")
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
 
 
 # Suorituskykytesti: generoi maailma → odota asettumista → räjäytä 3 kertaa → mittaa frame-spiikit.
@@ -1664,10 +2003,15 @@ func _input(event: InputEvent) -> void:
 				if not _debug_hotkey_blocked():
 					regenerate_world()
 			KEY_ESCAPE:
-				if build_mode != BUILD_NONE:
+				if zone_placement_type >= 0:
+					_cancel_zone_placement()
+					print("Vyöhyke-sijoitus peruttu")
+				elif build_mode != BUILD_NONE:
 					if build_mode == BUILD_SELL:
 						_clear_sell_overlay()
-					build_mode = BUILD_NONE
+						build_mode = BUILD_NONE
+					else:
+						_cancel_pending_build()
 					print("Rakennustila peruttu")
 				elif bomb_mode:
 					bomb_mode = false
@@ -2641,6 +2985,38 @@ func _clear_conveyors() -> void:
 	conveyors.clear()
 
 
+# Rekisteroi koneen logistiikkavyohykkeet: (1) input-dump koneen intaken paalle
+# (hauler tuo raakamalmin reseptin mukaan), (2) pickup-vyohyke outputin alle (hauler
+# vie jalostetun eteenpain). Vyohyke-id:t talletetaan koneen metadataan -> poistetaan
+# kun kone myydaan. Furnace-harkot (IRON/GOLD/GLASS) ovat rigid-bodyja joita hauler ei
+# imuroi (vain granulaarit) -> ne reititetaan baseen hihnalla; pickup palvelee crusherin
+# granulaarista SAND-outputtia.
+func _register_machine_zones(machine: Node) -> void:
+	if logistics == null or machine == null:
+		return
+	if machine.has_method("get_input_dump"):
+		var dump: Dictionary = machine.get_input_dump()
+		var dump_id := logistics.add_dump_point(dump.get("rect", Rect2i()), int(dump.get("filter_mask", 0)))
+		machine.set_meta("dump_zone_id", dump_id)
+	if machine.has_method("get_output_center"):
+		var oc: Vector2i = machine.get_output_center()
+		var pickup_rect := Rect2i(oc.x - 12, oc.y, 24, 22)
+		var pickup_id := logistics.add_pickup_point(pickup_rect, 0)
+		machine.set_meta("pickup_zone_id", pickup_id)
+
+
+# Poista koneen logistiikkavyohykkeet (kutsutaan myynnissa).
+func _unregister_machine_zones(machine: Node) -> void:
+	if logistics == null or machine == null:
+		return
+	if machine.has_meta("dump_zone_id"):
+		logistics.remove_zone(int(machine.get_meta("dump_zone_id")))
+		machine.remove_meta("dump_zone_id")
+	if machine.has_meta("pickup_zone_id"):
+		logistics.remove_zone(int(machine.get_meta("pickup_zone_id")))
+		machine.remove_meta("pickup_zone_id")
+
+
 func _place_furnace(pos: Vector2) -> void:
 	var FurnaceScript := preload("res://scripts/furnace.gd")
 	var furnace = FurnaceScript.new()
@@ -2649,6 +3025,7 @@ func _place_furnace(pos: Vector2) -> void:
 	building_layer.add_child(furnace)
 	furnaces.append(furnace)
 	_register_building_pixels(furnace.structure_pixels)
+	_register_machine_zones(furnace)
 	paint_pending = true
 	print("Uuni asetettu: ", pos)
 
@@ -2663,6 +3040,7 @@ func _update_furnaces(delta: float) -> bool:
 		if f.glass_ready:
 			f.glass_ready = false
 			_spawn_smelted_body(f.glass_drop_pos, f.output_material)
+			_refined_first = true  # demo-kaari: eka harkko jalostettu
 			modified = true
 		if f.broken:
 			_unregister_building_pixels(f.structure_pixels)
@@ -2735,6 +3113,7 @@ func _place_crusher(pos: Vector2) -> void:
 	building_layer.add_child(c)
 	crushers.append(c)
 	_register_building_pixels(c.structure_pixels)
+	_register_machine_zones(c)
 	paint_pending = true
 	print("Murskaaja asetettu: ", pos)
 	_auto_connect_conveyor(c)
@@ -3332,6 +3711,10 @@ func _sell_building_at(grid_pos: Vector2) -> void:
 					grid[sp.y * W + sp.x] = MAT_EMPTY
 					color_seed[sp.y * W + sp.x] = randi() % 256
 
+	# Poista koneen logistiikkavyohykkeet (furnace/crusher input-dump + output-pickup)
+	if obj is Object and (obj.has_meta("dump_zone_id") or obj.has_meta("pickup_zone_id")):
+		_unregister_machine_zones(obj)
+
 	# Maksa 50% takaisin
 	var base_cost: int = BUILDING_COSTS.get(cost_key, 0)
 	var refund: int = base_cost / 2
@@ -3447,6 +3830,29 @@ func _draw_bot_overlay() -> void:
 				bot_overlay.draw_rect(
 					Rect2(float(dx) * cell, float(dy) * cell, cell, cell), col, true
 				)
+	# Logistiikkavyohykkeet: pickup (vihrea) + dump (sininen) suorakulmiot reunaviivalla
+	if logistics != null:
+		for z in logistics.get_zones():
+			var zr: Rect2i = z["rect"]
+			var is_pickup: bool = String(z["type"]) == "pickup"
+			var fill := Color(0.25, 0.85, 0.45, 0.12) if is_pickup else Color(0.35, 0.6, 1.0, 0.12)
+			var edge := Color(0.3, 0.95, 0.5, 0.75) if is_pickup else Color(0.45, 0.7, 1.0, 0.75)
+			var r2 := Rect2(float(zr.position.x), float(zr.position.y), float(zr.size.x), float(zr.size.y))
+			bot_overlay.draw_rect(r2, fill, true)
+			bot_overlay.draw_rect(r2, edge, false, 1.0)
+
+	# Veto-esikatselu (vyohyke tai laatikkodesignaatio) — kevyt reunaviiva hiiren ja startin valiin
+	if _zone_drag_active or _desig_drag_active:
+		var cur := _mouse_to_grid()
+		if cur.x >= 0:
+			var start := _zone_drag_start if _zone_drag_active else _desig_drag_start
+			var min_sz := 24 if _zone_drag_active else DesignationGrid.CELL
+			var pr := _rect_from_points(start, cur, min_sz)
+			var pcol := Color(0.9, 0.9, 0.4, 0.9)
+			if _zone_drag_active:
+				pcol = Color(0.3, 0.95, 0.5, 0.9) if zone_placement_type == 0 else Color(0.45, 0.7, 1.0, 0.9)
+			bot_overlay.draw_rect(Rect2(float(pr.position.x), float(pr.position.y), float(pr.size.x), float(pr.size.y)), pcol, false, 1.0)
+
 	# Botit
 	if bot_manager != null:
 		bot_manager.draw_bots(bot_overlay)
@@ -3499,11 +3905,31 @@ func _save_ai_screenshot() -> void:
 		MAT_GRAVEL: "GRAVEL", MAT_BEDROCK: "BEDROCK",
 		MAT_COPPER: "COPPER", MAT_RARE_EARTH: "RARE_EARTH"
 	}
+	# Demo-kaari: raha, tulomittari, laumatilastot, logistiikkavyohykkeet (JSON-turvallisina).
+	var fleet_stats: Dictionary = {}
+	if bot_manager != null and bot_manager.has_method("get_fleet_stats"):
+		fleet_stats = bot_manager.get_fleet_stats()
+	var zones_out: Array = []
+	if logistics != null:
+		for z in logistics.get_zones():
+			var zr: Rect2i = z["rect"]
+			zones_out.append({
+				"id": z["id"], "type": z["type"], "filter_mask": z["filter_mask"],
+				"rect": {"x": zr.position.x, "y": zr.position.y, "w": zr.size.x, "h": zr.size.y},
+			})
+
 	var state: Dictionary = {
 		"timestamp": Time.get_datetime_string_from_system(),
 		"fps": Engine.get_frames_per_second(),
 		"sim_speed": sim_speed,
 		"cam_pos": {"x": int(cam_grid_pos.x), "y": int(cam_grid_pos.y)},
+		"money": money,
+		"income_per_s": snappedf(income_per_s, 0.1),
+		"fleet": fleet_stats,
+		"logistics_zones": zones_out,
+		"logistics_base_filter": (logistics.base_filter if logistics != null else 0),
+		"demo_completed": _demo_completed,
+		"milestones_fired": _milestones_fired.keys(),
 		"bomb_mode": bomb_mode,
 		"placed_bombs": placed_bombs.size(),
 		"material": {
@@ -3973,6 +4399,51 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 				print("ScenarioRunner: PASS  [%s] money=%d > %d" % [mlabel, money, mmin])
 			else:
 				print("ScenarioRunner: FAIL  [%s] money=%d, odotettu > %d" % [mlabel, money, mmin])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_money_lt":
+			var lmax: int = step.get("max", 0)
+			var llabel: String = step.get("label", "")
+			if money < lmax:
+				print("ScenarioRunner: PASS  [%s] money=%d < %d" % [llabel, money, lmax])
+			else:
+				print("ScenarioRunner: FAIL  [%s] money=%d, odotettu < %d" % [llabel, money, lmax])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"set_money":
+			money = step.get("amount", 0)
+			print("ScenarioRunner: set_money %d" % money)
+		"set_base_filter":
+			# Base-filtteri bittimaskina TAI materiaali-ID-listana (kumpi tahansa).
+			var bf: int = 0
+			if step.has("mask"):
+				bf = int(step.get("mask", 0))
+			elif step.has("mats"):
+				for m in step.get("mats", []):
+					bf |= 1 << int(m)
+			if logistics != null:
+				logistics.set_base_filter(bf)
+			print("ScenarioRunner: set_base_filter mask=%d" % bf)
+		"buy_bot":
+			# Osta botteja skriptista (bot_manager.buy_bot). role 0=miner 1=hauler, count kpl.
+			var brole: int = step.get("role", 0)
+			var bcount: int = step.get("count", 1)
+			var bought := 0
+			if bot_manager != null:
+				for _i in bcount:
+					if bot_manager.buy_bot(brole):
+						bought += 1
+			print("ScenarioRunner: buy_bot role=%d pyydetty=%d ostettu=%d money=%d fleet=%d" % [
+				brole, bcount, bought, money, (bot_manager.bot_count() if bot_manager != null else 0)])
+		"assert_fleet":
+			var fmin: int = step.get("min", 0)
+			var fmax: int = step.get("max", 999999)
+			var flabel: String = step.get("label", "")
+			var fcount := bot_manager.bot_count() if bot_manager != null else 0
+			if fcount >= fmin and fcount <= fmax:
+				print("ScenarioRunner: PASS  [%s] fleet=%d [%d, %d]" % [flabel, fcount, fmin, fmax])
+			else:
+				print("ScenarioRunner: FAIL  [%s] fleet=%d, odotettu [%d, %d]" % [flabel, fcount, fmin, fmax])
 				_scenario_failures += 1
 			_scenario_tests += 1
 		"assert_bots_moved":

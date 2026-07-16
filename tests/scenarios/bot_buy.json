@@ -1,0 +1,18 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "G2: bottien osto skriptista (bot_manager.buy_bot). Todistaa suljetun talousluupin osto-puolen: raha vahenee ja lauma kasvaa, JA nouseva hinta (300 * 1.5^n) estaa oston kun rahaa ei riita. Ajetaan headlessina (gpu_ready=false) kuten mvp_core_loop — ei tarvitse GPU:ta eika CA:ta, vain bot_managerin osto-API:n.",
+  "steps": [
+    { "cmd": "assert_fleet", "min": 2, "max": 2, "label": "aloituslauma = 2 bottia (1 miner + 1 hauler)" },
+
+    { "cmd": "set_money", "amount": 400 },
+    { "cmd": "buy_bot", "role": 0, "count": 1 },
+    { "cmd": "assert_fleet", "min": 3, "max": 3, "label": "eka osto kasvatti lauman 3:een" },
+    { "cmd": "assert_money_lt", "max": 400, "label": "raha vaheni oston jalkeen (300 veloitettu)" },
+    { "cmd": "assert_money_gt", "min": 50, "label": "raha jai plussalle (400-300=100)" },
+
+    { "cmd": "buy_bot", "role": 1, "count": 1 },
+    { "cmd": "assert_fleet", "min": 3, "max": 3, "label": "nouseva hinta (450) estaa oston kun rahaa vain 100" },
+    { "cmd": "assert_money_gt", "min": 50, "label": "epaonnistunut osto ei veloittanut rahaa" }
+  ]
+}
