@@ -1,0 +1,21 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "TOISTO: kayttajan bugi — designoi VAIN yksi solu (ekan blokin). Miner louhii sen (STONE->GRAVEL), mutta hauler ei kera saalista pois. Hypoteesi: _find_pile luulee viereisia louhimattomia KIVISEINIA lattiaksi (PILE_SCAN_HALF_W-marginaali) -> aliarvioi kasan -> hauler hylkaa. Mittaa: paljonko GRAVELia (mat=18) jaa keraamatta + raha.",
+  "steps": [
+    { "cmd": "designate_cell", "gap_cells": 3 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "run_frames", "n": 2500 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 2500 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 2500 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "assert_count", "mat": 18, "min": 0, "max": 15, "label": "GRAVEL kerattiin lahes kokonaan pois (<=15 jaljella)" },
+    { "cmd": "assert_money_gt", "min": 0, "label": "hauler kerasi ekan blokin saaliin baseen (raha > 0)" },
+
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/repro_single_block.png", "label": "yhden solun louhinta + keraus" }
+  ]
+}

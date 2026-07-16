@@ -53,6 +53,13 @@ const MINE_MAX_TIME := 20.0         # kova katto louhinnalle (turvavahti)
 const MOVE_MAX_TIME := 30.0         # kova katto liikkeelle (turvavahti)
 const FAIL_COOLDOWN := 2.0          # epaonnistunut kohde jaahylle
 const EMPTY_DIG_COOLDOWN := 2.0     # tyhjentynyt dig_site jaahylle
+const DUMP_RETRY_DELAY := 1.0        # s; mikaan dump-vyohyke ei hyvaksynyt kuormaa -> odota ennen uutta yritysta
+# Kerros 3: ajallinen dumppi. Kuorma purkautuu DUMP_RATE * _crowd_factor px/s -> ruuhkainen
+# dropoff hidastuu. DUMP_MAX_TIME on kova turvakatto: mitoitus Mk3 180 px lattiatahdilla
+# (80 * CONGEST_FLOOR 0.25 = 20 px/s -> 9 s) < 12 s, joten normaali purku valmistuu aina ennen sita.
+const DUMP_RATE := 80.0             # px/s purkunopeus (ennen ruuhkakerrointa)
+const DUMP_MAX_TIME := 12.0         # kova katto dumpille (turvavahti): myy loput ja lopeta
+const VACUUM_MAX_TIME := 30.0       # kova katto imulle (peralauta): ruuhkalattiallakin Mk3 tayttyy 24 s < tama
 const ARRIVE_DIST := 4.0            # waypoint saavutettu kun etaisyys alle tama
 const MINE_REACH_DIST := 48.0       # kuinka lahella solua louhinta saa alkaa
 const VACUUM_RADIUS := 10           # haulerin imurointisade px
@@ -61,6 +68,29 @@ const MAX_PILE_SCANS := 24          # montako dig_sitea skannataan / hauler-vara
 const PILE_MIN_PX := 5              # minimikasa jotta kannattaa hakea
 const PILE_SCAN_DEPTH := 240        # 15 navsolua alaspain (15*16)
 const PILE_SCAN_HALF_W := 4         # sarakkeen levennys molemmin puolin px
+
+# --- Kerros 1: kohteiden hajautus (ruuhkanhallinta) ---
+# Kaikki varaustieto JOHDETAAN bottien nykytilasta joka tyonjakokierroksella (_run_assignment,
+# 2 Hz) -> ei pysyvia laskureita, joten varausvuoto (abort/roolinvaihto nollaa target_cellin)
+# on rakenteellisesti mahdoton. Sakot ovat PEHMEITA: jos kaikki kandidaatit ovat sakotettuja,
+# lahin valitaan silti -> tyo ei koskaan pysahdy (worst case = nykyinen kayttaytyminen).
+const MINER_CROWD_PEN := 4          # frontier-sakko (soluina) toisen minerin kohteen vieressa
+const PILE_CLAIM_UNIT := 40         # px-maara jonka yksi hakija "kuluttaa" kapasiteettilaskussa (Mk1 carry)
+const PILE_MAX_CLAIMS := 3          # kova katto hakijoille per kasa
+const PICKUP_CLAIM_PEN := 96.0      # metriikkasakko per samaan pickup-vyohykkeeseen jo menossa oleva hauler
+
+# --- Kerros 2: separation-tyonto + ruuhkakerroin ---
+# Botit ovat lentavia droneja (ei tormaystarkistusta, ei painovoimaa) -> pieni sijainnin
+# tyonto levittaa lauman loyhaksi letkaksi rikkomatta mitaan. Tyonto on PEHMEA (max SEP_FACTOR
+# osuus omasta nopeudesta) ja _follow_path ajetaan ensin taydella budjetilla -> nettoliike
+# kohti waypointtia sailyy positiivisena (ei livelockia). Max tyonto/tikki ~0.8 px << ARRIVE_DIST.
+const SEP_RADIUS := 12.0            # separation-tyonnon vaikutussade px
+const SEP_FACTOR := 0.3            # tyonnon katto osuutena botin omasta move_speedista
+const SEP_WORK_MULT := 0.5         # vaimennus WORK/DUMP-tiloissa (jono saa tiivistya tyopisteessa)
+const CONGEST_RADIUS := 16.0       # ruuhkakertoimen naapurisade px
+const CONGEST_K := 0.4            # ruuhkakertoimen jyrkkyys
+const CONGEST_FREE := 1            # monta MUUTA bottia lahella on "ilmaisia" (2 bottia pisteessa = ei sakkoa)
+const CONGEST_FLOOR := 0.25        # kertoimen lattia: tyo etenee aina
 
 # 8 suuntaa (nav-naapurit)
 const NAV_DIRS: Array[Vector2i] = [
@@ -74,6 +104,18 @@ var world: Node = null
 var dig_sites: Array[Vector2i] = []       # louhitut solut (designaatiokoordinaatit)
 var _assign_timer: float = 0.0
 var _cell_cooldown: Dictionary = {}        # cell_key (dy*GW+dx) -> jaljella oleva jaahy (s)
+
+# Kierroskohtaiset varauskartat (kerros 1). Rakennetaan _run_assignmentin alussa bottien
+# nykytilasta ja ovat VALIDEJA VAIN yhden tyonjakokierroksen sisalla — ei pysyvaa varaustilaa,
+# joten varausvuotoa ei voi syntya. Suorat re-taskaus-kutsut (_finish_mining/_st_dump) kayttavat
+# edellisen kierroksen tilannekuvaa; se on itsekorjautuva (seuraava kierros rakentaa uudet kartat).
+var _round_hauler_claims: Dictionary = {}  # dig_site cell_key (y*GW+x) -> montako hauleria matkalla
+var _round_miner_penalty: Dictionary = {}  # cell_key -> true: minerin kohteen ±1 ruuhkasakkoalue
+
+# Kerros 2: crowd index — joka tikilla TYHJASTA uudelleenrakennettava naapurihakemisto.
+# Johdettu tila (EI inkrementaalista kirjanpitoa) -> pomminvarma, ei kirjanpitovuotoa.
+# key: navsoluavain cy*NW+cx botin posista (klampattu gridiin), value: Array[Bot] solun boteista.
+var _crowd_index: Dictionary = {}
 
 # Logistiikka (pickup/dump/base-filtteri). null = vanha kayttaytyminen (kaikki baseen).
 # Asetetaan setupissa world.logistics:sta jos se on olemassa (lane G kytkee), tai suoraan.
@@ -151,11 +193,11 @@ func add_bot(role: int, p: Vector2) -> Bot:
 #  Osto, roolinvaihto, upgrade, tilastot (A1 + A2 — API_CONTRACT_demo.md)
 # ============================================================
 
-# Seuraavan botin hinta: 300 * 1.5^(ostetut botit), pyoristetty alas 10:een.
-# Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen ostettu (3. botti) = 300.
+# Seuraavan botin hinta: 50 * 2^(ostetut botit) — alkaa 50:sta ja TUPLAANTUU joka ostolla
+# (50, 100, 200, 400, 800, ...). Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen
+# ostettu (3. botti) = 50.
 func next_bot_price() -> int:
-	var raw := 300.0 * pow(1.5, float(_bought_count))
-	return int(floor(raw / 10.0)) * 10
+	return 50 * (1 << _bought_count)
 
 
 # Osta botti: tarkistaa hinnan world.moneya vasten, vahentaa rahan, spawnaa basesta.
@@ -284,6 +326,8 @@ func tick(delta: float) -> void:
 	if world == null:
 		return
 	_tick_cooldowns(delta)
+	# Kerros 2: rakenna naapurihakemisto ENNEN tyonjakoa ja tilakoneita (johdettu, tuore tila).
+	_build_crowd_index()
 	# Tyonjako harvakseltaan (ei joka tikilla)
 	_assign_timer += delta
 	if _assign_timer >= ASSIGN_INTERVAL:
@@ -309,6 +353,86 @@ func _tick_cooldowns(delta: float) -> void:
 
 
 # ============================================================
+#  Kerros 2: crowd index + separation
+# ============================================================
+
+# Rakenna naapurihakemisto TYHJASTA joka tikilla (O(n)). Johdettu tila -> ei varausvuotoa.
+# Jokainen botti lisataan navsoluunsa; koordinaatit klampataan gridiin ENNEN jakoa NCELLilla.
+func _build_crowd_index() -> void:
+	_crowd_index.clear()
+	for b in bots:
+		var cx := clampi(int(b.pos.x), 0, SIM_W - 1) / NCELL
+		var cy := clampi(int(b.pos.y), 0, SIM_H - 1) / NCELL
+		var key := cy * NW + cx
+		if _crowd_index.has(key):
+			(_crowd_index[key] as Array).append(b)
+		else:
+			_crowd_index[key] = [b]
+
+
+# Palauta botin naapurit sateella `radius`. Skannaa 3x3 navsolua botin solun ymparilta
+# (16 px solut kattavat <=16 px sateen). Palauttaa [toinen_botti, etaisyys]-pareja joilla
+# dist <= radius, itsensa poislukien (VIITTAUSvertailu, ei posivertailu — kaksi bottia voi
+# olla samassa pisteessa).
+func _crowd_neighbors(b: Bot, radius: float) -> Array:
+	var res: Array = []
+	var bcx := clampi(int(b.pos.x), 0, SIM_W - 1) / NCELL
+	var bcy := clampi(int(b.pos.y), 0, SIM_H - 1) / NCELL
+	for oy in range(-1, 2):
+		var cy := bcy + oy
+		if cy < 0 or cy >= NH:
+			continue
+		var row := cy * NW
+		for ox in range(-1, 2):
+			var cx := bcx + ox
+			if cx < 0 or cx >= NW:
+				continue
+			var key := row + cx
+			if not _crowd_index.has(key):
+				continue
+			for other in (_crowd_index[key] as Array):
+				if other == b:
+					continue
+				var dd: float = b.pos.distance_to(other.pos)
+				if dd <= radius:
+					res.append([other, dd])
+	return res
+
+
+# Ruuhkakerroin 0..1 KERROSTA 3 varten (EI viela kaytossa tuotantologiikassa). Hidastaa
+# tyotahtia tungoksessa: n = muut botit CONGEST_RADIUS-sateella. Kayra: 0-1 naapuria -> 1.0;
+# 2 -> ~0.714; 3 -> ~0.556; paljon -> lattia CONGEST_FLOOR (0.25).
+func _crowd_factor(b: Bot) -> float:
+	var n := _crowd_neighbors(b, CONGEST_RADIUS).size()
+	return maxf(1.0 / (1.0 + CONGEST_K * float(maxi(0, n - CONGEST_FREE))), CONGEST_FLOOR)
+
+
+# Separation-tyonto: levita paallekkaiset botit loyhaksi letkaksi (pieni overlap sallittu,
+# EI kova tormays). Ajetaan _update_botin lopussa kaikille tiloille.
+func _apply_separation(b: Bot, delta: float) -> void:
+	var neighbors := _crowd_neighbors(b, SEP_RADIUS)
+	if neighbors.is_empty():
+		return
+	var push := Vector2.ZERO
+	for pair in neighbors:
+		var other: Bot = pair[0]
+		var dd: float = pair[1]
+		if dd < 0.001:
+			# Taysin paallekkain (esim. basen spawn) -> deterministinen id-suunta.
+			# EI randf: toistettavuus testeissa + NaN-suoja (ei nollajakoa).
+			push += Vector2.RIGHT.rotated(float(b.id) * 2.399963)
+		else:
+			# Suunta pois naapurista, paino kasvaa mita lahempana ollaan (1 kun paallekkain).
+			push += (b.pos - other.pos) / dd * (1.0 - dd / SEP_RADIUS)
+	# WORK/DUMP vaimennetaan: jono saa tiivistya tyopisteessa (ei tyonna pois tyosta).
+	var mult := SEP_WORK_MULT if (b.state == Bot.BotState.WORK or b.state == Bot.BotState.DUMP) else 1.0
+	b.pos += push.limit_length(1.0) * b.move_speed() * SEP_FACTOR * mult * delta
+	# Klampaa sim-rajoihin (drone ei saa karata ruudukon ulkopuolelle).
+	b.pos.x = clampf(b.pos.x, 0.0, float(SIM_W - 1))
+	b.pos.y = clampf(b.pos.y, 0.0, float(SIM_H - 1))
+
+
+# ============================================================
 #  Tyonjako (2 Hz)
 # ============================================================
 
@@ -317,12 +441,47 @@ func _run_assignment() -> void:
 	if logistics == null and world != null:
 		logistics = world.get("logistics")
 	_scan_designations()
+	_build_round_claims()
 	for b in bots:
 		if b.state == Bot.BotState.IDLE:
 			if b.role == Bot.Role.MINER:
 				_assign_miner(b)
 			else:
 				_assign_hauler(b)
+
+
+# Rakenna kierroskohtaiset varauskartat bottien nykytilasta (kerros 1). Vain MOVE/WORK-tilaiset
+# botit "varaavat" kohteensa (IDLE ei ole viela sitoutunut mihinkaan). Kartat johdetaan aina
+# tuoreesta tilasta -> ei pysyvaa laskuria, ei varausvuotoa.
+func _build_round_claims() -> void:
+	_round_hauler_claims.clear()
+	_round_miner_penalty.clear()
+	for b in bots:
+		if b.state != Bot.BotState.MOVE and b.state != Bot.BotState.WORK:
+			continue
+		if b.target_cell.x < 0:
+			continue  # hauler pickup-vyohykkeella (ei dig_site-solua) -> ei kuulu dig_site-varaukseen
+		if b.role == Bot.Role.HAULER:
+			var key: int = b.target_cell.y * GW + b.target_cell.x
+			_round_hauler_claims[key] = int(_round_hauler_claims.get(key, 0)) + 1
+		else:  # MINER
+			_mark_miner_penalty(b.target_cell.x, b.target_cell.y)
+
+
+# Merkitse minerin kohdesolun ±1-naapurusto (Chebyshev ≤1 = 9 solua, klampattu gridiin)
+# ruuhkasakkoalueeksi. Kaytetaan seka olemassa olevista MOVE/WORK-minereista etta saman
+# kierroksen tuoreista varauksista -> minerit hajautuvat frontieria pitkin.
+func _mark_miner_penalty(cx: int, cy: int) -> void:
+	for oy in range(-1, 2):
+		var y := cy + oy
+		if y < 0 or y >= GH:
+			continue
+		var row := y * GW
+		for ox in range(-1, 2):
+			var x := cx + ox
+			if x < 0 or x >= GW:
+				continue
+			_round_miner_penalty[row + x] = true
 
 
 # Skannaa designaatiogridi: QUEUED <-> BLOCKED nav-naapuruuden mukaan JA rakenna frontier-cache.
@@ -389,6 +548,11 @@ func _assign_miner(b: Bot) -> void:
 		if _cell_cooldown.has(key):
 			continue
 		var dist := absi(cell.x - bcx) + absi(cell.y - bcy)
+		# PEHMEA ruuhkasakko: toisen minerin kohteen viereinen solu (±1) on vahemman houkutteleva.
+		# Sakko vain kasvattaa etaisyytta -> jos KAIKKI kandidaatit ovat sakotettuja, lahin
+		# sakotettu valitaan silti (tyo ei koskaan pysahdy).
+		if _round_miner_penalty.has(key):
+			dist += MINER_CROWD_PEN
 		if dist < best_dist:
 			best_dist = dist
 			best = cell
@@ -407,11 +571,19 @@ func _assign_miner(b: Bot) -> void:
 	b.path = path
 	b.path_idx = 0
 	_set_state(b, Bot.BotState.MOVE)
+	# Saman kierroksen seuraavat minerit hajautuvat: merkitse tama tuore varaus sakkoalueeksi.
+	_mark_miner_penalty(best.x, best.y)
 
 
 # Hauler: etsi lahin kasa (1) designaatioalueiden dig_site-kasoista, ja jos ei loydy,
 # (2) logisticsin pickup-vyohykkeilta. Reitita kasalle ja siirry MOVEen.
 func _assign_hauler(b: Bot) -> void:
+	# Kesken oleva kuorma (dump hylattiin viime yrityksella) -> yrita purkaa uudelleen sen
+	# sijaan etta haettaisiin lisaa tyota. Ei uutta pickup/dig-hakua kesken purun uudelleenyrityksen.
+	if b.cargo_total > 0:
+		if b.dump_retry_cooldown <= 0.0:
+			_start_dump(b)
+		return
 	if _assign_hauler_dig(b):
 		return
 	# Ei dig_site-kasaa -> yrita pickup-vyohykkeita (GDD §4.3)
@@ -437,11 +609,22 @@ func _assign_hauler_dig(b: Bot) -> bool:
 		var key: int = cell.y * GW + cell.x
 		if _cell_cooldown.has(key):
 			continue
+		# (Kerros 1) Kova katto hakijoille per kasa — HALPA esitarkistus ennen skannausbudjettia:
+		# jos jo PILE_MAX_CLAIMS hauleria matkalla tahan soluun, ohita heti (ei kuluta _find_pilea).
+		var claims: int = int(_round_hauler_claims.get(key, 0))
+		if claims >= PILE_MAX_CLAIMS:
+			continue
 		scans += 1
 		var pile := _find_pile(cell.x, cell.y)
 		if int(pile["count"]) < PILE_MIN_PX:
 			_remove_dig_site(cell)  # (B1) vahvistetusti tyhja -> pois listasta
 			_cell_cooldown[key] = EMPTY_DIG_COOLDOWN
+			continue
+		# (Kerros 1) Kapasiteetti kasan koon mukaan: pieni kasa -> yksi hakija, iso -> useampi
+		# (katto PILE_MAX_CLAIMS). Varattu-mutta-validi kasa EI mene _cell_cooldowniin — se on vain
+		# varattu (ei rikki), joten se vapautuu heti kun varaajat vahenevat tai kasa kasvaa.
+		var capacity := clampi(int(ceil(float(pile["count"]) / float(PILE_CLAIM_UNIT))), 1, PILE_MAX_CLAIMS)
+		if claims >= capacity:
 			continue
 		var pos: Vector2 = pile["pos"]
 		var path: PackedVector2Array = world.nav.find_path_px(b.pos, pos)
@@ -453,6 +636,8 @@ func _assign_hauler_dig(b: Bot) -> bool:
 		b.path = path
 		b.path_idx = 0
 		_set_state(b, Bot.BotState.MOVE)
+		# Saman kierroksen seuraavat haulerit hajautuvat: merkitse tama tuore varaus.
+		_round_hauler_claims[key] = claims + 1
 		return true
 	return false  # ei kelvollista kasaa talla kierroksella
 
@@ -475,6 +660,10 @@ func _assign_hauler_pickup(b: Bot) -> void:
 		# Korkea prioriteetti pienentaa tehollista etaisyytta (haetaan ensin).
 		var prio: int = int(z.get("priority", 0))
 		var metric := bpos.distance_to(pos) - float(prio) * 64.0
+		# (Kerros 1) Ruuhkasakko: montako MUUTA hauleria on jo menossa tahan pickup-vyohykkeeseen.
+		# Kasvattaa tehollista etaisyytta -> haulerit hajautuvat eri vyohykkeille. Laske live per
+		# kutsu iteroimalla bots-listaa (n pieni) -> saman kierroksen aiemmat tyonannot nakyvat heti.
+		metric += PICKUP_CLAIM_PEN * float(_pickup_zone_congestion(rect, b))
 		if metric >= best_metric:
 			continue
 		var path: PackedVector2Array = world.nav.find_path_px(bpos, pos)
@@ -490,6 +679,23 @@ func _assign_hauler_pickup(b: Bot) -> void:
 	b.path = best_path
 	b.path_idx = 0
 	_set_state(b, Bot.BotState.MOVE)
+
+
+# (Kerros 1) Montako MUUTA hauleria on jo menossa/toissa tahan pickup-vyohykkeeseen (rect).
+# Pickup-keikka tunnistetaan target_cell.x < 0:sta (ei dig_site-solua) + pickup_pos rectin sisalta.
+# Laske live per kutsu (n pieni) -> saman kierroksen aiemmat pickup-tyonannot nakyvat automaattisesti.
+func _pickup_zone_congestion(rect: Rect2i, self_bot: Bot) -> int:
+	var n := 0
+	for other in bots:
+		if other == self_bot or other.role != Bot.Role.HAULER:
+			continue
+		if other.state != Bot.BotState.MOVE and other.state != Bot.BotState.WORK:
+			continue
+		if other.target_cell.x >= 0:
+			continue  # dig_site-keikalla, ei pickup-vyohykkeella
+		if rect.has_point(Vector2i(int(other.pickup_pos.x), int(other.pickup_pos.y))):
+			n += 1
+	return n
 
 
 # ============================================================
@@ -513,9 +719,15 @@ func _update_bot(b: Bot, delta: float) -> void:
 			_st_carry(b, delta)
 		Bot.BotState.DUMP:
 			_st_dump(b, delta)
+	# Kerros 2: separation-tyonto KAIKILLE tiloille, tilakone-matchin JALKEEN. _follow_path
+	# (MOVE/CARRY) ajettiin jo taydella budjetilla -> nettoliike waypointtia kohti sailyy
+	# positiivisena, ei livelockia. Tyonto on max SEP_FACTOR osuus omasta nopeudesta.
+	_apply_separation(b, delta)
 
 
 func _st_idle(b: Bot, delta: float) -> void:
+	# Dump-uudelleenyrityksen jaahy (ei hyvaksyvaa dump-vyohyketta viime yrityksella).
+	b.dump_retry_cooldown = maxf(0.0, b.dump_retry_cooldown - delta)
 	# Leiju basen lahella
 	if world.base == null:
 		return
@@ -569,48 +781,123 @@ func _st_work(b: Bot, delta: float) -> void:
 func _st_carry(b: Bot, delta: float) -> void:
 	var arrived := _follow_path(b, delta)
 	if arrived or b.state_timer > MOVE_MAX_TIME:
+		# Kerros 3: nollaa purkubudjetti ennen ajallista dumppia (ei imu-tilan jaannosta).
+		b.work_accum = 0.0
 		_set_state(b, Bot.BotState.DUMP)
 
 
-func _st_dump(b: Bot, _delta: float) -> void:
-	if b.cargo_total > 0:
-		var kind := "base"
-		if not b.dump_target.is_empty():
-			kind = String(b.dump_target.get("kind", "base"))
-		if kind == "dump":
-			_deposit_cargo_to_zone(b)
-		elif world.base != null and is_instance_valid(world.base):
-			# Oletus/base: myydaan rahaksi (accept_cargo kasvattaa myos earned_totalia).
-			world.money += world.base.accept_cargo(b.cargo)
-	b.clear_cargo()
+# Kerros 3: AJALLINEN dumppi. Kuorma purkautuu DUMP_RATE * _crowd_factor px/s tahtiin
+# (ruuhkainen dropoff hidastuu -> ruuhka maksaa oikeasti). Joka tikilla sijoitetaan enintaan
+# int(work_accum) px kohteeseen; kun kohde tayttyy tai kuorma tyhjenee, dump paattyy.
+# SAILYVYYSINVARIANTTI (joka polku): jokainen kuorma-px joko kirjoitetaan maailmaan TAI myydaan
+# accept_cargo:lla — kuormaa ei koskaan kadoteta eika tuplata.
+func _st_dump(b: Bot, delta: float) -> void:
+	# Turvavahti ENSIN: dump ei saa kestaa loputtomiin (esim. kohde jumissa) -> myy jaljella
+	# oleva kuorma baseen, siivoa ja palaa IDLEen. DUMP_MAX_TIME mitoitettu niin etta taysi
+	# Mk3-kuorma valuu lattiatahdillakin (80*0.25=20 px/s -> 180 px 9 s) ennen tata kattoa.
+	if b.state_timer > DUMP_MAX_TIME:
+		_sell_remaining_cargo(b)
+		_finish_dump(b)
+		return
+	# Kuorma jo tyhja -> valmistu heti (hae seuraava tyo).
+	if b.cargo_total <= 0:
+		_finish_dump(b)
+		return
+	# Kerry purkubudjettia; ruuhka hidastaa (sama _crowd_factor kuin imussa).
+	b.work_accum += DUMP_RATE * _crowd_factor(b) * delta
+	var budget := int(b.work_accum)
+	if budget <= 0:
+		return  # odota lisaa budjettia, pysy DUMPissa
+	# Sijoita enintaan budget px kohteeseen (kohde valitaan dump_target-lipusta). Palauttaa
+	# montako px TOSIASIASSA sijoitettiin ja vahentaa kuorman sen mukaan.
+	var placed := _place_cargo_budget(b, budget)
+	b.work_accum -= float(placed)
+	# Kohde tayttyi kesken purun (budjettia jai mutta kuormaa on viela) -> myy loput ja lopeta.
+	if placed < budget and b.cargo_total > 0:
+		_sell_remaining_cargo(b)
+		_finish_dump(b)
+		return
+	# Kuorma tyhjeni talla tikilla -> valmistu.
+	if b.cargo_total <= 0:
+		_finish_dump(b)
+
+
+# Dump valmis: nollaa dump-tila, palaa IDLEen ja hae heti seuraava tyo (pysy toimeliaana).
+# Kutsutaan VAIN kun kuorma on jo kirjattu (tyhjentynyt tai myyty) -> ei nollaa kuormaa itse,
+# jottei sailyvyysinvariantti riko (kadonnut kuorma).
+func _finish_dump(b: Bot) -> void:
 	b.dump_target = {}
 	_set_state(b, Bot.BotState.IDLE)
-	# Hae heti seuraava tyo (pysy toimeliaana)
 	_assign_hauler(b)
 
 
-# Pura kuorma dump-vyohykkeelle irtopikseleina (kone/pickup poimii). Alueen tayttyessa
-# jaannos myydaan baseen ettei kuorma jaa roikkumaan. dump_target["rect"] = kohdealue.
-func _deposit_cargo_to_zone(b: Bot) -> void:
+# Myy koko jaljella oleva kuorma baseen (accept_cargo) — dumpin leftover/watchdog-fallback.
+# Kuorma-px:t muuttuvat rahaksi eika kuormaa jaa roikkumaan. Kuorma tyhjennetaan aina (myos
+# jos basea ei ole) jotta dump paattyy varmasti; base==null on vain degeneroitunut testitapaus.
+func _sell_remaining_cargo(b: Bot) -> void:
+	if b.cargo_total <= 0:
+		return
+	if world.base != null and is_instance_valid(world.base):
+		world.money += world.base.accept_cargo(b.cargo)
+	b.clear_cargo()
+
+
+# Sijoita enintaan budget px kuormasta oikeaan kohteeseen dump_target-lipun mukaan:
+#   - is_base_dropoff=true tai ei dump_targetia -> basen intake-sarakkeet (_drop_cargo_above_base),
+#   - muu dump-vyohyke -> koko klikattava rect (_deposit_cargo_to_zone).
+# Palauttaa TOSIASIASSA sijoitetut px (< budget = kohde tayynna, kutsuja myy loput).
+func _place_cargo_budget(b: Bot, budget: int) -> int:
+	var dt := b.dump_target
+	if not dt.is_empty() and String(dt.get("kind", "")) == "dump" and not bool(dt.get("is_base_dropoff", false)):
+		return _deposit_cargo_to_zone(b, budget)
+	# base-dropoff TAI ei dump_targetia (esim. suora _st_dump-testikutsu) -> basen intake.
+	return _drop_cargo_above_base(b, budget)
+
+
+# Litista kuormasta ENINTAAN max_px pikselia deterministiseen jarjestykseen (materiaali-avaimet
+# NOUSEVASTI). Palauttaa Array[int] (mat per px). EI muuta kuormaa — kutsuja vahentaa cargon
+# tosiasiassa sijoitettujen px:ien mukaan (remove_cargo). Deterministinen jarjestys takaa etta
+# osittaisessa purussa myyty jaannos on aina sama.
+func _flatten_cargo(b: Bot, max_px: int) -> Array:
+	var out: Array = []
+	if max_px <= 0:
+		return out
+	var mats: Array = b.cargo.keys()
+	mats.sort()  # nousevat mat-ID:t -> deterministinen
+	for mat in mats:
+		var n := int(b.cargo[mat])
+		for _i in n:
+			if out.size() >= max_px:
+				return out
+			out.append(int(mat))
+	return out
+
+
+# Pura ENINTAAN budget px kuormasta dump-vyohykkeelle irtopikseleina (kone/pickup poimii).
+# Palauttaa montako px TOSIASIASSA kirjoitettiin ja vahentaa kuorman sen mukaan. Alueen
+# tayttyminen nakyy kutsujalle paluuarvona (placed < budget) -> _st_dump myy loput.
+# dump_target["rect"] = kohdealue.
+func _deposit_cargo_to_zone(b: Bot, budget: int) -> int:
 	var rect: Rect2i = b.dump_target.get("rect", Rect2i())
 	if rect.size.x <= 0 or rect.size.y <= 0:
-		# Ei kelvollista aluetta -> fallback: myy baseen
-		if world.base != null and is_instance_valid(world.base):
-			world.money += world.base.accept_cargo(b.cargo)
-		return
-	# Litista kuorma pikselilistaksi (mat per pikseli)
-	var to_place: Array = []
-	for mat in b.cargo:
-		for _n in int(b.cargo[mat]):
-			to_place.append(int(mat))
-	# Kirjoita alueen tyhjiin, ei-rakennuspikseleihin
+		return 0  # ei kelvollista aluetta -> 0 sijoitettu (kutsuja myy loput)
+	# Litista enintaan budget px deterministiseen jarjestykseen (mat-avaimet nousevasti).
+	var to_place := _flatten_cargo(b, budget)
+	if to_place.is_empty():
+		return 0
 	var pi := 0
 	var y1 := mini(rect.position.y + rect.size.y, SIM_H)
 	var x1 := mini(rect.position.x + rect.size.x, SIM_W)
 	var y := maxi(rect.position.y, 0)
+	var x0 := maxi(rect.position.x, 0)
+	# Laajenna CA-rajaus dump-alueelle (headless cpu_ca) — sama mekanismi kuin
+	# _drop_cargo_above_basessa, jotta pelaajan ilmaan rakentama custom-dump toimii.
+	if world.has_method("_ca_expand_bounds"):
+		world._ca_expand_bounds(Rect2i(x0, y, x1 - x0, y1 - y))
+	# Kirjoita alueen tyhjiin, ei-rakennuspikseleihin.
 	while y < y1 and pi < to_place.size():
 		var base_i := y * SIM_W
-		var x := maxi(rect.position.x, 0)
+		var x := x0
 		while x < x1 and pi < to_place.size():
 			var idx := base_i + x
 			if not world.building_pixels.has(idx) and world.grid[idx] == MAT_EMPTY:
@@ -618,13 +905,61 @@ func _deposit_cargo_to_zone(b: Bot) -> void:
 				pi += 1
 			x += 1
 		y += 1
-	# Alue tayttyi ennen kuin kaikki mahtui -> myy loput baseen (ei jateta roikkumaan)
-	if pi < to_place.size() and world.base != null and is_instance_valid(world.base):
-		var leftover: Dictionary = {}
-		for k in range(pi, to_place.size()):
-			var m: int = to_place[k]
-			leftover[m] = int(leftover.get(m, 0)) + 1
-		world.money += world.base.accept_cargo(leftover)
+	# Vahenna kuormasta TOSIASIASSA sijoitetut px (to_place[0..pi]).
+	for k in pi:
+		b.remove_cargo(to_place[k], 1)
+	return pi
+
+
+# Pura ENINTAAN budget px haulerin kuormaa FYYSISINA pikseleina basen intake-aukon ylapuolelle.
+# Pikselit kirjoitetaan intake-sarakkeisiin (drop_columns) alhaalta (drop_start_y) ylospain, vain
+# tyhjiin ei-rakennuspikseleihin. CA pudottaa ne intakeen -> update_exit syo rahaksi. Palauttaa
+# montako px TOSIASIASSA kirjoitettiin ja vahentaa kuorman sen mukaan; sarakkeiden tayttyminen
+# nakyy kutsujalle paluuarvona (placed < budget) -> _st_dump myy loput. CA-rajaus laajennetaan
+# pudotusalueelle (headless cpu_ca); GPU-pelissa _ca_expand_bounds on no-op.
+func _drop_cargo_above_base(b: Bot, budget: int) -> int:
+	var base: MoneyExit = world.base
+	if base == null or not is_instance_valid(base):
+		return 0  # ei basea -> 0 sijoitettu (kutsuja myy/tyhjentaa loput)
+	var to_place := _flatten_cargo(b, budget)
+	if to_place.is_empty():
+		return 0
+	var cols: Array = base.drop_columns()
+	if cols.is_empty():
+		return 0  # ei aukkoa (ei pitaisi) -> 0 sijoitettu, kutsuja myy loput
+	var start_y: int = base.drop_start_y()
+	# Laajenna CA-rajaus pudotuspatsaan korkeudelle + intake-riville asti (headless).
+	var need_rows := int(ceil(float(to_place.size()) / float(cols.size()))) + 2
+	var min_x := int(cols[0])
+	var max_x := int(cols[0])
+	for cx in cols:
+		min_x = mini(min_x, int(cx))
+		max_x = maxi(max_x, int(cx))
+	if world.has_method("_ca_expand_bounds"):
+		var top := start_y - need_rows
+		world._ca_expand_bounds(Rect2i(min_x, top, max_x - min_x + 1, (start_y + 2) - top))
+	# Tayta alhaalta (start_y) ylospain: matala patsas joka valuu intakeen.
+	var pi := 0
+	var y := start_y
+	while y >= 0 and pi < to_place.size():
+		for cx in cols:
+			if pi >= to_place.size():
+				break
+			var xi := int(cx)
+			if xi < 0 or xi >= SIM_W:
+				continue
+			var idx := y * SIM_W + xi
+			if world.building_pixels.has(idx):
+				continue
+			if world.grid[idx] != MAT_EMPTY:
+				continue
+			world.mvp_write_pixel(xi, y, int(to_place[pi]))
+			pi += 1
+		y -= 1
+	# Vahenna kuormasta TOSIASIASSA sijoitetut px (to_place[0..pi]).
+	for k in pi:
+		b.remove_cargo(to_place[k], 1)
+	return pi
 
 
 # ============================================================
@@ -844,7 +1179,9 @@ const FX_MAX := 48          # yhtaaikaisten imuvirtapartikkelien katto per botti
 
 
 func _work_vacuum(b: Bot, delta: float) -> void:
-	b.work_accum += VACUUM_RATE * delta
+	# Kerros 3: ruuhka hidastaa imua (saturoituva throughput). _crowd_factor 1.0 -> CONGEST_FLOOR.
+	# Minerin louhintaan EI sovelleta tata (MINE_MAX_TIME-turvakatto), vain haulerin imuun ja dumppiin.
+	b.work_accum += VACUUM_RATE * _crowd_factor(b) * delta
 	var budget := int(b.work_accum)
 	if budget <= 0:
 		return  # odota lisaa budjettia, pysy WORKissa (EI tulkita tyhjaksi kasaksi)
@@ -871,9 +1208,12 @@ func _work_vacuum(b: Bot, delta: float) -> void:
 			# Kasa katosi ennen saapumista -> jaahylle ja IDLE
 			_vacuum_give_up(b)
 		return
-	# Turvavahti: jos imu ei koskaan tayty tai tyhjene jarkevassa ajassa -> pakota ulos
-	# WORK-tilasta (sama periaate kuin MOVE_MAX_TIME/MINE_MAX_TIME muualla).
-	if b.state_timer > 6.0:
+	# Turvavahti (VAIN peralauta, sama periaate kuin MOVE_MAX_TIME): oikea jumi poistuu jo
+	# valittomasti picked==0-haarasta ylla, joten tama katto suojaa vain logiikkavirheelta.
+	# Mitoitus: HITAAN mutta ETENEVAN imun pitaa mahtua alle — ruuhkalattia 30*0.25=7.5 px/s
+	# -> Mk3 180 px = 24 s < 30 s. (Vanha 6.0 s katkaisi Mk2/Mk3-imun kesken ruuhkassa ->
+	# turhia osakuormareissuja juuri kun ruuhka oli pahin.)
+	if b.state_timer > VACUUM_MAX_TIME:
 		if b.cargo_total > 0:
 			_start_dump(b)
 		else:
@@ -938,20 +1278,23 @@ func _vacuum(b: Bot, budget: int = -1) -> int:
 
 func _start_dump(b: Bot) -> void:
 	b.target_cell = Vector2i(-1, -1)
-	if world.base == null or not is_instance_valid(world.base):
-		# Ei basea -> pida kuorma, odota
-		_set_state(b, Bot.BotState.IDLE)
-		return
-	var base_intake: Vector2 = world.base.intake_pos()
-	# Valitse dump: logistics valitsee filtterin (base-filtteri + dump-vyohykkeet) ja etaisyyden
-	# mukaan (GDD §4.2). Ilman logisticsia -> vanha kayttaytyminen (kaikki baseen).
+	# Valitse dump: logistics valitsee filtterin (dump-vyohykkeet, sis. base-dropoff) ja
+	# etaisyyden mukaan (GDD §4.2). Base EI ole enaa automaattinen fallback-kandidaatti —
+	# jos mikaan dump-vyohyke ei hyvaksy kuormaa, hauler pitaa kuorman ja jaa IDLEen
+	# basen luo, yrittaen uudelleen DUMP_RETRY_DELAY-backoffilla (ks. _assign_hauler/_st_idle).
 	var chosen: Dictionary = {}
 	if logistics != null:
-		chosen = logistics.choose_dump(b.cargo, b.pos, base_intake)
+		chosen = logistics.choose_dump(b.cargo, b.pos)
 	if chosen.is_empty():
-		chosen = {"kind": "base", "pos": base_intake, "rect": Rect2i()}
+		b.dump_retry_cooldown = DUMP_RETRY_DELAY
+		_set_state(b, Bot.BotState.IDLE)
+		return
 	b.dump_target = chosen
-	var target: Vector2 = chosen.get("pos", base_intake)
+	# Kerros 3: deterministinen per-botti lentohajautus (±8 px) ettei koko lauma jonota
+	# TASMALLEEN samaan pisteeseen dumpin edessa. VAIN lentokohteeseen — pikselit kirjoitetaan
+	# silti kohteen omaan rectiin / intake-sarakkeisiin (dump_target["rect"] sailyy ennallaan).
+	var scatter := Vector2(float((b.id * 7) % 5 - 2) * 4.0, 0.0)
+	var target: Vector2 = chosen.get("pos", b.pos) + scatter
 	var path: PackedVector2Array = world.nav.find_path_px(b.pos, target)
 	if path.is_empty():
 		# Kohde voi olla avoimella alueella -> lenna suoraan (drone lapaisee kaiken)
@@ -964,8 +1307,10 @@ func _start_dump(b: Bot) -> void:
 # Etsi kasa dig_site-solun (dx,dy) sarakkeesta alaspain (kasat valuvat alas).
 # Palauttaa { "count": int, "pos": Vector2 }.
 func _find_pile(dx: int, dy: int) -> Dictionary:
-	var x0 := dx * DCELL - PILE_SCAN_HALF_W
-	var x1 := dx * DCELL + DCELL + PILE_SCAN_HALF_W
+	var cx0 := dx * DCELL                          # solun OMA sarake (louhittu kuoppa)
+	var cx1 := dx * DCELL + DCELL
+	var x0 := cx0 - PILE_SCAN_HALF_W               # levennys molemmin puolin: nappaa sivuille
+	var x1 := cx1 + PILE_SCAN_HALF_W               # valunut irtomateriaali granulaarilaskuriin
 	var top := dy * DCELL
 	var maxy := mini(top + PILE_SCAN_DEPTH, SIM_H)
 	var count := 0
@@ -983,7 +1328,13 @@ func _find_pile(dx: int, dy: int) -> Dictionary:
 			if _granular_lut[mat] == 1:
 				row_gran += 1
 				lowest_y = y
-			elif world.building_pixels.has(idx) or _floor_lut[mat] == 1:
+			elif x >= cx0 and x < cx1 and (world.building_pixels.has(idx) or _floor_lut[mat] == 1):
+				# Lattia (skannauksen pysaytin) tunnistetaan VAIN solun omasta sarakkeesta.
+				# Viereiset louhimattomat kiviseinat (4 px marginaali molemmin puolin) EIVAT ole
+				# "pohja" — muuten kapea yhden solun kuoppa katkeaisi heti ensimmaiseen gravel-riviin,
+				# kasa aliarvioituisi alle PILE_MIN_PX:n ja hauler hylkaisi dig_siten (bugi: ekan
+				# blokin saalis jai keraamatta). Leveassa kaivannossa kasan vieressa on tyhjaa, joten
+				# tama ei muuta kayttaytymista siella.
 				row_floor = true
 		count += row_gran
 		# Pysahdy pohjaan kun kasa on loytynyt, tai jos umpikiinnea heti solun alla
@@ -1082,24 +1433,31 @@ func draw_bots(canvas: CanvasItem) -> void:
 	# Piirtoaikainen leijuntahuojunta: VAIN visuaalinen, ei kosketa bot.pos-logiikkaa.
 	# Jokaisella botilla oma vaihe (i * 1.7) -> lauma ei huoju synkassa, maailma nayttaa elavalta.
 	var t := float(Time.get_ticks_msec()) / 1000.0
+	# Piirto jaettu erillisiin passeihin z-order-artefaktin valttamiseksi: jos jokainen botti
+	# piirtaisi laserin+reunuksen+rungon perakkain omassa silmukka-iteraatiossaan, seuraavan
+	# botin tumma reunus (12x12) voi piirtya jo valmiin botin varillisen rungon (10x10) paalle
+	# kun botit ovat lahella toisiaan (esim. jonottavat tyokohteella/pudotuspisteella) -> nakyva
+	# tumma lovi bahtaa rungon reunaan. Korjaus: kaikki reunukset ENSIN, sitten kaikki rungot,
+	# jotta jokainen runko paatyy varmasti kaikkien reunusten paalle riippumatta botti-indeksista.
+	# Keskipisteet lasketaan kerran ja valimuistiin (vältetään sin()-toisto per passi).
+	var centers: Array[Vector2] = []
+	centers.resize(bots.size())
 	for i in bots.size():
 		var b := bots[i]
-		var col: Color
-		if b.role == Bot.Role.MINER:
-			col = Color(0.88, 0.66, 0.25)   # amber/kulta
-		else:
-			col = Color(0.35, 0.62, 0.95)   # kirkas sininen
 		# Huojunta vain y-suunnassa (sin-aalto per botti-indeksi). Pohjana kaytetaan silotettua
 		# render_pos:ia (pehmeampi kuin raaka pos); jos visualisointia ei ole viela alustettu
 		# (ensimmainen frame), fallbackaa raakaan pos:iin ettei botti nayta hyppaavan origosta.
 		var base_pos: Vector2 = b.render_pos if b.visuals_init else b.pos
 		var offset_y := sin(t * 2.5 + float(i) * 1.7) * 2.0
-		var cx := base_pos.x
-		var cy := base_pos.y + offset_y
-		# Louhintalaser: miner joka louhii kohdepikselia -> nakyva sade botilta kohteeseen.
-		# Piirretaan ENNEN runkoa jotta origo jaa rungon alle; osumapiste erottuu silti kohteessa.
+		centers[i] = Vector2(base_pos.x, base_pos.y + offset_y)
+
+	# Passi 1: louhintalaserit (piirretaan ensin, jaavat rungon/reunuksen alle)
+	for i in bots.size():
+		var b := bots[i]
 		if b.role == Bot.Role.MINER and b.state == Bot.BotState.WORK \
 				and not b.mine_targets.is_empty() and b.mine_cursor < b.mine_targets.size():
+			var cx := centers[i].x
+			var cy := centers[i].y
 			var tp: Vector2i = b.mine_targets[b.mine_cursor]
 			# Pieni vareily jotta sade elaa (ei staattinen viiva)
 			var jit := Vector2(sin(t * 40.0 + i) * 1.0, cos(t * 37.0 + i) * 1.0)
@@ -1110,13 +1468,32 @@ func draw_bots(canvas: CanvasItem) -> void:
 			canvas.draw_line(Vector2(cx, cy), target, Color(1.0, 0.8, 0.45, 0.95), 1.0)
 			# Osumapiste
 			canvas.draw_circle(target, 2.0, Color(1.0, 0.9, 0.55, 0.9))
-		# Tumma reunus: 12x12 tausta keskitettyna -> 1 px reuna rungon ymparille
+
+	# Passi 2: kaikkien bottien tummat reunukset (12x12, keskitetty)
+	for i in bots.size():
+		var cx := centers[i].x
+		var cy := centers[i].y
 		canvas.draw_rect(Rect2(cx - 6.0, cy - 6.0, 12.0, 12.0), Color(0.05, 0.05, 0.08, 0.92))
-		# Varillinen runko 10x10 keskitettyna
+
+	# Passi 3: kaikkien bottien varilliset rungot (10x10, keskitetty) — piirtyvat AINA
+	# kaikkien reunusten paalle, koska koko passi 2 on jo suoritettu loppuun.
+	for i in bots.size():
+		var b := bots[i]
+		var col: Color
+		if b.role == Bot.Role.MINER:
+			col = Color(0.88, 0.66, 0.25)   # amber/kulta
+		else:
+			col = Color(0.35, 0.62, 0.95)   # kirkas sininen
+		var cx := centers[i].x
+		var cy := centers[i].y
 		canvas.draw_rect(Rect2(cx - 5.0, cy - 5.0, 10.0, 10.0), col)
-		# Haulerin kannettu kuorma: nakyva fysikaalinen klontti (ei enaa abstrakti palkki).
-		# Klontti roikkuu load_pos:n ymparilla (jousifysiikka paivittaa sen update_visualsissa),
-		# joten se laahaa liikkeessa ja heiluu kaannoksissa -> tuntuu oikealta painavalta kuormalta.
+
+	# Passi 4: haulerien kannettu kuorma — nakyva fysikaalinen klontti (ei enaa abstrakti palkki).
+	# Klontti roikkuu load_pos:n ymparilla (jousifysiikka paivittaa sen update_visualsissa),
+	# joten se laahaa liikkeessa ja heiluu kaannoksissa -> tuntuu oikealta painavalta kuormalta.
+	# Piirretaan viimeisena kaikkien runkojen paalle, kuten alkuperaisessakin jarjestyksessa.
+	for i in bots.size():
+		var b := bots[i]
 		if b.role == Bot.Role.HAULER and b.cargo_total > 0:
 			# 1) Imuvirtapartikkelit ensin (piirtyvat klontin taakse)
 			for fx in b.intake_fx:
@@ -1124,8 +1501,8 @@ func draw_bots(canvas: CanvasItem) -> void:
 				var fp: Vector2 = (fx["from"] as Vector2).lerp(b.load_pos, tt)
 				var fcol := _mat_color(int(fx["mat"]))
 				fcol.a = 1.0 - tt * 0.3   # himmenee lahestyessaan klonttia
-				canvas.draw_rect(Rect2(fp.x - 1.0, fp.y - 1.0, 2.0, 2.0), fcol)
-			# 2) Kuormaklontti: 2x2 px per kannettu yksikko, kultaisen kulman spiraalilla
+				canvas.draw_rect(Rect2(floor(fp.x), floor(fp.y), 1.0, 1.0), fcol)
+			# 2) Kuormaklontti: 1x1 px per kannettu yksikko (sama koko kuin sim-pikseli), kultaisen kulman spiraalilla
 			# sironnettuna sateelle (tasainen tayttö) + smear liikesuuntaan (laahaa perassa).
 			# Taysi-signaali: pieni "hengitys"-pulssi klontin sateeseen kun kuorma on tayssa.
 			var cap := b.carry_cap()
@@ -1142,12 +1519,14 @@ func draw_bots(canvas: CanvasItem) -> void:
 					if k >= cap:
 						break
 					var ang := float(k) * 2.399963      # kultainen kulma -> tasainen tayttö
-					var rad := (1.2 + sqrt(float(k)) * 0.9) * (1.0 + full_pulse)
-					var jit := sin(t * 9.0 + float(k) * 1.3) * 0.5   # granulaarinen vare
+					# Tiiviimpi pakkaus: pienempi sädekerroin -> pikselit lomittuvat kiinteäksi
+					# möykyksi (imuroitu pikseliryhmä näyttää tiheältä, ei hajanaiselta pilveltä).
+					var rad := (0.4 + sqrt(float(k)) * 0.40) * (1.0 + full_pulse)
+					var jit := sin(t * 9.0 + float(k) * 1.3) * 0.25   # granulaarinen vare (pienennetty)
 					var p := b.load_pos + Vector2(cos(ang), sin(ang)) * rad
-					p += vel * (float(k) / float(cap))     # koko klontti laahaa
+					p += vel * (float(k) / float(cap)) * 0.4   # kevyempi laahaus -> möykky pysyy koossa
 					p += Vector2(jit, 0.0)
-					canvas.draw_rect(Rect2(p.x - 1.0, p.y - 1.0, 2.0, 2.0), c)
+					canvas.draw_rect(Rect2(floor(p.x), floor(p.y), 1.0, 1.0), c)
 					k += 1
 
 

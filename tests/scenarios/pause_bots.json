@@ -1,0 +1,17 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "QA: peliajan nopeus / pause. Todistaa headless-bottisimulaatiopolulla (gpu_ready=false) etta sim_speed=0.0 pysayttaa botit kokonaan (_bot_logic_accum ei kerry -> bot_manager.tick ei koskaan kutsuta pausen aikana). Verrataan dump_bots-tulosteita manuaalisesti stdoutista.",
+  "steps": [
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 48, "margin": 12, "depth": 36 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "set_sim_speed", "speed": 0.0 },
+    { "cmd": "run_frames", "n": 600 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "set_sim_speed", "speed": 1.0 },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" }
+  ]
+}

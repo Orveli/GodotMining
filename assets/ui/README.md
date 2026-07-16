@@ -29,6 +29,11 @@ Katso `docs/UI_REDESIGN_PLAN.md` §3.5.
 | `zone_dump.png` | Vyöhyke-popover: Pudotus | Avoin kaukalo/kuoppa + amber-nuoli alas |
 | `bot_miner.png` | Bottipaneeli / botin yllä: Miner-rooli | Drone-runko + kapeneva poravarsi/piikki kyljessä (amber-kärki) |
 | `bot_hauler.png` | Bottipaneeli / botin yllä: Hauler-rooli | Drone-runko + kontti/rahtilaatikko selässä (amber-raita) |
+| `speed_pause.png` | Peliajan nopeus -paneeli, oikea yläkulma | Tauko — kaksi pystypalkkia (⏸), amber-täyttö |
+| `speed_1x.png` | Peliajan nopeus -paneeli, oikea yläkulma | 1x — yksi oikealle osoittava play-kolmio |
+| `speed_2x.png` | Peliajan nopeus -paneeli, oikea yläkulma | 2x — kaksi peräkkäistä, kapeampaa play-kolmiota |
+| `speed_3x.png` | Peliajan nopeus -paneeli, oikea yläkulma | 3x — kolme vielä kapeampaa play-kolmiota |
+| `speed_4x.png` | Peliajan nopeus -paneeli, oikea yläkulma | 4x — neljä kapeinta play-kolmiota, ohut välistys erottaa ne |
 | `coin.png` | HUD: raha (`◈ $1240`) | 16×16 px. Kultakolikko, kaksoisreunus, kiiltopikselit, keskitimantti-symboli |
 
 ## 9-slice-paneelikehykset (`panels/`)

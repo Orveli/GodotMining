@@ -1,0 +1,23 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "QA: peliajan nopeus / pause. Todistaa headless-CPU-CA-polulla (gpu_ready=false) etta sim_speed=0.0 pysayttaa falling-sand-simulaation kokonaan (hiekka ei liiku pausen aikana) ja sim_speed=1.0 jatkaa sen normaalisti ilman datan katoamista/tuplaantumista (assert_count sailyy vakiona koko ajan).",
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 100, "y": 250, "w": 40, "h": 5, "mat": 3 },
+    { "cmd": "fill_rect", "x": 110, "y": 50, "w": 20, "h": 1, "mat": 1 },
+
+    { "cmd": "set_sim_speed", "speed": 0.0 },
+    { "cmd": "run_frames", "n": 180 },
+
+    { "cmd": "assert_rect", "x": 110, "y": 50, "w": 20, "h": 1, "mat": 1, "min_pct": 100, "label": "PAUSE: hiekka ei ole liikkunut alkuperaiselta rivilta" },
+    { "cmd": "assert_count", "mat": 1, "min": 20, "max": 20, "label": "PAUSE: hiekan maara sailyy tasan 20 (ei katoa/tuplaannu)" },
+
+    { "cmd": "set_sim_speed", "speed": 1.0 },
+    { "cmd": "run_frames", "n": 400 },
+
+    { "cmd": "assert_rect", "x": 110, "y": 50, "w": 20, "h": 1, "mat": 0, "min_pct": 50, "label": "RESUME: hiekka on poistunut alkuperaiselta rivilta (enemmistö nyt tyhjaa)" },
+    { "cmd": "assert_rect", "x": 100, "y": 245, "w": 40, "h": 5, "mat": 1, "min_pct": 5, "label": "RESUME: hiekkaa saapunut lattian lahelle" },
+    { "cmd": "assert_count", "mat": 1, "min": 20, "max": 20, "label": "RESUME: hiekan maara sailyy tasan 20 pudotuksen jalkeenkin" }
+  ]
+}

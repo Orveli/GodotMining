@@ -46,6 +46,7 @@ var pickup_pos: Vector2 = Vector2.ZERO    # hauler: kohdekasan px-sijainti
 var work_accum: float = 0.0               # murto-px kerain louhinnalle
 var state_timer: float = 0.0              # aika nykyisessa tilassa (watchdog)
 var stall_timer: float = 0.0              # louhinnan pysahtymisvahti
+var dump_retry_cooldown: float = 0.0      # s; >0 = odota ennen uutta dump-yritysta (ei dump-vyohyketta hyvaksynyt)
 var last_solids: int = 0x7fffffff         # edellinen kiinteiden lkm (progressin seuranta)
 # Louhinnan tyolista: WORK-tilaan siirryttaessa napataan solun louhittavat pikselit
 # tahan (jarjestetty alhaalta ylos). mine_cursor etenee kun tyota kertyy MINE_RATEn
@@ -66,8 +67,9 @@ var intake_fx: Array = []                # imuvirtapartikkelit: {"from":Vector2,
 var visuals_init: bool = false           # false -> ensimmaisella framella snapataan pos:iin
 
 # Hauler: valittu dumppikohde nykyiselle kuormalle (Logistics.choose_dump palauttaa taman).
-# { "kind": "base"|"dump", "pos": Vector2, "rect": Rect2i, "id": int, "accepted": int }.
-# Tyhja -> oletus = base (yhteensopiva vanhan kayttaytymisen kanssa).
+# { "kind": "dump", "pos": Vector2, "rect": Rect2i, "id": int, "accepted": int,
+#   "is_base_dropoff": bool }. Tyhja {} = mikaan dump-vyohyke (myos base-dropoff) ei
+# hyvaksynyt kuormaa -> hauler jaa IDLEen, kuorma sailyy, yrittaa uudelleen (dump_retry_cooldown).
 var dump_target: Dictionary = {}
 
 
@@ -91,6 +93,21 @@ func move_speed() -> float:
 func add_cargo(mat: int, n: int) -> void:
 	cargo[mat] = int(cargo.get(mat, 0)) + n
 	cargo_total += n
+
+
+# Poista n px materiaalia kuormasta (ajallinen dumppi purkaa kuorman pikseli kerrallaan).
+# Ei mene negatiiviseksi; tyhjentynyt materiaaliavain poistetaan dictista (deterministinen
+# tyhjeneminen). cargo_total pidetaan synkassa avaimien summan kanssa.
+func remove_cargo(mat: int, n: int = 1) -> void:
+	var have := int(cargo.get(mat, 0))
+	var take := mini(n, have)
+	if take <= 0:
+		return
+	if have - take > 0:
+		cargo[mat] = have - take
+	else:
+		cargo.erase(mat)
+	cargo_total -= take
 
 
 func clear_cargo() -> void:

@@ -1,10 +1,10 @@
 # Maailmageneraattori
 # Maailman koko: 1664×960 pikseliä
 # Pipeline:
-#   Phase 1: _generate_terrain()          → surface_y
-#   Phase 2: _generate_caves()            → cave_paths
-#   Phase 3: resurssit (hiekka, mineraalit, luolareunit, järvet)
-#   Phase 4: _grow_vegetation()           → ruoho + pensaat
+#   Phase 1: _generate_terrain()          → surface_y (ruudukkoon snapattu kivipinta)
+#   Phase 2: _generate_caves()            → cave_paths (poistettu käytöstä)
+#   Phase 3: resurssit (mineraalit, luolareunit, järvet — EI hiekkaa)
+#   Phase 4: kasvillisuus — poistettu käytöstä (kivipinnalla ei kasvualustaa)
 class_name WorldGen
 
 const MAT_EMPTY        := 0
@@ -157,9 +157,8 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 
 	# Phase 3: Resurssit — arvokkain ensin (ei ylikirjoita)
 	# Malmit (COAL/IRON_ORE/COPPER/GOLD_ORE/RARE_EARTH) sijoitetaan mutkittelevina
-	# suonina (_place_vein_set) — syvemmällä = arvokkaampaa. Vesi/öljy/hiekka pysyvät
-	# ellipsiblobeina (_place_deposit_set).
-	_place_surface_sand(grid, w, h, surface_y, rng)
+	# suonina (_place_vein_set) — syvemmällä = arvokkaampaa. Vesi/öljy pysyvät
+	# ellipsiblobeina (_place_deposit_set). Hiekka on poistettu pelistä.
 	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_OIL,
 		oil_count, oil_depth, oil_depth_max,
 		oil_r_min, oil_r_max, max_dp)
@@ -175,8 +174,9 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 		copper_count, copper_depth, copper_depth_max,
 		copper_vein_len_min, copper_vein_len_max,
 		copper_thickness_min, copper_thickness_max, max_dp)
+	# Vesitaskut vain syvälle (min 0.35 norm. syvyys) — pintakerros pysyy kuivana kivenä.
 	_place_deposit_set(grid, w, h, surface_y, rng, perturb_data, MAT_WATER,
-		water_count, 0.20, 0.70, 8.0, 16.0, max_dp)
+		water_count, 0.35, 0.70, 8.0, 16.0, max_dp)
 	_place_vein_set(grid, w, h, surface_y, rng, perturb_data, MAT_IRON_ORE,
 		iron_count, iron_depth, iron_depth_max,
 		iron_vein_len_min, iron_vein_len_max,
@@ -186,11 +186,13 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 		coal_vein_len_min, coal_vein_len_max,
 		coal_thickness_min, coal_thickness_max, max_dp)
 	_place_cave_edge_deposits(grid, w, h, surface_y, rng, perturb_data, cave_paths)
-	rng.seed = world_seed + 201
-	_place_lakes(grid, w, h, rng, surface_y)
+	# Järvet poistettu käytöstä: _place_lakes sijoitti vesialtaita suoraan pintaan.
+	# Pintakerros pysyy nyt pelkkänä kiinteänä kivenä (ei pintavettä eikä hiekkaa).
+	# rng.seed = world_seed + 201
+	# _place_lakes(grid, w, h, rng, surface_y)
 
-	# Phase 4: Kasvillisuus
-	_grow_vegetation(grid, w, h, rng)
+	# Phase 4: Kasvillisuus — poistettu käytöstä. Pinta on pelkkää kiveä, joten
+	# ruoholle/pensaille ei ole multa-kasvualustaa (_grow_vegetation etsii MAT_DIRT).
 
 	# Viimeistely: leimaa puhdas tehdasalusta (poistaa mahdolliset malmit/
 	# kasvit alustan päältä ja varmistaa ehjän STONE-perustuksen)
@@ -205,49 +207,74 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 
 
 # ============================================================
-# Phase 1: Maaston luonti
-# Kolme FastNoiseLite-kerrosta eri taajuuksilla
+# Phase 1: Maaston luonti — ruudukkoon snapattu kivipinta
+#
+# Pinta lasketaan designaatio-/navigaatiogridin solukoossa (16 px):
+#   1. Loiva matalataajuinen kohina → korkeus per grid-sarake, snapattuna
+#      lähimpään solurajaan → tasaiset osuudet asettuvat gridilinjoille.
+#   2. Vierekkäisten sarakkeiden korkeusero pakotetaan enintään yhteen soluun,
+#      joten kaikki siirtymät ovat 45° viisteitä (puolikkaan solun kolmio) —
+#      ei pystysuoria jyrkänteitä. Näin louhinnan aloitus pysyy siistinä
+#      ruudukossa, jossa kaikki mukailee gridiä.
+#   3. Pinta täytetään pelkällä kivellä (ei multaa, ei hiekkaa).
 # ============================================================
 static func _generate_terrain(grid: PackedByteArray, w: int, h: int,
 		world_seed: int) -> PackedFloat32Array:
-	var noise_low  := _make_noise(world_seed + 1, 0.003, 1)  # Alhainen taajuus
-	var noise_mid  := _make_noise(world_seed + 2, 0.012, 2)  # Keski taajuus
-	var noise_high := _make_noise(world_seed + 3, 0.05,  2)  # Korkea taajuus
+	var cell := 16                             # px — sama solukoko kuin DesignationGrid/NavGrid
+	var gw := w / cell                         # grid-sarakkeita (1664/16 = 104)
 
-	var base_y := float(h) * 0.40
+	var base_y := float(h) * 0.40              # 384 px = solurivi 24 (16-jaollinen)
+	var base_cell := int(round(base_y / float(cell)))
+
+	# Loiva matalataajuinen profiili → "lähes tasainen" pinta
+	var noise := _make_noise(world_seed + 1, 0.003, 2)
+	var amp_cells := 2.0                        # korkeusvaihtelu ± ~2 solua (±32 px)
+
+	# Snapattu korkeus (soluina) per grid-sarake
+	var top_cell := PackedInt32Array()
+	top_cell.resize(gw)
+	for gx in gw:
+		var cx := gx * cell + cell / 2
+		var n := noise.get_noise_2d(float(cx), 0.0)  # -1..1
+		top_cell[gx] = base_cell + int(round(n * amp_cells))
+
+	# --- Tehdasalusta: pakota alustan sarakkeet pinnan perustasoon ---
+	platform_y = base_cell * cell
+	platform_x0 = w / 2 - platform_w / 2
+	var plat_gx0 := maxi(platform_x0 / cell, 0)
+	var plat_gx1 := mini((platform_x0 + platform_w) / cell, gw - 1)
+
+	# Pakota vierekkäisten sarakkeiden ero enintään yhteen soluun (45° maksimikaltevuus).
+	# Iteroidaan molempiin suuntiin ja pidetään alusta pinnitettynä perustasoon.
+	for _pass in 4:
+		for gx in range(plat_gx0, plat_gx1 + 1):
+			top_cell[gx] = base_cell
+		for gx in range(1, gw):
+			top_cell[gx] = clampi(top_cell[gx], top_cell[gx - 1] - 1, top_cell[gx - 1] + 1)
+		for gx in range(gw - 2, -1, -1):
+			top_cell[gx] = clampi(top_cell[gx], top_cell[gx + 1] - 1, top_cell[gx + 1] + 1)
+	for gx in range(plat_gx0, plat_gx1 + 1):
+		top_cell[gx] = base_cell
+
+	# --- Per-pikseli pinta: lineaarinen interpolointi sarakkeiden vasempien
+	# reunojen korkeuksien välillä → tasaiset osuudet gridilinjoilla,
+	# 45° viisteet siirtymissä (viisteen solu jää puoliksi täyteen). ---
 	var surface_y := PackedFloat32Array()
 	surface_y.resize(w)
-
 	for x in w:
-		var fx := float(x)
-		var low  := noise_low.get_noise_2d(fx, 0.0)
-		var mid  := noise_mid.get_noise_2d(fx, 0.0)
-		var high := noise_high.get_noise_2d(fx, 0.0)
-		# Loiva pinta: pienet amplitudit → korkeusvaihtelu koko kartalla alle ~60 px.
-		# Säilytetään pientä visuaalista vaihtelua kolmella taajuudella.
-		surface_y[x] = clampf(base_y + low * 20.0 + mid * 8.0 + high * 3.0,
-			base_y - 45.0, base_y + 45.0)
+		var gx := x / cell
+		var gx1 := mini(gx + 1, gw - 1)
+		var frac := float(x - gx * cell) / float(cell)
+		var y0 := float(top_cell[gx] * cell)
+		var y1 := float(top_cell[gx1] * cell)
+		surface_y[x] = round(lerpf(y0, y1, frac))
 
-	# --- Tehdasalusta: tasoita ~300 px levyinen alue kartan keskeltä ---
-	# Lasketaan alustan sijainti todellisen w/h:n mukaan ja tallennetaan
-	# staattisiin muuttujiin get_platform_rect():ia varten.
-	platform_y = int(base_y)
-	platform_x0 = w / 2 - platform_w / 2
-	var px_end := platform_x0 + platform_w
-	for x in range(maxi(platform_x0, 0), mini(px_end, w)):
-		surface_y[x] = float(platform_y)
-
-	# Täytä maailma maastoprofiililla
+	# Täytä maailma: pinnasta alaspäin pelkkää kiveä (siisti kivipinta, ei multaa).
 	for y in h:
 		for x in w:
-			var idx := y * w + x
-			var sy  := surface_y[x]
-			if float(y) < sy:
+			if float(y) < surface_y[x]:
 				continue
-			elif float(y) < sy + float(dirt_thickness):
-				grid[idx] = MAT_DIRT
-			else:
-				grid[idx] = MAT_STONE
+			grid[y * w + x] = MAT_STONE
 
 	_enforce_edges(grid, w, h)
 	return surface_y

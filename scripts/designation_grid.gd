@@ -50,10 +50,12 @@ func set_cell(dx: int, dy: int, v: int) -> void:
 	version += 1
 
 
-func paint_px_rect(r: Rect2i, add: bool) -> void:
+func paint_px_rect(r: Rect2i, add: bool, mineable_check: Callable = Callable()) -> void:
 	# Muuntaa pikselisuorakulmion soluvyohykkeeksi ja clampaa gridin reunoihin.
 	#   add = true  -> asettaa VAIN D_NONE-solut D_QUEUEDiksi (ei ylikirjoita
-	#                  BLOCKED/CLAIMED/MINING/QUEUED-tiloja).
+	#                  BLOCKED/CLAIMED/MINING/QUEUED-tiloja). Jos mineable_check on
+	#                  annettu (is_valid()), solu jaa D_NONEksi ellei mineable_check(cx, cy)
+	#                  palauta true — nain tyhjan ilman paalle ei voi jonottaa louhintaa.
 	#   add = false -> nollaa minka tahansa tilan D_NONEksi.
 	if r.size.x <= 0 or r.size.y <= 0:
 		return
@@ -81,7 +83,7 @@ func paint_px_rect(r: Rect2i, add: bool) -> void:
 		for cx in range(cx0, cx1 + 1):
 			var idx := row + cx
 			if add:
-				if cells[idx] == D_NONE:
+				if cells[idx] == D_NONE and (not mineable_check.is_valid() or mineable_check.call(cx, cy)):
 					cells[idx] = D_QUEUED
 					changed = true
 			else:

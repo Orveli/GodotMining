@@ -85,7 +85,8 @@ func _test_accept_cargo_empty() -> void:
 	me.free()
 
 
-# spawn_pos on basen ylapuolella, intake_pos basen ylareunassa, molemmat keskilinjalla.
+# spawn_pos on basen ylapuolella, intake_pos DROP_HEIGHT px intake-aukon ylapuolella
+# (hauler pudottaa kuorman ilmaan, CA pudottaa sen intakeen), molemmat keskilinjalla.
 func _test_spawn_and_intake_geometry() -> void:
 	var center := Vector2i(400, 300)
 	var me := _make_base(center)
@@ -94,9 +95,10 @@ func _test_spawn_and_intake_geometry() -> void:
 	# Sama x-keskilinja
 	_check(is_equal_approx(sp.x, ip.x), "spawn_pos ja intake_pos jakavat x-keskilinjan (%.1f vs %.1f)" % [sp.x, ip.x])
 	# spawn selvasti intaken ylapuolella (pienempi y)
-	_check(sp.y < ip.y - 10.0, "spawn_pos on selvasti intake_pos:n ylapuolella (sp.y=%.1f < ip.y=%.1f)" % [sp.y, ip.y])
-	# intake basen ylareunassa (grid_pos.y)
-	_check(is_equal_approx(ip.y, float(me.grid_pos.y)), "intake_pos.y = basen ylareuna grid_pos.y")
+	_check(sp.y < ip.y, "spawn_pos on intake_pos:n ylapuolella (sp.y=%.1f < ip.y=%.1f)" % [sp.y, ip.y])
+	# intake_pos DROP_HEIGHT px basen ylareunan (grid_pos.y) ylapuolella
+	_check(is_equal_approx(ip.y, float(me.grid_pos.y) - float(MoneyExit.DROP_HEIGHT)),
+		"intake_pos.y = basen ylareuna grid_pos.y - DROP_HEIGHT")
 	me.free()
 
 

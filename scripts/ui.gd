@@ -56,6 +56,11 @@ const ICON_ZONE_PICKUP := preload("res://assets/ui/icons/zone_pickup.png")
 const ICON_ZONE_DUMP := preload("res://assets/ui/icons/zone_dump.png")
 const ICON_BOT_MINER := preload("res://assets/ui/icons/bot_miner.png")
 const ICON_BOT_HAULER := preload("res://assets/ui/icons/bot_hauler.png")
+const ICON_SPEED_PAUSE := preload("res://assets/ui/icons/speed_pause.png")
+const ICON_SPEED_1X := preload("res://assets/ui/icons/speed_1x.png")
+const ICON_SPEED_2X := preload("res://assets/ui/icons/speed_2x.png")
+const ICON_SPEED_3X := preload("res://assets/ui/icons/speed_3x.png")
+const ICON_SPEED_4X := preload("res://assets/ui/icons/speed_4x.png")
 
 @onready var pixel_world: TextureRect = get_node("../../PixelWorld")
 
@@ -103,8 +108,11 @@ var tool_btn_erase: Button
 var mine_row_panel: PanelContainer
 var desig_mode_buttons: Array[Button] = []
 var _desig_tool_mode: int = 0
-var brush_slider: HSlider
-var brush_label: Label
+
+# ── Peliajan nopeus (oikea-ylä, peilikuva top_bar-sijoittelusta): Tauko/1x/2x/3x/4x ──
+var speed_panel: PanelContainer
+var speed_buttons: Array[Button] = []
+const SPEED_VALUES: Array[float] = [0.0, 1.0, 2.0, 3.0, 4.0]   # Tauko, 1x, 2x, 3x, 4x
 
 # ── Tray-animaatiot (Vaihe 5 kohta 2) ───────────────────────────────────────
 var _tray_tweens: Dictionary = {}   # PanelContainer -> Tween (aktiivinen slide+fade)
@@ -122,13 +130,13 @@ var role_count_label: Label
 var bot_list_vbox: VBoxContainer
 var _last_fleet_sig: String = ""
 var _bot_upgrade_items: Array = []   # [{ "btn": Button, "price": int }]
-var base_filter_toggles: Dictionary = {}   # mat_id -> Button ("Base hyväksyy" -rivi)
 
 # ── Kontekstipopover (vyöhyke- tai konepaneeli, ilmestyy maailmakohteen viereen) ──
 var _context_popover: PanelContainer = null
 var _context_popover_kind: String = ""
 var _zone_popover_zid: int = -1
 var _zone_popover_toggles: Dictionary = {}
+var _zone_popover_active_btn: Button = null
 var _popover_just_opened: bool = false   # estää saman klikin sulkemasta juuri avattua popoveria
 var _prev_left_ui: bool = false          # oma left-just-seuranta (riippumaton pixel_worldista)
 
@@ -206,6 +214,7 @@ func _ready() -> void:
 	_build_top_bar()
 	_build_actionbar()
 	_build_mine_row()
+	_build_speed_panel()
 	_build_build_tray()
 	_build_bot_tray()
 	_build_scanner_panel()
@@ -230,7 +239,7 @@ func _connect_world_signals() -> void:
 
 
 func _register_ui_panels() -> void:
-	for panel in [actionbar_panel, mine_row_panel, build_tray_panel, bot_tray_panel, scanner_panel]:
+	for panel in [actionbar_panel, mine_row_panel, speed_panel, build_tray_panel, bot_tray_panel, scanner_panel]:
 		_register_panel(panel)
 
 
@@ -405,26 +414,6 @@ func _build_mine_row() -> void:
 		hb.add_child(b)
 		desig_mode_buttons.append(b)
 
-	hb.add_child(_sep())
-
-	brush_label = Label.new()
-	brush_label.text = "Koko %d" % int(pixel_world.brush_size)
-	brush_label.add_theme_font_size_override("font_size", 12)
-	brush_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hb.add_child(brush_label)
-
-	brush_slider = HSlider.new()
-	brush_slider.min_value = 1.0
-	brush_slider.max_value = 30.0
-	brush_slider.step = 1.0
-	brush_slider.value = float(pixel_world.brush_size)
-	brush_slider.focus_mode = Control.FOCUS_NONE
-	brush_slider.custom_minimum_size = Vector2(90.0, 0.0)
-	brush_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	brush_slider.tooltip_text = "Pensselikoko"
-	brush_slider.value_changed.connect(_on_brush_changed)
-	hb.add_child(brush_slider)
-
 	get_parent().add_child.call_deferred(mine_row_panel)
 
 
@@ -438,9 +427,36 @@ func _set_desig_mode(mode: int) -> void:
 	pixel_world.build_mode = 0  # BUILD_NONE
 
 
-func _on_brush_changed(value: float) -> void:
-	pixel_world.brush_size = int(value)
-	brush_label.text = "Koko %d" % int(value)
+# ═══════════════════════════════════════════════════════════════════════════
+#  PELIAJAN NOPEUS (oikea-ylä) — Tauko/1x/2x/3x/4x, peilikuva top_bar-sijoittelusta
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _build_speed_panel() -> void:
+	speed_panel = PanelContainer.new()
+	speed_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	speed_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	speed_panel.offset_right = -10.0
+	speed_panel.offset_top = 10.0
+	speed_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 4)
+	speed_panel.add_child(hb)
+
+	var icons: Array[Texture2D] = [ICON_SPEED_PAUSE, ICON_SPEED_1X, ICON_SPEED_2X, ICON_SPEED_3X, ICON_SPEED_4X]
+	var tips: Array[String] = ["Tauko", "1x", "2x", "3x", "4x"]
+	speed_buttons.clear()
+	for i in icons.size():
+		var b := _make_tool_button(icons[i], tips[i], 36.0)
+		b.pressed.connect(_on_speed_pressed.bind(SPEED_VALUES[i]))
+		hb.add_child(b)
+		speed_buttons.append(b)
+
+	get_parent().add_child.call_deferred(speed_panel)
+
+
+func _on_speed_pressed(value: float) -> void:
+	pixel_world.sim_speed = value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -555,14 +571,6 @@ func _build_bot_tray() -> void:
 	bot_list_vbox.add_theme_constant_override("separation", 2)
 	scroll.add_child(bot_list_vbox)
 	vb.add_child(scroll)
-
-	vb.add_child(HSeparator.new())
-	vb.add_child(_label("Base hyväksyy:", 11, COL_DIM))
-	var filter_row := HBoxContainer.new()
-	filter_row.add_theme_constant_override("separation", 3)
-	vb.add_child(filter_row)
-	base_filter_toggles = _build_mat_toggle_row(filter_row, 0)
-	_wire_mat_toggle_row(base_filter_toggles, _on_base_filter_changed)
 
 	get_parent().add_child.call_deferred(bot_tray_panel)
 
@@ -730,6 +738,7 @@ func _open_zone_popover(zone: Dictionary) -> void:
 	var ztype := String(zone.get("type", "?"))
 	var mask := int(zone.get("filter_mask", 0))
 	var rect: Rect2i = zone.get("rect", Rect2i())
+	var is_base_dropoff := bool(zone.get("is_base_dropoff", false))
 
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
@@ -737,7 +746,22 @@ func _open_zone_popover(zone: Dictionary) -> void:
 	vb.add_theme_constant_override("separation", 4)
 	panel.add_child(vb)
 
-	vb.add_child(_label("%s #%d" % [ztype.capitalize(), zid], 12, COL_TEXT))
+	if is_base_dropoff:
+		vb.add_child(_label("Base-pudotus", 12, COL_TEXT))
+		vb.add_child(_label("Pudottaa baseen -> rahaksi", 10, COL_DIM))
+	else:
+		vb.add_child(_label("%s #%d" % [ztype.capitalize(), zid], 12, COL_TEXT))
+
+	# Aktiivinen/Pois päältä -kytkin (materiaalifiltterin YLÄPUOLELLE). Pois päältä ollessa
+	# vyöhyke ei kelpaa choose_dumpin/pickup_zonesin kandidaatiksi riippumatta filtteristä.
+	var active := bool(zone.get("active", true))
+	var active_btn := _make_btn(_zone_active_label(active), 11)
+	active_btn.toggle_mode = true
+	active_btn.button_pressed = active
+	active_btn.pressed.connect(_on_zone_popover_active_toggled)
+	vb.add_child(active_btn)
+	_zone_popover_active_btn = active_btn
+
 	vb.add_child(_label("Hyväksytyt materiaalit:", 10, COL_DIM))
 
 	var row := HBoxContainer.new()
@@ -768,6 +792,23 @@ func _on_zone_popover_filter_changed() -> void:
 	if lg == null or _zone_popover_zid < 0 or not lg.has_method("set_zone_filter"):
 		return
 	lg.set_zone_filter(_zone_popover_zid, _filter_mask_from(_zone_popover_toggles))
+
+
+# Aktiivinen/Pois päältä -kytkin: filter_mask säilyy koskemattomana, vain active-lippu vaihtuu.
+func _on_zone_popover_active_toggled() -> void:
+	var lg := _logistics()
+	var btn := _zone_popover_active_btn
+	if lg == null or _zone_popover_zid < 0 or btn == null or not is_instance_valid(btn):
+		return
+	if not lg.has_method("set_zone_active"):
+		return
+	var new_active := btn.button_pressed
+	lg.set_zone_active(_zone_popover_zid, new_active)
+	btn.text = _zone_active_label(new_active)
+
+
+func _zone_active_label(active: bool) -> String:
+	return "Aktiivinen: KYLLÄ" if active else "Aktiivinen: EI"
 
 
 func _on_zone_popover_remove() -> void:
@@ -885,6 +926,7 @@ func _close_context_popover() -> void:
 	_context_popover_kind = ""
 	_zone_popover_zid = -1
 	_zone_popover_toggles = {}
+	_zone_popover_active_btn = null
 	_machine_popover_machine = null
 	_machine_popover_rows = {}
 
@@ -1067,22 +1109,6 @@ func _filter_mask_from(checks: Dictionary) -> int:
 		if checks[mat_id].button_pressed:
 			mask |= (1 << int(mat_id))
 	return mask
-
-
-func _on_base_filter_changed() -> void:
-	var lg := _logistics()
-	if lg == null or not lg.has_method("set_base_filter"):
-		return
-	lg.set_base_filter(_filter_mask_from(base_filter_toggles))
-
-
-# Himmentää "Base hyväksyy" -togglet jos logistics-backend puuttuu (harvinaista —
-# lane A on jo integroitu, mutta guardattu kuten muukin backend-riippuvainen UI).
-func _update_base_filter_availability() -> void:
-	var lg := _logistics()
-	var enabled: bool = lg != null and lg.has_method("set_base_filter")
-	for mat_id in base_filter_toggles:
-		base_filter_toggles[mat_id].disabled = not enabled
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1458,7 +1484,6 @@ func _process(delta: float) -> void:
 		_update_fleet()
 		_update_afford()
 		_maybe_rebuild_bot_list()
-		_update_base_filter_availability()
 		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
 
 	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
@@ -1533,6 +1558,18 @@ func _update_actionbar_highlight() -> void:
 
 	var erasing: bool = (not dm) and (not building) and int(pixel_world.current_material) == MAT_EMPTY
 	tool_btn_erase.modulate = COL_ACTIVE if erasing else Color.WHITE
+
+	_update_speed_highlight()
+
+
+# Korostaa aktiivisen peliajan nopeuden (Tauko/1x/2x/3x/4x) samalla COL_ACTIVE-
+# modulaatiotekniikalla kuin desig_mode_buttons yllä.
+func _update_speed_highlight() -> void:
+	if speed_buttons.is_empty():
+		return
+	var speed: float = pixel_world.sim_speed
+	for i in speed_buttons.size():
+		speed_buttons[i].modulate = COL_ACTIVE if is_equal_approx(speed, SPEED_VALUES[i]) else Color.WHITE
 
 
 # ═══════════════════════════════════════════════════════════════════════════

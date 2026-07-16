@@ -341,6 +341,75 @@ def icon_bot_hauler():
 
 
 # ---------------------------------------------------------------------------
+# Peliajan nopeus -ikonit (oikea yläkulma)
+# ---------------------------------------------------------------------------
+
+def _speed_tri(d, x0, x1, ymid, half_h):
+    """Yksi oikealle osoittava play-kolmio välillä x0..x1, keskitetty ymid:iin."""
+    d.polygon(
+        [(x0, ymid - half_h), (x0, ymid + half_h), (x1, ymid)],
+        fill=AMBER, outline=OUTLINE,
+    )
+
+
+def icon_speed_pause():
+    """Tauko — kaksi pystypalkkia (⏸), amber-täyttö tummalla ääriviivalla."""
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    d.rectangle([6, 4, 10, 20], fill=AMBER, outline=OUTLINE)
+    d.rectangle([14, 4, 18, 20], fill=AMBER, outline=OUTLINE)
+    img.putpixel((7, 5), AMBER_HI)
+    img.putpixel((15, 5), AMBER_HI)
+    return img
+
+
+def icon_speed_1x():
+    """1x — yksi oikealle osoittava play-kolmio, normaali peliaika."""
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    _speed_tri(d, 6, 18, 12, 8)
+    img.putpixel((8, 8), AMBER_HI)
+    return img
+
+
+def icon_speed_2x():
+    """2x — kaksi peräkkäistä play-kolmiota, kapeampia kuin 1x."""
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    _speed_tri(d, 2, 11, 12, 7)
+    _speed_tri(d, 13, 22, 12, 7)
+    img.putpixel((4, 8), AMBER_HI)
+    img.putpixel((15, 8), AMBER_HI)
+    return img
+
+
+def icon_speed_3x():
+    """3x — kolme vielä kapeampaa play-kolmiota, mahtuvat 24px-leveyteen."""
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    _speed_tri(d, 2, 8, 12, 6)
+    _speed_tri(d, 9, 15, 12, 6)
+    _speed_tri(d, 16, 22, 12, 6)
+    img.putpixel((3, 9), AMBER_HI)
+    img.putpixel((10, 9), AMBER_HI)
+    img.putpixel((17, 9), AMBER_HI)
+    return img
+
+
+def icon_speed_4x():
+    """4x — neljä kapeinta play-kolmiota, ohut OUTLINE-välistys erottaa ne toisistaan."""
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    _speed_tri(d, 2, 6, 12, 5)
+    _speed_tri(d, 7, 11, 12, 5)
+    _speed_tri(d, 12, 16, 12, 5)
+    _speed_tri(d, 17, 21, 12, 5)
+    img.putpixel((3, 10), AMBER_HI)
+    img.putpixel((18, 10), AMBER_HI)
+    return img
+
+
+# ---------------------------------------------------------------------------
 # Kolikko (16x16)
 # ---------------------------------------------------------------------------
 
@@ -444,6 +513,11 @@ def main():
         "zone_dump.png": icon_zone_dump(),
         "bot_miner.png": icon_bot_miner(),
         "bot_hauler.png": icon_bot_hauler(),
+        "speed_pause.png": icon_speed_pause(),
+        "speed_1x.png": icon_speed_1x(),
+        "speed_2x.png": icon_speed_2x(),
+        "speed_3x.png": icon_speed_3x(),
+        "speed_4x.png": icon_speed_4x(),
         "coin.png": icon_coin(),
     }
     icon_paths = []

@@ -15,6 +15,7 @@ const EXIT_W := 12
 const EXIT_H := 10
 const INTAKE_W := 6
 const FLOOR_MAT := 3  # MAT_STONE
+const DROP_HEIGHT := 12  # px basen intake-aukon ylapuolelle: hauler pudottaa tahan, pikselit putoavat intakeen
 
 # Hinnat per pikseli — $/px, kontraktin mukaiset (GDD §4.1, §8 mapping).
 # Kaikki tuntemattomat materiaalit → DEFAULT_PRICE. Jalostus nostaa arvoa.
@@ -152,9 +153,21 @@ func spawn_pos() -> Vector2:
 	return Vector2(float(grid_pos.x) + float(EXIT_W) * 0.5, float(grid_pos.y) - 20.0)
 
 
-# Haulerin dump-lentokohde: basen yläreunan keskikohta (intake-aukon kohdalla).
+# Haulerin dump-lentokohde: basen intake-aukon YLAPUOLELLA (DROP_HEIGHT px), keskilinjalla.
+# Hauler lentaa tahan ja pudottaa kuorman -> pikselit putoavat ilmassa intakeen.
 func intake_pos() -> Vector2:
-	return Vector2(float(grid_pos.x) + float(EXIT_W) * 0.5, float(grid_pos.y))
+	return Vector2(float(grid_pos.x) + float(EXIT_W) * 0.5, float(grid_pos.y) - float(DROP_HEIGHT))
+
+
+# Pudotussarakkeet = intake-aukon x-koordinaatit. Hauler kirjoittaa kuorman naihin sarakkeisiin
+# basen ylapuolelle -> pikselit putoavat suoraan intakeen (ei valu kiintealle olalle).
+func drop_columns() -> Array[int]:
+	return intake_x
+
+
+# Rivi jolta hauler aloittaa pudotuksen (intake-aukon ylapuolella, DROP_HEIGHT px).
+func drop_start_y() -> int:
+	return grid_pos.y - DROP_HEIGHT
 
 
 func _draw() -> void:
