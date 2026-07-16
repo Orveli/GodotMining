@@ -4,7 +4,6 @@
 .mcp.json
 game_view.png
 game_state.json
-<<<<<<< HEAD
 game_view.png.import
 debug_*.png
 debug_*.png.import
@@ -14,6 +13,4 @@ tests/output/
 .claude/settings.local.json
 .claude/worktrees/
 .claude/agent-memory/
-=======
 build/
->>>>>>> worktree-agent-a16c9f55f4f0810bc
