@@ -22,6 +22,15 @@ const D_BLOCKED := 2
 const D_CLAIMED := 3
 const D_MINING := 4
 
+# --- Idle-syyt (P0-1): JOHDETAAN tyonjaon tilannekuvasta get_fleet_statsissa, EI pysyvaa tilaa ---
+# UI (ui_bot_status_overlay + ui.gd:n herateet) lukee naita. NO_QUEUED/ALL_BLOCKED koskevat
+# mineria, NO_LOOSE hauleria. OK = idle mutta tyota on tulossa (frontier/kasa loytyy).
+const IDLE_REASON_ACTIVE := 0    # ei idle (botilla on tyo)
+const IDLE_REASON_OK := 1        # idle, mutta tyota on saatavilla (siirtyy pian tyohon)
+const IDLE_REASON_NO_QUEUED := 2 # miner: ei yhtaan louhintadesignaatiota jaljella
+const IDLE_REASON_ALL_BLOCKED := 3  # miner: designaatioita on, mutta yksikaan ei ole tavoitettavissa
+const IDLE_REASON_NO_LOOSE := 4  # hauler: ei kerattavaa irtomateriaalia
+
 # --- Navigaatiogridi (peilaus NavGridista) ---
 const NCELL := 16
 const NW := 104
@@ -130,6 +139,14 @@ var _next_id: int = 0                       # monotoninen bot-id-jakaja
 # tasta lahimman EIKA skannaa koko 6240-gridia per botti.
 var _frontier_cells: Array[Vector2i] = []
 
+# P0-1: designaatioiden tilannekooste, paivitetaan _scan_designationsissa (2 Hz). get_fleet_stats
+# lukee naita (ei omaa skannausta) -> idle-syyt ja UI-herateet ilman per-frame-gridiskannausta.
+var _scan_blocked_count: int = 0    # D_BLOCKED-solut (designaatioita on mutta ei tavoitettavissa)
+var _scan_working_count: int = 0    # D_CLAIMED + D_MINING (louhinta kaynnissa)
+# P0-3: onko yksikaan designaatiosolu koskaan louhittu valmiiksi (estaa "merkkaa lisaa" -herate
+# heti pelin alussa ennen ekaa designaatiota). Nollataan setupissa, kasvaa _finish_miningissa.
+var _designations_consumed: int = 0
+
 # LUT:t suoraan mat-ID:lla (256 alkiota)
 var _mineable_lut: PackedByteArray         # miner louhii nama
 var _granular_lut: PackedByteArray         # hauler poimii nama
@@ -148,6 +165,9 @@ func setup(world: Node) -> void:
 	_frontier_cells.clear()
 	_cell_cooldown.clear()
 	_assign_timer = 0.0
+	_scan_blocked_count = 0
+	_scan_working_count = 0
+	_designations_consumed = 0
 	# Poimi logistics-instanssi worldista jos se on jo luotu (lane G kytkee). null on ok.
 	if logistics == null:
 		logistics = world.get("logistics")
@@ -283,19 +303,61 @@ func get_fleet_stats() -> Dictionary:
 				haulers_active += 1
 		# pos/cargo_total/carry_cap: additiivisia read-only-kenttiä (UI-REDESIGN Vaihe 4,
 		# scripts/ui_bot_status_overlay.gd) — eivät vaikuta bottilogiikkaan, vain UI lukee niitä.
+		# idle_reason (P0-1): johdettu tilannekuvasta, kertoo MIKSI botti on idle (overlay + herateet).
 		bot_list.append({
 			"id": b.id, "role": b.role, "tier": b.tier, "state": b.state,
 			"pos": b.pos, "cargo_total": b.cargo_total, "carry_cap": b.carry_cap(),
+			"idle_reason": _idle_reason_for(b),
 		})
+	# P0-1/P0-3: laumatason tilannekooste UI-heratteita varten (kaikki JOHDETTUA tilaa,
+	# paivitetaan _scan_designationsissa 2 Hz -> ei omaa gridiskannausta per kutsu).
+	var loose: bool = _has_loose_material()
 	return {
 		"miners": miners, "haulers": haulers,
 		"miners_active": miners_active, "haulers_active": haulers_active,
 		"bots": bot_list,
+		# Designaatiotilanne: frontier = tavoitettavat QUEUED-solut, blocked = tavoittamattomat,
+		# working = louhinta kesken (CLAIMED/MINING). "any_designation" = onko yhtaan tyokohdetta jaljella.
+		"frontier": _frontier_cells.size(),
+		"desig_blocked": _scan_blocked_count,
+		"desig_working": _scan_working_count,
+		"any_designation": (_frontier_cells.size() + _scan_blocked_count + _scan_working_count) > 0,
+		"loose_material": loose,
+		"designations_consumed": _designations_consumed,
 	}
 
 
 func bot_count() -> int:
 	return bots.size()
+
+
+# P0-1: johda idle-botin syy tyonjaon tilannekuvasta (EI pysyvaa tilaa — laske joka kutsulla
+# cachetetuista _scan_*-kentista). Ei-idle botti -> ACTIVE. Miner: frontier tyhja + designaatioita
+# on -> ALL_BLOCKED; ei designaatioita lainkaan -> NO_QUEUED; muuten OK (tyo tulossa). Hauler:
+# kuorma tallella tai kerattavaa on -> OK; muuten NO_LOOSE.
+func _idle_reason_for(b: Bot) -> int:
+	if b.state != Bot.BotState.IDLE:
+		return IDLE_REASON_ACTIVE
+	if b.role == Bot.Role.MINER:
+		if not _frontier_cells.is_empty():
+			return IDLE_REASON_OK
+		if _scan_blocked_count > 0 or _scan_working_count > 0:
+			return IDLE_REASON_ALL_BLOCKED
+		return IDLE_REASON_NO_QUEUED
+	# HAULER
+	if b.cargo_total > 0 or _has_loose_material():
+		return IDLE_REASON_OK
+	return IDLE_REASON_NO_LOOSE
+
+
+# Onko kerattavaa irtomateriaalia tarjolla (hauler-idle-syyn heuristiikka). Halpa tarkistus:
+# dig_site-kasoja tai aktiivisia pickup-vyohykkeita on -> oletetaan etta kerattavaa loytyy.
+func _has_loose_material() -> bool:
+	if not dig_sites.is_empty():
+		return true
+	if logistics != null and not logistics.pickup_zones().is_empty():
+		return true
+	return false
 
 
 func _bot_by_id(bot_id: int) -> Bot:
@@ -491,6 +553,9 @@ func _mark_miner_penalty(cx: int, cy: int) -> void:
 # skannaa koko gridia per botti. Aja 2 Hz, ei joka framella.
 func _scan_designations() -> void:
 	_frontier_cells.clear()
+	# P0-1: nollaa tilannekooste — paivittyy taman skannauksen aikana (get_fleet_stats lukee).
+	_scan_blocked_count = 0
+	_scan_working_count = 0
 	var d = world.desig
 	if d == null or d.cells.size() < GW * GH:
 		return
@@ -498,6 +563,9 @@ func _scan_designations() -> void:
 	var n := GW * GH
 	for i in n:
 		var v: int = cells[i]
+		if v == D_CLAIMED or v == D_MINING:
+			_scan_working_count += 1   # louhinta kaynnissa (miner varannut/louhii solua)
+			continue
 		if v != D_QUEUED and v != D_BLOCKED:
 			continue
 		var dx := i % GW
@@ -508,10 +576,13 @@ func _scan_designations() -> void:
 				_frontier_cells.append(Vector2i(dx, dy))
 			else:
 				d.set_cell(dx, dy, D_BLOCKED)
+				_scan_blocked_count += 1
 		else:  # D_BLOCKED
 			if has_open:
 				d.set_cell(dx, dy, D_QUEUED)
 				_frontier_cells.append(Vector2i(dx, dy))
+			else:
+				_scan_blocked_count += 1
 
 
 # Onko designaatiosolulla (dx,dy) vahintaan yksi OPEN-navnaapuri?
@@ -1030,6 +1101,7 @@ func _finish_mining(b: Bot) -> void:
 	var c := b.target_cell
 	if c.x >= 0 and world.desig != null:
 		world.desig.set_cell(c.x, c.y, D_NONE)
+		_designations_consumed += 1   # P0-3: eka kulutettu designaatio avaa "merkkaa lisaa" -heratteen
 		var r: Rect2i = world.desig.cell_px_rect(c.x, c.y)
 		world.nav.mark_dirty_px_rect(r)
 		_add_dig_site(c)

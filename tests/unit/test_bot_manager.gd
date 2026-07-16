@@ -85,6 +85,7 @@ func _init() -> void:
 	_test_dump_cargo_conserved_when_destination_full()
 	_test_dump_watchdog_sells_leftover()
 	_test_vacuum_slows_under_congestion()
+	_test_idle_reason_derivation()
 	print("\n=== YHTEENVETO ===")
 	print("RESULT: %d passed, %d failed" % [_pass, _fail])
 	if _fail > 0:
@@ -890,6 +891,70 @@ func _test_vacuum_slows_under_congestion() -> void:
 	_check(solo > crowded,
 		"ruuhka hidastaa imua (yksin %d px > ruuhkassa %d px)" % [solo, crowded])
 	_check(crowded > 0, "ruuhkassakin imu etenee (lattia CONGEST_FLOOR), sai %d" % crowded)
+
+
+# --- P0-1: idle-syyn johtaminen (get_fleet_stats["bots"][i]["idle_reason"]) -----
+
+# Apuri: hae botin idle_reason id:lla get_fleet_statsista.
+func _bot_reason(stats: Dictionary, id: int) -> int:
+	for b in stats["bots"]:
+		if int(b["id"]) == id:
+			return int(b["idle_reason"])
+	return -1
+
+
+# Miner-idle-syy johdetaan tyonjaon tilannekuvasta (EI pysyvaa tilaa):
+#   - ei designaatiota            -> NO_QUEUED
+#   - designaatio HAUDATTU (umpikivessa, ei OPEN-naapuria, frontier tyhja) -> ALL_BLOCKED
+#   - navnaapuri aukeaa -> frontier saa solun -> OK
+# Hauler-idle-syy: ei kerattavaa -> NO_LOOSE; dig_site tarjolla -> OK.
+func _test_idle_reason_derivation() -> void:
+	var w := _make_world()
+	# Umpikivi 128x128 (px 256..384), nav-linjattu. Sama kuin blocked-reactivate-testissa.
+	_fill_rect(w, 256, 256, 128, 128, MAT_STONE)
+	w.nav.rebuild_full(w.grid)
+	var bm := BotManager.new()
+	bm.setup(w)
+	var miner := bm.add_bot(Bot.Role.MINER, Vector2(320, 200))  # IDLE oletuksena
+
+	# 1) Ei yhtaan designaatiota -> NO_QUEUED.
+	bm._scan_designations()
+	var stats := bm.get_fleet_stats()
+	_check(_bot_reason(stats, miner.id) == bm.IDLE_REASON_NO_QUEUED,
+		"idle miner ilman designaatiota -> NO_QUEUED (sai %d)" % _bot_reason(stats, miner.id))
+	_check(not bool(stats["any_designation"]), "any_designation=false kun ei designaatiota")
+
+	# 2) Haudattu designaatio (umpikiven sisalla, ei OPEN-naapuria) -> ALL_BLOCKED.
+	var dx := 19
+	var dy := 19
+	w.desig.set_cell(dx, dy, D_QUEUED)
+	bm._scan_designations()
+	_check(w.desig.get_cell(dx, dy) == D_BLOCKED, "haudattu QUEUED-solu -> BLOCKED skannauksessa")
+	stats = bm.get_fleet_stats()
+	_check(int(stats["desig_blocked"]) >= 1, "get_fleet_stats raportoi BLOCKED-solun (sai %d)" % int(stats["desig_blocked"]))
+	_check(int(stats["frontier"]) == 0, "frontier tyhja (ei tavoitettavaa solua)")
+	_check(_bot_reason(stats, miner.id) == bm.IDLE_REASON_ALL_BLOCKED,
+		"idle miner + kaikki designaatiot BLOCKED -> ALL_BLOCKED (sai %d)" % _bot_reason(stats, miner.id))
+
+	# 3) Avaa yksi navnaapuri -> solu palautuu QUEUEDiksi ja tulee frontieriin -> OK.
+	_fill_rect(w, 304, 288, 16, 16, MAT_EMPTY)
+	w.nav.mark_dirty_px_rect(Rect2i(304, 288, 16, 16))
+	w.nav.update_dirty(w.grid)
+	bm._scan_designations()
+	stats = bm.get_fleet_stats()
+	_check(int(stats["frontier"]) >= 1, "navnaapurin avaus tuo solun frontieriin (sai %d)" % int(stats["frontier"]))
+	_check(_bot_reason(stats, miner.id) == bm.IDLE_REASON_OK,
+		"idle miner + tavoitettava frontier -> OK (sai %d)" % _bot_reason(stats, miner.id))
+
+	# 4) Hauler ilman kerattavaa -> NO_LOOSE; dig_site lisatty -> OK.
+	var hauler := bm.add_bot(Bot.Role.HAULER, Vector2(320, 200))
+	stats = bm.get_fleet_stats()
+	_check(_bot_reason(stats, hauler.id) == bm.IDLE_REASON_NO_LOOSE,
+		"idle hauler ilman kerattavaa -> NO_LOOSE (sai %d)" % _bot_reason(stats, hauler.id))
+	bm._add_dig_site(Vector2i(5, 5))
+	stats = bm.get_fleet_stats()
+	_check(_bot_reason(stats, hauler.id) == bm.IDLE_REASON_OK,
+		"idle hauler + dig_site tarjolla -> OK (sai %d)" % _bot_reason(stats, hauler.id))
 
 
 # Aja hauler imuroimassa isoa kasaa 8 tikkia; palauta poimittu px-maara. extra_bots idle-bottia

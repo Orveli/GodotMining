@@ -17,6 +17,12 @@ extends RefCounted
 const ZONE_PICKUP := 0
 const ZONE_DUMP := 1
 
+# Kaikkien materiaali-ID:iden (0..21) bittimaski. Kaytetaan basen dropoff-suodattimen
+# materialisointiin (P0-2): koska filter_mask 0 tarkoittaa "kaikki kelpaa", yksittaisten
+# materiaalien KIELTAMINEN vaatii maskin materialisoinnin (FULL_MASK & ~kielletyt). Ylimaaraiset
+# bitit (esim. EMPTY=0, nesteet) ovat harmittomia — mask_accepts tarkistaa vain kuorman materiaalit.
+const FULL_MASK := (1 << 22) - 1
+
 # Vyohykkeet: { "id": int, "type": int, "rect": Rect2i, "filter_mask": int, "priority": int,
 #   "is_base_dropoff": bool, "active": bool }.
 # active: false = vyohyke on kaytosta pois pelaajan toimesta (ks. set_zone_active) - se ei
@@ -73,6 +79,10 @@ func set_zone_filter(id: int, filter_mask: int) -> void:
 	for z in _zones:
 		if int(z["id"]) == id:
 			z["filter_mask"] = filter_mask
+			# Pelaajan kasin tekema base-suodattimen muutos lukitsee automaattisen saadon (P0-2):
+			# koneiden rakennus/purku ei enaa ylikirjoita pelaajan valintaa (ks. auto_adjust_base_filter).
+			if bool(z.get("is_base_dropoff", false)):
+				z["user_modified"] = true
 			return
 
 
@@ -83,6 +93,64 @@ func set_zone_active(id: int, active: bool) -> void:
 		if int(z["id"]) == id:
 			z["active"] = active
 			return
+
+
+# ============================================================
+#  Basen dropoff-suodattimen automaattisaato (P0-2)
+# ============================================================
+
+# Sisainen viittaus base-dropoff-vyohykkeeseen (dictionaryt ovat viittaustyyppisia, joten
+# palautettuun sanakirjaan kirjoittaminen paivittaa _zonesin alkiota). {} jos basea ei ole.
+func _base_zone() -> Dictionary:
+	for z in _zones:
+		if bool(z.get("is_base_dropoff", false)):
+			return z
+	return {}
+
+
+# Base-dropoff-vyohykkeen id (-1 jos ei ole). UI/pixel_world kayttaa.
+func base_dropoff_id() -> int:
+	var z := _base_zone()
+	return int(z.get("id", -1)) if not z.is_empty() else -1
+
+
+# Onko pelaaja saatanyt base-suodatinta kasin (ks. set_zone_filter). true -> auto-saato ei koske.
+func base_filter_user_modified() -> bool:
+	var z := _base_zone()
+	return (not z.is_empty()) and bool(z.get("user_modified", false))
+
+
+# Saada base-dropoffin suodatin niin ettei se enaa hyvaksy remove_mask-materiaaleja (P0-2).
+# Koska filter_mask 0 = "kaikki kelpaa", yksittaisten materiaalien kieltaminen vaatii maskin
+# MATERIALISOINNIN: FULL_MASK & ~remove_mask. remove_mask == 0 palauttaa suodattimen takaisin
+# nollaan (kaikki kelpaa jalleen). EI ylikirjoita jos pelaaja on kasin muokannut suodatinta
+# (user_modified) -> palauttaa applied=false, user_locked=true (kutsuja nayttaa vain vihjeen).
+# Palauttaa: {
+#   "applied": bool,        # muuttuiko suodatin
+#   "user_locked": bool,    # esto johtui user_modifiedista
+#   "newly_removed": int,   # bitit jotka EIVAT enaa kelpaa mutta kelpasivat ennen (toast nimeaa)
+#   "restored": int,        # bitit jotka taas kelpaavat (koneen purku palautti)
+# }
+func auto_adjust_base_filter(remove_mask: int) -> Dictionary:
+	var z := _base_zone()
+	if z.is_empty():
+		return {"applied": false, "user_locked": false, "newly_removed": 0, "restored": 0}
+	if bool(z.get("user_modified", false)):
+		return {"applied": false, "user_locked": true, "newly_removed": 0, "restored": 0}
+	var old_mask := int(z["filter_mask"])
+	var new_mask := 0 if remove_mask == 0 else (FULL_MASK & ~remove_mask)
+	# Vertailu tehdaan materialisoiduilla maskeilla (0 -> FULL_MASK = "kaikki kelpaa"), jotta
+	# newly_removed/restored kertovat oikeat materiaalit riippumatta 0-erikoistapauksesta.
+	var old_eff := FULL_MASK if old_mask == 0 else old_mask
+	var new_eff := FULL_MASK if new_mask == 0 else new_mask
+	var newly_removed := old_eff & ~new_eff
+	var restored := new_eff & ~old_eff
+	z["filter_mask"] = new_mask
+	return {
+		"applied": (newly_removed != 0 or restored != 0),
+		"user_locked": false,
+		"newly_removed": newly_removed, "restored": restored,
+	}
 
 
 # Palauttaa kopiot vyohykkeista (kutsuja ei muokkaa sisaista tilaa suoraan). UI-kaytto.
