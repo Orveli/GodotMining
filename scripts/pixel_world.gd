@@ -4556,6 +4556,15 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			# TOISTO-apu: designoi TASMALLEEN yksi ruutuun kohdistettu solu. Etsii annetusta
 			# grid-sarakkeesta (cx) matalimman louhittavan kiintean solun ja designoi vain sen.
 			_scenario_designate_cell(step)
+		"add_bot":
+			# BALANSSIMITTAUS-apu (T4.1): spawnaa botin basesta ilman hintaa, jotta fleet-koon
+			# voi asettaa deterministisesti. role: "miner"/"hauler". EI muuta rahaa (toisin kuin
+			# buy_bot) -> $/s-mittaus ei sekoitu ostokuluihin. Vain skenaarioajossa.
+			var _abrole: String = step.get("role", "hauler")
+			var _abr: int = Bot.Role.MINER if _abrole == "miner" else Bot.Role.HAULER
+			if bot_manager != null and base != null and is_instance_valid(base):
+				bot_manager.add_bot(_abr, base.spawn_pos())
+				print("ScenarioRunner: add_bot role=%s (fleet=%d)" % [_abrole, bot_manager.bots.size()])
 		"assert_money_gt":
 			var mmin: int = step.get("min", 0)
 			var mlabel: String = step.get("label", "")
@@ -4690,7 +4699,8 @@ func _step_cpu_ca() -> void:
 			# Nopea ohitus: vain irtomateriaali/nesteet liikkuvat (inline, ei funktiokutsua/solu)
 			var granular := mat == MAT_SAND or mat == MAT_ASH or mat == MAT_DIRT \
 				or mat == MAT_GRAVEL or mat == MAT_IRON_ORE or mat == MAT_GOLD_ORE \
-				or mat == MAT_GOLD or mat == MAT_COAL
+				or mat == MAT_GOLD or mat == MAT_COAL \
+				or mat == MAT_COPPER or mat == MAT_RARE_EARTH
 			var liquid := mat == MAT_WATER or mat == MAT_OIL
 			if granular or liquid:
 				var below := idx + W
