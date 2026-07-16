@@ -330,7 +330,10 @@ func _build_actionbar() -> void:
 	tool_btn_build.pressed.connect(_on_tool_build_pressed)
 	hb.add_child(tool_btn_build)
 
-	tool_btn_bots = _make_tool_button(ICON_TOOL_BOTS, "Botit [T]\nOsta ja hallitse botteja", 48.0)
+	# HUOM: tooltip sanoo [TAB] eikä [T] — kirjain T on jo pixel_world.gd:n legacy-
+	# kaivaustyökalun sädekierrolla (KEY_T, ks. _input()), eikä sitä voi vapauttaa
+	# rikkomatta toimivaa mekaniikkaa. TAB on ainoa toimiva pikanäppäin botti-traylle.
+	tool_btn_bots = _make_tool_button(ICON_TOOL_BOTS, "Botit [TAB]\nOsta ja hallitse botteja", 48.0)
 	tool_btn_bots.pressed.connect(_on_tool_bots_pressed)
 	hb.add_child(tool_btn_bots)
 
@@ -1402,6 +1405,12 @@ func _input(event: InputEvent) -> void:
 	# TAB togglaa bot-trayn (korvaa vanhan bottom_panelin, Vaihe 3 kohta 5).
 	if event.keycode == KEY_TAB:
 		_toggle_bot_tray()
+		get_viewport().set_input_as_handled()
+	# B togglaa build-trayn (UI_REDESIGN_PLAN.md: "Rakenna [B]"). Vapaa näppäin —
+	# pixel_world.gd:n KEY_B-tapaus on vain kuolleessa build_menu_visible-haarassa
+	# (ei koskaan true), joten ei konfliktia legacy-inputin kanssa.
+	elif event.keycode == KEY_B:
+		_toggle_build_tray()
 		get_viewport().set_input_as_handled()
 	# F3 togglaa debug-tilan (FPS, bottilaskuri, materiaaliskanneri).
 	# Ei kutsuta set_input_as_handled():a — debug_overlay.gd kuuntelee samaa

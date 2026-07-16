@@ -889,7 +889,7 @@ func _handle_input(_delta: float) -> void:
 	# Estä toiminnot kun hiiri on jonkin UI-paneelin päällä
 	var mouse_screen_pos := get_viewport().get_mouse_position()
 	for panel: Control in ui_panels:
-		if is_instance_valid(panel) and panel.get_global_rect().has_point(mouse_screen_pos):
+		if is_instance_valid(panel) and panel.is_visible_in_tree() and panel.get_global_rect().has_point(mouse_screen_pos):
 			prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 			return
 	var left_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
