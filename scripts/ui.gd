@@ -167,7 +167,7 @@ var _onboarding_bot_base: int = 0
 const ONBOARDING_TEXTS: Array[String] = [
 	"Paina V ja maalaa alue louhittavaksi",
 	"Hauler tuo saaliin baseen — raha kasvaa",
-	"Osta kolmas botti kun sinulla on $300",
+	"Osta botti: klikkaa alapalkin 3. ikonia (Botit) — hinta $300",
 ]
 
 # ── Toast (välitavoitteet) ─────────────────────────────────────────────────
@@ -175,6 +175,19 @@ var toast_panel: PanelContainer
 var toast_label: Label
 var _toast_timer: float = 0.0
 var _toast_tween: Tween = null
+
+# ── Toimettomuus-herateet (P0-1c + P0-3) ────────────────────────────────────
+# Kertyvat vain PLAYING/FREE_PLAYssa (_is_in_game). Kumpikin: kertyma-ajastin (kauanko ehto on
+# ollut voimassa) + cooldown (ettei toistu liian tiheasti). Nollataan kun ehto ei tayty.
+var _blocked_hint_accum: float = 0.0     # kauanko KAIKKI designaatiot ovat olleet tavoittamattomia
+var _blocked_hint_cooldown: float = 0.0
+var _idle_hint_accum: float = 0.0        # kauanko koko lauma on ollut idle + ei tyota + ei tuloa
+var _idle_hint_cooldown: float = 0.0
+const BLOCKED_HINT_DELAY := 2.0          # s ennen "aluetta ei tavoiteta" -toastia
+const BLOCKED_HINT_COOLDOWN := 15.0      # s toastien valilla
+const IDLE_HINT_DELAY := 5.0             # s ennen "merkkaa lisaa aluetta" -toastia
+const IDLE_HINT_COOLDOWN := 30.0         # s toastien valilla
+const IDLE_INCOME_EPS := 0.5             # income_per_s alle taman = "ei tuloa"
 
 # ── Materiaaliskanneri ─────────────────────────────────────────────────────
 var scanner_panel: PanelContainer
@@ -1104,7 +1117,13 @@ func _buy_bot(role: int) -> void:
 	if bm == null or not bm.has_method("buy_bot"):
 		return
 	var price := _bot_price()
-	if price < 0 or not _can_afford(price):
+	if price < 0:
+		return
+	if not _can_afford(price):
+		# P1-2: sama "Ei varaa..." -toast kuin rakennuksilla (pixel_world._show_toast) — ei enaa
+		# hiljainen no-op. Osto onnistuu vain PLAYING/FREE_PLAYssa (input lukittu muissa tiloissa).
+		if pixel_world != null and pixel_world.has_method("_show_toast"):
+			pixel_world._show_toast("Ei varaa bottiin ($%d)" % price)
 		return
 	bm.buy_bot(role)
 
@@ -1263,7 +1282,8 @@ func _build_onboarding() -> void:
 	onboarding_label = Label.new()
 	onboarding_label.text = "> " + ONBOARDING_TEXTS[0]
 	onboarding_label.add_theme_font_size_override("font_size", 12)
-	onboarding_label.add_theme_color_override("font_color", UiThemeRef.COL_BORDER_DIM)
+	# P1-3: kirkkaampi vari (COL_TEXT) — aiempi COL_BORDER_DIM oli auditin mukaan liian himmea.
+	onboarding_label.add_theme_color_override("font_color", COL_TEXT)
 	onboarding_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	onboarding_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	onboarding_panel.add_child(onboarding_label)
@@ -1402,6 +1422,56 @@ func _kill_toast_tween() -> void:
 	if _toast_tween != null and _toast_tween.is_valid():
 		_toast_tween.kill()
 	_toast_tween = null
+
+
+# P0-1c + P0-3: toimettomuus-herateet. Kutsutaan ~5 Hz _processista (dt = kertynyt aika).
+# Kertyvat VAIN PLAYING/FREE_PLAYssa; title/pause/demo complete nollaa ajastimet (ei toasteja).
+# Data JOHDETAAN bot_managerin get_fleet_statsista (cachetettu 2 Hz -> ei omaa gridiskannausta).
+func _update_activity_hints(dt: float) -> void:
+	_blocked_hint_cooldown = maxf(0.0, _blocked_hint_cooldown - dt)
+	_idle_hint_cooldown = maxf(0.0, _idle_hint_cooldown - dt)
+	if not _is_in_game():
+		_blocked_hint_accum = 0.0
+		_idle_hint_accum = 0.0
+		return
+	var bm := _bm()
+	if bm == null or not bm.has_method("get_fleet_stats"):
+		return
+	var s: Dictionary = bm.get_fleet_stats()
+	var frontier := int(s.get("frontier", 0))
+	var blocked := int(s.get("desig_blocked", 0))
+	var working := int(s.get("desig_working", 0))
+	var any_desig := bool(s.get("any_designation", false))
+	var consumed := int(s.get("designations_consumed", 0))
+	var idle_all: bool = int(s.get("miners_active", 0)) == 0 and int(s.get("haulers_active", 0)) == 0
+	var income := 0.0
+	var inc = pixel_world.get("income_per_s")
+	if inc != null:
+		income = float(inc)
+
+	# P0-1c: designaatioita ON mutta yksikaan ei tavoitettavissa (frontier=0, ei louhintaa kesken)
+	# -> kaivos ei etene. ~2 s kertyma + 15 s cooldown.
+	var all_blocked: bool = blocked > 0 and frontier == 0 and working == 0
+	if all_blocked:
+		_blocked_hint_accum += dt
+		if _blocked_hint_accum >= BLOCKED_HINT_DELAY and _blocked_hint_cooldown <= 0.0:
+			_show_toast("Aluetta ei tavoiteta — botit kaivavat vain avoimesta pinnasta alaspäin", 4.5)
+			_blocked_hint_cooldown = BLOCKED_HINT_COOLDOWN
+			_blocked_hint_accum = 0.0
+	else:
+		_blocked_hint_accum = 0.0
+
+	# P0-3: koko lauma idle + ei tuloa + EI YHTAAN designaatiota jaljella (myos ei BLOCKED — se
+	# kuuluu P0-1c:lle) + eka designaatio joskus jo kulutettu. ~5 s kertyma + 30 s cooldown.
+	var work_dry: bool = idle_all and income < IDLE_INCOME_EPS and not any_desig and consumed > 0
+	if work_dry:
+		_idle_hint_accum += dt
+		if _idle_hint_accum >= IDLE_HINT_DELAY and _idle_hint_cooldown <= 0.0:
+			_show_toast("Merkkaa lisää louhinta-aluetta (V)", 4.0)
+			_idle_hint_cooldown = IDLE_HINT_COOLDOWN
+			_idle_hint_accum = 0.0
+	else:
+		_idle_hint_accum = 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1572,12 +1642,14 @@ func _process(delta: float) -> void:
 	# Raskaammat päivitykset ~5 Hz
 	_ui_accum += delta
 	if _ui_accum >= 0.2:
+		var step := _ui_accum   # todellinen kertyma (P0-1c/P0-3-heratteiden ajastukseen)
 		_ui_accum = 0.0
 		_update_income()
 		_update_fleet()
 		_update_afford()
 		_maybe_rebuild_bot_list()
 		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
+		_update_activity_hints(step)   # P0-1c + P0-3: toimettomuus-herateet
 
 	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
 	if _debug_visible:

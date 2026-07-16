@@ -13,6 +13,7 @@ extends SceneTree
 # Aja headless:
 #   godot --headless --path . --script res://tests/unit/test_logistics.gd
 
+const MAT_SAND := 1
 const MAT_DIRT := 11
 const MAT_IRON_ORE := 12
 const MAT_GOLD_ORE := 13
@@ -40,6 +41,9 @@ func _init() -> void:
 	_test_set_zone_active_false_excludes_from_choose_dump()
 	_test_set_zone_active_true_restores_candidacy_and_preserves_filter()
 	_test_pickup_zones_excludes_inactive()
+	_test_base_filter_auto_adjust_on_machine_register()
+	_test_base_filter_auto_adjust_on_machine_remove()
+	_test_base_filter_respects_user_modified()
 	print("\n=== YHTEENVETO ===")
 	print("RESULT: %d passed, %d failed" % [_pass, _fail])
 	if _fail > 0:
@@ -253,3 +257,72 @@ func _test_pickup_zones_excludes_inactive() -> void:
 	lg.set_zone_active(pid, false)
 	var zones := lg.pickup_zones()
 	_check(zones.is_empty(), "pois paalta kytketty pickup-vyohyke ei nay pickup_zones()-listalla")
+
+
+# --- P0-2: basen dropoff-suodattimen auto-saato (jalostusketjun auto-aktivointi) ----
+
+# Apuri: base-dropoffin nykyinen filter_mask.
+func _base_mask(lg: Logistics, bid: int) -> int:
+	for z in lg.get_zones():
+		if int(z["id"]) == bid:
+			return int(z["filter_mask"])
+	return -1
+
+
+# Koneen rekisterointi materialisoi base-suodattimen: reseptin inputit EIVAT enaa kelpaa, muut
+# kelpaavat (0 = "kaikki kelpaa" ei riittanyt kieltamaan yksittaisia -> materialisointi).
+func _test_base_filter_auto_adjust_on_machine_register() -> void:
+	var lg := Logistics.new()
+	lg.add_base_dropoff(Rect2i(50, 50, 10, 10))  # oletusfiltteri 0 = kaikki kelpaa
+	var bid := lg.base_dropoff_id()
+	_check(bid >= 0, "base_dropoff_id palauttaa basen id:n")
+	# Furnace-inputit: SAND | IRON_ORE | GOLD_ORE.
+	var furnace_mask := (1 << MAT_SAND) | (1 << MAT_IRON_ORE) | (1 << MAT_GOLD_ORE)
+	var res := lg.auto_adjust_base_filter(furnace_mask)
+	_check(bool(res.get("applied", false)), "auto_adjust muuttaa suodatinta koneen inputeilla")
+	_check((int(res.get("newly_removed", 0)) & furnace_mask) == furnace_mask,
+		"newly_removed sisaltaa kaikki koneen inputit")
+	var mask := _base_mask(lg, bid)
+	_check(not Logistics.mask_accepts(mask, MAT_SAND), "base ei enaa hyvaksy hiekkaa")
+	_check(not Logistics.mask_accepts(mask, MAT_IRON_ORE), "base ei enaa hyvaksy rautamalmia")
+	_check(not Logistics.mask_accepts(mask, MAT_GOLD_ORE), "base ei enaa hyvaksy kultamalmia")
+	_check(Logistics.mask_accepts(mask, MAT_DIRT), "base hyvaksyy yha mullan (ei koneen input)")
+	_check(Logistics.mask_accepts(mask, MAT_COAL), "base hyvaksyy yha hiilen (ei koneen input)")
+	# choose_dump: DIRT-kuorma kelpaa baseen, IRON_ORE-kuorma ei (ohjautuu koneelle).
+	var chosen_dirt := lg.choose_dump({MAT_DIRT: 10}, Vector2(55, 55))
+	_check(int(chosen_dirt.get("accepted", 0)) == 10, "DIRT-kuorma kelpaa baseen (10)")
+	var chosen_ore := lg.choose_dump({MAT_IRON_ORE: 10}, Vector2(55, 55))
+	_check(chosen_ore.is_empty(), "IRON_ORE-kuorma ei enaa kelpaa baseen")
+
+
+# Koneen purku: auto_adjust_base_filter(0) palauttaa suodattimen nollaan (kaikki kelpaa),
+# restored kertoo palautetut materiaalit.
+func _test_base_filter_auto_adjust_on_machine_remove() -> void:
+	var lg := Logistics.new()
+	lg.add_base_dropoff(Rect2i(50, 50, 10, 10))
+	var bid := lg.base_dropoff_id()
+	var furnace_mask := (1 << MAT_SAND) | (1 << MAT_IRON_ORE)
+	lg.auto_adjust_base_filter(furnace_mask)
+	# Kone myyty -> ei enaa poistettavia inputteja -> palauta 0 (kaikki kelpaa).
+	var res := lg.auto_adjust_base_filter(0)
+	_check(bool(res.get("applied", false)), "auto_adjust(0) palauttaa suodattimen")
+	_check(_base_mask(lg, bid) == 0, "suodatin palautui nollaan (kaikki kelpaa)")
+	_check((int(res.get("restored", 0)) & furnace_mask) == furnace_mask,
+		"restored sisaltaa palautetut inputit")
+	_check(Logistics.mask_accepts(_base_mask(lg, bid), MAT_SAND), "base hyvaksyy taas hiekan")
+	_check(Logistics.mask_accepts(_base_mask(lg, bid), MAT_IRON_ORE), "base hyvaksyy taas rautamalmin")
+
+
+# user_modified: pelaajan set_zone_filter basen id:lle lukitsee auto-saadon (ei ylikirjoita).
+func _test_base_filter_respects_user_modified() -> void:
+	var lg := Logistics.new()
+	lg.add_base_dropoff(Rect2i(50, 50, 10, 10))
+	var bid := lg.base_dropoff_id()
+	# Pelaaja saataa basen suodatinta kasin (hyvaksy vain DIRT).
+	lg.set_zone_filter(bid, 1 << MAT_DIRT)
+	_check(lg.base_filter_user_modified(), "kasin saato (set_zone_filter baselle) merkitsee user_modified")
+	# Koneen rekisterointi EI saa muuttaa suodatinta.
+	var res := lg.auto_adjust_base_filter((1 << MAT_SAND) | (1 << MAT_IRON_ORE))
+	_check(not bool(res.get("applied", false)), "auto_adjust ei muuta suodatinta user_modifiedin jalkeen")
+	_check(bool(res.get("user_locked", false)), "auto_adjust raportoi user_locked=true")
+	_check(_base_mask(lg, bid) == (1 << MAT_DIRT), "pelaajan suodatin sailyy koskemattomana")

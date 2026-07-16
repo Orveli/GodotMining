@@ -3160,6 +3160,65 @@ func _unregister_machine_zones(machine: Node) -> void:
 
 
 # ============================================================
+#  P0-2: jalostusketjun auto-aktivointi (basen suodattimen saato)
+# ============================================================
+
+# Toast-nimet basen suodattimesta poistuville/palautuville materiaaleille (vain granulaarit
+# jotka hauler voi tuoda; nama kattavat koneiden resepti-inputit + muut kerattavat).
+const MAT_TOAST_NAMES := {
+	MAT_SAND: "hiekka", MAT_DIRT: "multa", MAT_COAL: "hiili",
+	MAT_IRON_ORE: "rautamalmi", MAT_GOLD_ORE: "kultamalmi",
+	MAT_GRAVEL: "sora", MAT_COPPER: "kupari", MAT_RARE_EARTH: "harvinaismaa",
+}
+
+
+# Kaikkien nykyisten koneiden (furnace/crusher) resepti-inputtien yhdistetty bittimaski.
+func _machine_input_mask() -> int:
+	var mask := 0
+	for f in furnaces:
+		if is_instance_valid(f) and f.has_method("get_input_dump"):
+			mask |= int(f.get_input_dump().get("filter_mask", 0))
+	for c in crushers:
+		if is_instance_valid(c) and c.has_method("get_input_dump"):
+			mask |= int(c.get_input_dump().get("filter_mask", 0))
+	return mask
+
+
+# Materiaalinimet (suomeksi) bittimaskista toastia varten, esim. "hiekka, rautamalmi".
+func _mat_list_str(mask: int) -> String:
+	var names: Array[String] = []
+	for mat_id in MAT_TOAST_NAMES:
+		if (mask & (1 << mat_id)) != 0:
+			names.append(String(MAT_TOAST_NAMES[mat_id]))
+	return ", ".join(names) if not names.is_empty() else "materiaalit"
+
+
+# Saada basen dropoff-suodatin vastaamaan nykyisia koneita (P0-2). Kutsutaan kun kone
+# rakennetaan (newly_built=true) tai myydaan (false). Poistaa koneiden input-materiaalit basen
+# hyvaksynnasta (materialisoi maskin) tai palauttaa ne kun mikaan kone ei enaa tarvitse niita.
+# EI ylikirjoita pelaajan kasin tekemaa base-suodatinta -> nayttaa silloin vain vihjeen.
+func _sync_base_filter_for_machines(newly_built: bool) -> void:
+	if logistics == null or not logistics.has_method("auto_adjust_base_filter"):
+		return
+	var mask := _machine_input_mask()
+	var res: Dictionary = logistics.auto_adjust_base_filter(mask)
+	if bool(res.get("user_locked", false)):
+		# Pelaaja on saatanyt basen suodatinta itse -> ei kosketa automaattisesti. Vihje vain
+		# konetta rakennettaessa (ei myydessa), ettei spammaa.
+		if newly_built and mask != 0:
+			_show_toast("Base-suodatin on käsin säädetty — ohjaa raaka-aineet koneelle itse", 3.0)
+		return
+	if not bool(res.get("applied", false)):
+		return
+	var removed := int(res.get("newly_removed", 0))
+	var restored := int(res.get("restored", 0))
+	if removed != 0:
+		_show_toast("Base ei enää vastaanota %s — haulerit vievät ne koneelle" % _mat_list_str(removed), 3.5)
+	elif restored != 0:
+		_show_toast("Base vastaanottaa taas %s" % _mat_list_str(restored), 3.0)
+
+
+# ============================================================
 #  UI-REDESIGN Vaihe 4: diegeettinen maailmaklikkaus
 # ============================================================
 
@@ -3222,6 +3281,7 @@ func _place_furnace(pos: Vector2) -> void:
 	furnaces.append(furnace)
 	_register_building_pixels(furnace.structure_pixels)
 	_register_machine_zones(furnace)
+	_sync_base_filter_for_machines(true)   # P0-2: base lopettaa reseptin inputtien vastaanoton
 	paint_pending = true
 	print("Uuni asetettu: ", pos)
 
@@ -3310,6 +3370,7 @@ func _place_crusher(pos: Vector2) -> void:
 	crushers.append(c)
 	_register_building_pixels(c.structure_pixels)
 	_register_machine_zones(c)
+	_sync_base_filter_for_machines(true)   # P0-2: base lopettaa reseptin inputtien vastaanoton
 	paint_pending = true
 	print("Murskaaja asetettu: ", pos)
 	_auto_connect_conveyor(c)
@@ -3917,6 +3978,9 @@ func _sell_building_at(grid_pos: Vector2) -> void:
 	money += refund
 
 	found_list.remove_at(found_idx)
+	# P0-2: kone poistui listasta -> palauta basen suodattimen hyvaksynta jos mikaan jaljella oleva
+	# kone ei enaa tarvitse ko. materiaalia (idempotentti muille rakennuksille: maski ei muutu).
+	_sync_base_filter_for_machines(false)
 	_sell_highlight_building = null
 	_clear_sell_overlay()
 	obj.queue_free()

@@ -23,6 +23,8 @@ var pixel_world: TextureRect = null
 # tarvitaan vain kaksi kokonaislukuvakiota).
 const ROLE_MINER := 0
 const BOT_STATE_IDLE := 0
+# Idle-syy (bot_manager.gd IDLE_REASON_*): vain ALL_BLOCKED nostetaan diegeettisesti esiin (P0-1b).
+const IDLE_REASON_ALL_BLOCKED := 3
 
 const BAR_W := 14.0
 const BAR_H := 3.0
@@ -31,6 +33,13 @@ const COL_BAR_BG := Color(0.05, 0.05, 0.08, 0.85)
 const COL_BAR_MINER := Color(0.88, 0.66, 0.25, 0.95)
 const COL_BAR_HAULER := Color(0.35, 0.62, 0.95, 0.95)
 const IDLE_ALPHA := 0.35   # himmennys kun botti on IDLE (ei töissä)
+
+# P0-1b: "ei reittiä" -varoitus tavoittamattoman designaation ylle jaaneelle idle-minerille.
+const COL_WARN := Color(1.0, 0.55, 0.15, 1.0)      # amber-oranssi huutomerkki (erottuu himmennyksesta)
+const COL_WARN_BG := Color(0.05, 0.05, 0.08, 0.9)  # tumma tausta luettavuudelle
+const WARN_TEXT := "! ei reittiä"
+const WARN_FONT_SIZE := 9
+const WARN_OFFSET_Y := -6.0   # varoituksen alareuna kuormapalkin ylapuolella
 
 
 func setup(world: TextureRect) -> void:
@@ -69,3 +78,22 @@ func _draw() -> void:
 		if frac > 0.0:
 			draw_rect(Rect2(bar_pos, Vector2(BAR_W * frac, BAR_H)),
 				Color(role_col.r, role_col.g, role_col.b, role_col.a * alpha))
+
+		# P0-1b: idle-miner jolla ei ole reittia (kaikki designaatiot BLOCKED) -> diegeettinen
+		# varoitus TAYDELLA alphalla (himmennys ei kertonut mitaan). Piirretaan vain talle syylle.
+		if idle and int(b.get("idle_reason", 0)) == IDLE_REASON_ALL_BLOCKED:
+			_draw_blocked_warning(screen)
+
+
+# Piirtaa pienen "! ei reittiä" -varoituksen botin ylle (P0-1b). Tausta takaa luettavuuden
+# tummaakin/kirkasta maastoa vasten; teksti keskitetaan botin ylle.
+func _draw_blocked_warning(screen: Vector2) -> void:
+	var font := get_theme_default_font()
+	if font == null:
+		font = ThemeDB.fallback_font
+	var tw: float = font.get_string_size(WARN_TEXT, HORIZONTAL_ALIGNMENT_LEFT, -1, WARN_FONT_SIZE).x
+	var baseline := screen + Vector2(-tw * 0.5, BAR_OFFSET_Y + WARN_OFFSET_Y)
+	# Tausta: teksti istuu baseline-koordinaatilla, joten rect ulottuu baselinen ylapuolelle.
+	draw_rect(Rect2(baseline + Vector2(-2.0, -float(WARN_FONT_SIZE)),
+		Vector2(tw + 4.0, float(WARN_FONT_SIZE) + 3.0)), COL_WARN_BG)
+	draw_string(font, baseline, WARN_TEXT, HORIZONTAL_ALIGNMENT_LEFT, -1, WARN_FONT_SIZE, COL_WARN)
