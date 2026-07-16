@@ -800,7 +800,9 @@ func _process(delta: float) -> void:
 		# Margolus-syklit pysyvät ehjinä. Skaalaus tehdään framejen VÄLISSÄ (ei kesken
 		# _simulate_gpu()-silmukan), joten offset-sykli ei katkea kesken framen.
 		if sim_speed > 0.0:
-			gpu_passes = GPU_PASSES_BASE * int(sim_speed)
+			# maxi(1, roundi(...)): murtoluku-sim_speed (esim. skenaarion 0.5) ei saa
+			# tiputtaa passeja nollaan kun sim ei ole pausella (int() typisti).
+			gpu_passes = GPU_PASSES_BASE * maxi(1, roundi(sim_speed))
 			_simulate_gpu()
 		_t_gpu = float(Time.get_ticks_usec() - _t0) / 1000.0
 
