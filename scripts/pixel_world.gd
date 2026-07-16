@@ -144,6 +144,11 @@ var fps_timer: float = 0.0
 const GPU_PASSES_BASE := 8
 var gpu_passes: int = GPU_PASSES_BASE  # Frame-kohtainen passimäärä = GPU_PASSES_BASE * int(sim_speed)
 var sim_speed: float = 1.0  # 1=normaali, 4/8/16=nopea
+# Julkaisukehys (T3.1): kun ui.gd:n koko ruudun overlay on auki (title / pause /
+# demo complete), pelimaailman input lukitaan tällä lipulla. Estää sekä _input():n
+# (näppäimet, räjähdykset) että _handle_input():n (hiirimaalaus/-louhinta). ESC ei
+# kulu täällä, joten pausesta pääsee ulos ui.gd:n kautta.
+var input_locked: bool = false
 var _logic_frame_counter: int = 0
 var logic_frame_interval: int = 4  # CPU game logic ajetaan joka 4. frame
 var ui_panels: Array[Control] = []  # Asetetaan ui.gd:stä — tarkistetaan rektillä (lista kaikista UI-paneeleista)
@@ -477,7 +482,29 @@ func _ready() -> void:
 			_load_scenario(arg.substr(len("--scenario=")))
 			break
 
+	# ── Julkaisukehys (T3.1): title-overlay-gate ──────────────────────────────
+	# Ikkunallisessa ei-scenario-sessiossa peli boottaa TITLE-tilaan: simulaatio
+	# pysäytetään (sim_speed=0) ja input lukitaan, kunnes pelaaja painaa "Aloita
+	# peli" (ui.gd). ui.gd kysyy should_show_title():n omassa _ready():ssään ja
+	# näyttää title-overlayn. Scenario/headless ohitetaan (ks. should_show_title)
+	# jotta ScenarioRunner ja headless-savutesti eivät jää jumiin title-ruutuun.
+	if should_show_title():
+		sim_speed = 0.0
+		input_locked = true
 
+
+# Julkaisukehys (T3.1): näytetäänkö boottauksessa title-overlay? Ohitetaan (false):
+#  • ScenarioRunner-ajossa (--scenario=) — testit ajavat suoraan PLAYING-tilassa,
+#    muuten ne jäisivät odottamaan "Aloita peli" -klikkausta jota ei tule.
+#  • headlessissä — ei pelaajaa klikkaamassa; savutesti ajaa oikeaa simulaatiota
+#    (vahvempi kuin idle-title) ja on taattu ettei mikään testipolku blokkaudu.
+# ui.gd lukee tämän _flow_enabled-lippuunsa (overlayt sallitaan vain kun true).
+func should_show_title() -> bool:
+	if _scenario_active:
+		return false
+	if DisplayServer.get_name() == "headless":
+		return false
+	return true
 
 
 func update_launcher_settings() -> void:
@@ -928,6 +955,13 @@ func _process(delta: float) -> void:
 
 
 func _handle_input(_delta: float) -> void:
+	# Julkaisukehys (T3.1): koko ruudun overlay (title/pause/demo complete) lukitsee
+	# pelimaailman inputin. Päivitä prev-tilat (kuten UI-paneelieston haarassa) jottei
+	# overlaysta poistuttaessa synny valheellista "juuri painettu" -klikkiä.
+	if input_locked:
+		prev_left_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		prev_right_pressed = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+		return
 	# Estä toiminnot kun hiiri on jonkin UI-paneelin päällä
 	var mouse_screen_pos := get_viewport().get_mouse_position()
 	for panel: Control in ui_panels:
@@ -1967,6 +2001,11 @@ func _create_stroke_body() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# Julkaisukehys (T3.1): overlay-tila lukitsee pelimaailman inputin. ESC EI kulu
+	# täällä (ui.gd omistaa ESC-käsittelyn ja pausevalikon) — tässä vain palataan
+	# aikaisin, joten ui.gd saa ESCin ja pausesta pääsee ulos.
+	if input_locked:
+		return
 	# Räjähdykset (keskihiiri + scroll)
 	_handle_explosion_input(event)
 
@@ -2080,20 +2119,10 @@ func _input(event: InputEvent) -> void:
 				# Regeneroi maailma — destruktiivinen debug-näppäin, gatettu
 				if not _debug_hotkey_blocked():
 					regenerate_world()
-			KEY_ESCAPE:
-				if zone_placement_type >= 0:
-					_cancel_zone_placement()
-					print("Vyöhyke-sijoitus peruttu")
-				elif build_mode != BUILD_NONE:
-					if build_mode == BUILD_SELL:
-						_clear_sell_overlay()
-						build_mode = BUILD_NONE
-					else:
-						_cancel_pending_build()
-					print("Rakennustila peruttu")
-				elif bomb_mode:
-					bomb_mode = false
-					print("Pommi-moodi peruttu")
+			# ESC-käsittely siirretty ui.gd:hen (T3.1): yksi omistaja koordinoi
+			# työkalun peruutuksen (escape_cancel_tool() alla), UI-trayt/popoverit ja
+			# pausevalikon avauksen ilman epädeterministä _input-järjestystä. Tämä
+			# haara EI enää käsittele KEY_ESCAPEa.
 			# Save/load poistettu pelaajalta (T2.4/D2): tallennus kattaa vain grid +
 			# rakennukset + rahat, EI botteja/vyöhykkeitä/designaatioita/demo-edistymää,
 			# joten F9-lataus rikkoisi pelitilan. Siirretty saman debug-gaten taakse
@@ -2106,6 +2135,34 @@ func _input(event: InputEvent) -> void:
 				if not _debug_hotkey_blocked():
 					load_world()
 			KEY_I: _save_ai_screenshot()
+
+
+# Julkaisukehys (T3.1): peruuttaa aktiivisen työkalutilan (sama logiikka kuin ennen
+# _input():n KEY_ESCAPE-haarassa) + designaatiomoodin. ui.gd kutsuu tämän ESC-ketjussaan
+# ennen pausevalikon avausta: jos jokin tila peruttiin -> palauttaa true, eikä pausea
+# avata. Näin ESC ei riko vanhaa "peruuta ensin" -käytöstä.
+func escape_cancel_tool() -> bool:
+	if zone_placement_type >= 0:
+		_cancel_zone_placement()
+		print("Vyöhyke-sijoitus peruttu")
+		return true
+	if build_mode != BUILD_NONE:
+		if build_mode == BUILD_SELL:
+			_clear_sell_overlay()
+			build_mode = BUILD_NONE
+		else:
+			_cancel_pending_build()
+		print("Rakennustila peruttu")
+		return true
+	if bomb_mode:
+		bomb_mode = false
+		print("Pommi-moodi peruttu")
+		return true
+	if designation_mode:
+		designation_mode = false
+		_show_toast("Louhinta-alue: POIS")
+		return true
+	return false
 
 
 func _paint(cx: int, cy: int, mat: int) -> void:

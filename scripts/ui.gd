@@ -186,6 +186,27 @@ const SCANNER_RADIUS: int = 50
 # Päivitysakku raskaammille päivityksille (~5 Hz)
 var _ui_accum: float = 0.0
 
+# ── Julkaisukehys: pelitilakone (T3.1) ──────────────────────────────────────
+# Title on OVERLAY-tila, EI erillinen scene: run/main_scene pysyy main.tscn:nä,
+# joten headless-testit, ScenarioRunner (--scenario=) ja export toimivat ennallaan.
+# Overlayt (title/pause/demo complete) elävät UI-CanvasLayerillä pixel_worldin päällä.
+# Tilat: TITLE (boot, sim gated) → PLAYING → PAUSED (ESC) → DEMO_COMPLETE → FREE_PLAY.
+enum Flow { TITLE, PLAYING, PAUSED, DEMO_COMPLETE, FREE_PLAY }
+var _flow: int = Flow.PLAYING
+# false = scenario/headless (pixel_world.should_show_title()==false) → ei overlayta,
+# peli boottaa suoraan PLAYING-tilaan eivätkä testit jää jumiin.
+var _flow_enabled: bool = false
+var _flow_before_pause: int = Flow.PLAYING
+var _speed_before_overlay: float = 1.0   # palautettava sim_speed overlayn sulkiessa
+var _free_play: bool = false             # demo läpäisty + "Jatka vapaasti" → ei enää demo-overlayta
+var _play_time: float = 0.0              # kertynyt peliaika sekunteina (vain PLAYING/FREE_PLAY)
+var _pending_title_show: bool = false    # näytä title kun overlay on liittynyt puuhun (move_to_front)
+
+var _title_overlay: Control
+var _pause_overlay: Control
+var _complete_overlay: Control
+var _complete_stats_label: Label
+
 # Materiaalinimet ja -värit skannerille + materiaali-icon-toggleille (ID:t 0–21)
 const MAT_NAMES: Dictionary = {
 	1: "Hiekka", 2: "Vesi", 3: "Kivi", 4: "Puu", 5: "Tuli", 6: "Öljy",
@@ -227,6 +248,7 @@ func _ready() -> void:
 	_build_onboarding()
 	_build_bot_status_overlay()
 	_connect_world_signals()
+	_init_game_flow()
 
 	# Lisäpaneelit rekisteröidään estoon vasta kun ne on lisätty (deferred)
 	_register_ui_panels.call_deferred()
@@ -1252,6 +1274,11 @@ func _build_onboarding() -> void:
 func _update_onboarding() -> void:
 	if _onboarding_done or onboarding_panel == null:
 		return
+	# Julkaisukehys (T3.1): onboarding näkyy vain kun peli on käynnissä (ei title-,
+	# pause- eikä demo complete -overlayn aikana).
+	if not _is_in_game():
+		onboarding_panel.visible = false
+		return
 	match _onboarding_step:
 		0:
 			# Ekaan louhinta-alueeseen asti
@@ -1329,7 +1356,18 @@ func _on_milestone(text: String) -> void:
 
 
 func _on_demo_complete() -> void:
-	_show_toast("Demo valmis! Jatka vapaasti.", 8.0)
+	# Julkaisukehys (T3.1): ikkunallisessa sessiossa avataan DEMO_COMPLETE-overlay
+	# (silmukka: pelaa uudestaan / jatka vapaasti / lopeta). Scenario/headless
+	# (_flow_enabled==false) TAI jo vapaassa pelissä: pelkkä kevyt toast, EI overlayta
+	# — overlay pysäyttäisi simulaation ja rikkoisi skenaariot.
+	if not _flow_enabled or _free_play:
+		_show_toast("Demo valmis! Jatka vapaasti.", 8.0)
+		return
+	_flow = Flow.DEMO_COMPLETE
+	_speed_before_overlay = float(pixel_world.sim_speed)
+	pixel_world.sim_speed = 0.0
+	_update_complete_stats()
+	_show_overlay(_complete_overlay)
 
 
 # Vaihe 5 kohta 2: fade-in heti näkyviin tullessa. Aiempi toast (jos vielä
@@ -1471,6 +1509,22 @@ func _build_bot_status_overlay() -> void:
 func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
+	# ── ESC: yksi omistaja (T3.1) ─────────────────────────────────────────────
+	# ui.gd koordinoi koko ESC-ketjun (pause/overlay-sulku/tray/popover/työkalun
+	# peruutus). pixel_world.gd EI enää käsittele KEY_ESCAPEa (siirretty tänne),
+	# joten _input-järjestyksestä johtuvaa tuplakäsittelyä ei synny.
+	if event.keycode == KEY_ESCAPE:
+		# F4-debugvalikko syö oman ESCinsä kun näkyvissä — älä avaa pausea sen päälle.
+		var dbg := get_node_or_null("../DebugMenu")
+		if dbg != null and dbg is CanvasItem and (dbg as CanvasItem).visible:
+			return
+		_handle_escape()
+		get_viewport().set_input_as_handled()
+		return
+	# Overlay-tiloissa (title/pause/demo complete) muut hotkeyt jäävät huomiotta —
+	# niihin pääsee vain overlayn napeilla tai ESCillä.
+	if not _is_in_game():
+		return
 	# TAB togglaa bot-trayn (korvaa vanhan bottom_panelin, Vaihe 3 kohta 5).
 	if event.keycode == KEY_TAB:
 		_toggle_bot_tray()
@@ -1487,21 +1541,23 @@ func _input(event: InputEvent) -> void:
 	elif event.keycode == KEY_F3:
 		_debug_visible = not _debug_visible
 		_apply_debug_visibility()
-	# Esc sulkee ylimmän auki olevan UI-elementin (popover -> build-tray -> bot-tray).
-	# Ei syödä eventtiä — pixel_world.gd:llä on oma, riippumaton Esc-käsittelynsä
-	# (rakennus-/vyöhykesijoituksen peruutus), joka ei liity tähän UI-tilaan.
-	elif event.keycode == KEY_ESCAPE:
-		if _context_popover != null:
-			_close_context_popover()
-		elif _build_tray_open:
-			_close_build_tray()
-		elif _bot_tray_open:
-			_close_bot_tray()
 
 
 func _process(delta: float) -> void:
 	if not is_instance_valid(pixel_world):
 		return
+
+	# Julkaisukehys (T3.1): näytä title-overlay vasta kun se on liittynyt puuhun
+	# (deferred add_child) — move_to_front() vaatii tree-jäsenyyden. Simulaatio on
+	# jo gatettu (pixel_world._ready: sim_speed=0 + input_locked), joten yhden framen
+	# viive ei aiheuta pelitapahtumia.
+	if _pending_title_show and is_instance_valid(_title_overlay) and _title_overlay.is_inside_tree():
+		_pending_title_show = false
+		_show_overlay(_title_overlay)
+
+	# Kertyvä peliaika (demo complete -tilastoa varten) — vain aktiivisessa pelissä.
+	if _is_in_game():
+		_play_time += delta
 
 	# Kevyet päivitykset joka frame
 	money_label.text = "$%d" % int(pixel_world.money)
@@ -1725,3 +1781,261 @@ func _label(text: String, font_size: int = 12, color: Color = COL_TEXT) -> Label
 func _clear_children(node: Node) -> void:
 	for c in node.get_children():
 		c.queue_free()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  JULKAISUKEHYS — pelitilakone + overlayt (T3.1)
+#  TITLE (boot) → PLAYING → PAUSED (ESC) → DEMO_COMPLETE → FREE_PLAY.
+#  Title/pause/complete ovat koko ruudun overlayta (EI erillisiä sceneja):
+#  run/main_scene pysyy main.tscn:nä, joten testit/ScenarioRunner/export toimivat.
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _init_game_flow() -> void:
+	_flow_enabled = _query_flow_enabled()
+	_build_title_overlay()
+	_build_pause_overlay()
+	_build_complete_overlay()
+	if _flow_enabled:
+		# pixel_world._ready on jo gatennut sim_speed=0 + input_locked=true.
+		_flow = Flow.TITLE
+		_pending_title_show = true   # näytetään _process():ssa kun overlay on puussa
+	else:
+		# Scenario/headless: ei overlayta, peli suoraan käyntiin (testit eivät jumita).
+		_flow = Flow.PLAYING
+
+
+# Julkaisukehys sallitaan (overlayt näkyvät) vain ikkunallisessa ei-scenario-
+# sessiossa — pixel_world.should_show_title() ratkaisee (false = scenario/headless).
+func _query_flow_enabled() -> bool:
+	if pixel_world != null and pixel_world.has_method("should_show_title"):
+		return bool(pixel_world.should_show_title())
+	return false
+
+
+func _is_in_game() -> bool:
+	return _flow == Flow.PLAYING or _flow == Flow.FREE_PLAY
+
+
+# ── ESC-ketju (yksi omistaja) ───────────────────────────────────────────────
+# Prioriteetti: pause auki → jatka. Title/complete → ei mitään (napit hoitavat).
+# Muuten (PLAYING/FREE_PLAY): sulje ylin UI-elementti (popover → build → bot) →
+# peruuta aktiivinen työkalu (pixel_world) → avaa pause.
+func _handle_escape() -> void:
+	if _flow == Flow.PAUSED:
+		_resume_from_pause()
+		return
+	if _flow == Flow.TITLE or _flow == Flow.DEMO_COMPLETE:
+		return
+	if _context_popover != null:
+		_close_context_popover()
+		return
+	if _build_tray_open:
+		_close_build_tray()
+		return
+	if _bot_tray_open:
+		_close_bot_tray()
+		return
+	# Vanha pixel_world-ESC-käytös (zone/build/bomb/designaatio) siirtyi
+	# escape_cancel_tool()-metodiin — kutsutaan se ENSIN, ja avataan pause vain jos
+	# mitään ei peruttu.
+	if pixel_world.has_method("escape_cancel_tool") and pixel_world.escape_cancel_tool():
+		return
+	if _flow_enabled:
+		_open_pause_menu()
+
+
+func _open_pause_menu() -> void:
+	_flow_before_pause = _flow
+	_flow = Flow.PAUSED
+	_speed_before_overlay = float(pixel_world.sim_speed)
+	pixel_world.sim_speed = 0.0
+	_show_overlay(_pause_overlay)
+
+
+func _resume_from_pause() -> void:
+	_hide_overlay(_pause_overlay)
+	_flow = _flow_before_pause
+	pixel_world.sim_speed = _speed_before_overlay if _speed_before_overlay > 0.0 else 1.0
+
+
+# ── Overlay-näyttö/piilotus ─────────────────────────────────────────────────
+# input_locked lukitsee pixel_worldin _input():n JA _handle_input():n (hiirimaalaus).
+# move_to_front nostaa overlayn CanvasLayerin viimeiseksi lapseksi → piirtyy päälle ja
+# saa GUI-inputin ennen actionbaria/trayta.
+func _show_overlay(overlay: Control) -> void:
+	if overlay == null:
+		return
+	overlay.visible = true
+	if overlay.is_inside_tree():
+		overlay.move_to_front()
+	if pixel_world != null:
+		pixel_world.set("input_locked", true)
+
+
+func _hide_overlay(overlay: Control) -> void:
+	if overlay != null:
+		overlay.visible = false
+	if pixel_world != null:
+		pixel_world.set("input_locked", false)
+
+
+# ── Nappien callbackit ──────────────────────────────────────────────────────
+
+func _on_title_start_pressed() -> void:
+	_hide_overlay(_title_overlay)
+	_flow = Flow.PLAYING
+	_play_time = 0.0
+	pixel_world.sim_speed = 1.0
+
+
+func _on_flow_restart_pressed() -> void:
+	# Uusi scene alkaa jälleen title-gatella. Vapauta lukko varmuudeksi ennen latausta.
+	if pixel_world != null:
+		pixel_world.set("input_locked", false)
+	get_tree().reload_current_scene()
+
+
+func _on_flow_quit_pressed() -> void:
+	get_tree().quit()
+
+
+func _on_complete_continue_pressed() -> void:
+	_hide_overlay(_complete_overlay)
+	_free_play = true
+	_flow = Flow.FREE_PLAY
+	pixel_world.sim_speed = _speed_before_overlay if _speed_before_overlay > 0.0 else 1.0
+
+
+func _update_complete_stats() -> void:
+	if _complete_stats_label == null:
+		return
+	var mins := int(_play_time) / 60
+	var secs := int(_play_time) % 60
+	var money_v := int(pixel_world.money)
+	var bots := _current_bot_count()
+	var miners := 0
+	var haulers := 0
+	var bm := _bm()
+	if bm != null and bm.has_method("get_fleet_stats"):
+		var fs: Dictionary = bm.get_fleet_stats()
+		miners = int(fs.get("miners", 0))
+		haulers = int(fs.get("haulers", 0))
+	_complete_stats_label.text = "Aika  %d:%02d\nRahaa  $%d\nBotteja  %d  (%d louhijaa / %d kuljettajaa)" \
+		% [mins, secs, money_v, bots, miners, haulers]
+
+
+# ── Overlay-rakentajat ──────────────────────────────────────────────────────
+
+# Rakentaa koko ruudun overlayn: tumma läpikuultava tausta + keskitetty amber-paneeli.
+# Palauttaa { "root": Control, "vbox": VBoxContainer } johon sisältö lisätään.
+func _make_overlay() -> Dictionary:
+	var root := Control.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	# Repo-gotcha: set_anchors_preset jälkeen ON asetettava grow-suunnat, muuten
+	# Control lyttääntyy 0-kokoon äänettömästi.
+	root.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	root.grow_vertical = Control.GROW_DIRECTION_BOTH
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.z_index = 200
+	root.visible = false
+
+	var bg := ColorRect.new()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	bg.grow_vertical = Control.GROW_DIRECTION_BOTH
+	bg.color = Color(0.05, 0.04, 0.03, 0.9)
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(bg)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	center.grow_vertical = Control.GROW_DIRECTION_BOTH
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(460, 0)
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	center.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 16)
+	panel.add_child(vbox)
+
+	get_parent().add_child.call_deferred(root)
+	return {"root": root, "vbox": vbox}
+
+
+# Iso otsikkoteksti (Silkscreen-Bold jos saatavilla) overlayn kärkeen.
+func _overlay_title_label(text: String, size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	var f := UiThemeRef._load_pixel_font(UiThemeRef.FONT_PATH_BOLD)
+	if f != null:
+		l.add_theme_font_override("font", f)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return l
+
+
+func _add_overlay_button(vbox: VBoxContainer, text: String, cb: Callable) -> Button:
+	var b := _make_btn(text, 18)
+	b.custom_minimum_size = Vector2(280, 46)
+	b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	b.pressed.connect(cb)
+	vbox.add_child(b)
+	return b
+
+
+func _overlay_spacer(vbox: VBoxContainer, h: float) -> void:
+	var s := Control.new()
+	s.custom_minimum_size = Vector2(0, h)
+	s.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_child(s)
+
+
+func _build_title_overlay() -> void:
+	var o := _make_overlay()
+	_title_overlay = o["root"]
+	var vbox: VBoxContainer = o["vbox"]
+
+	var game_name := String(ProjectSettings.get_setting("application/config/name", "GodotMining"))
+	var version := String(ProjectSettings.get_setting("application/config/version", ""))
+
+	vbox.add_child(_overlay_title_label(game_name, 40, COL_MONEY))
+	if version != "":
+		var ver := _label("v%s" % version, 14, COL_DIM)
+		ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vbox.add_child(ver)
+	_overlay_spacer(vbox, 10.0)
+	_add_overlay_button(vbox, "Aloita peli", _on_title_start_pressed)
+	_add_overlay_button(vbox, "Lopeta", _on_flow_quit_pressed)
+
+
+func _build_pause_overlay() -> void:
+	var o := _make_overlay()
+	_pause_overlay = o["root"]
+	var vbox: VBoxContainer = o["vbox"]
+
+	vbox.add_child(_overlay_title_label("Tauolla", 34, COL_TEXT))
+	_overlay_spacer(vbox, 10.0)
+	_add_overlay_button(vbox, "Jatka", _resume_from_pause)
+	_add_overlay_button(vbox, "Aloita alusta", _on_flow_restart_pressed)
+	_add_overlay_button(vbox, "Lopeta", _on_flow_quit_pressed)
+
+
+func _build_complete_overlay() -> void:
+	var o := _make_overlay()
+	_complete_overlay = o["root"]
+	var vbox: VBoxContainer = o["vbox"]
+
+	vbox.add_child(_overlay_title_label("Demo läpäisty!", 34, COL_MONEY))
+	_complete_stats_label = _label("", 18, COL_TEXT)
+	_complete_stats_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(_complete_stats_label)
+	_overlay_spacer(vbox, 10.0)
+	_add_overlay_button(vbox, "Pelaa uudestaan", _on_flow_restart_pressed)
+	_add_overlay_button(vbox, "Jatka vapaasti", _on_complete_continue_pressed)
+	_add_overlay_button(vbox, "Lopeta", _on_flow_quit_pressed)
