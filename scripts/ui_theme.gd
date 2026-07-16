@@ -117,6 +117,38 @@ static func button_frame_style_box(margin: float = 8.0) -> StyleBoxTexture:
 	return sb
 
 
+# Ikoninapin tila-tyylit (normal/hover/pressed/focus) button_frame.png:stä — UI-REDESIGN
+# Vaihe 5 kohta 1: hover = kevyt vaalennos + amber-sävy (reunakorostus tekstuurin
+# tintillä, koska StyleBoxTexture ei tue erillistä reunuskerrosta), pressed = tummennus +
+# 1px pudotus alas (content_margin-epäsymmetria siirtää ikonin, koko pysyy samana).
+# Palauttaa tyhjän Dictionaryn jos assettia ei löydy — kutsuja käyttää silloin teeman
+# oletus-Button-tyylejä (jo erottelevat tilat, ks. _style_button()).
+static func icon_button_state_styleboxes(margin: float = 8.0) -> Dictionary:
+	if not ResourceLoader.exists(BUTTON_FRAME_PATH):
+		return {}
+	var tex := load(BUTTON_FRAME_PATH) as Texture2D
+	if tex == null:
+		return {}
+	var normal := _icon_state_style_box(tex, margin, Color(1.0, 1.0, 1.0), 0.0)
+	var hover := _icon_state_style_box(tex, margin, Color(1.18, 1.12, 0.9), 0.0)
+	var pressed := _icon_state_style_box(tex, margin, Color(0.72, 0.68, 0.6), 1.0)
+	return {"normal": normal, "hover": hover, "pressed": pressed, "focus": normal}
+
+
+static func _icon_state_style_box(tex: Texture2D, margin: float, tint: Color, press_offset: float) -> StyleBoxTexture:
+	var sb := StyleBoxTexture.new()
+	sb.texture = tex
+	sb.texture_margin_left = margin
+	sb.texture_margin_right = margin
+	sb.texture_margin_top = margin
+	sb.texture_margin_bottom = margin
+	sb.set_content_margin_all(margin)
+	sb.content_margin_top = margin + press_offset
+	sb.content_margin_bottom = margin - press_offset
+	sb.modulate_color = tint
+	return sb
+
+
 static func _style_panel(theme: Theme) -> void:
 	var panel := panel_style_box(COL_BG_PANEL, COL_BORDER_DIM, 1, 8.0)
 	theme.set_stylebox("panel", "PanelContainer", panel)

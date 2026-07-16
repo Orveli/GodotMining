@@ -67,6 +67,16 @@ const ROLE_HAULER := 1
 const ZONE_PICKUP := 0
 const ZONE_DUMP := 1
 
+# ── Game feel / animaatiot (Vaihe 5 kohta 2) ────────────────────────────────
+# Yhteinen ankkuripaikka actionbarin yläpuolella (mine-rivi, build-tray, bot-tray,
+# onboarding-vihje) — yksi vakio siroteltujen -68.0-literaalien sijaan.
+const TRAY_ANCHOR_OFFSET_BOTTOM := -68.0
+const TRAY_ANIM_DURATION := 0.12
+const TRAY_SLIDE_OFFSET := 18.0
+const POPOVER_ANIM_DURATION := 0.08
+const TOAST_FADE_IN_DURATION := 0.15
+const TOAST_FADE_OUT_DURATION := 0.25
+
 # Värit — amber-paletti (UiThemeRef.COL_*), EI sinistä
 const COL_MONEY := UiThemeRef.COL_MONEY
 const COL_BAD := UiThemeRef.COL_BAD
@@ -96,6 +106,9 @@ var _desig_tool_mode: int = 0
 var brush_slider: HSlider
 var brush_label: Label
 
+# ── Tray-animaatiot (Vaihe 5 kohta 2) ───────────────────────────────────────
+var _tray_tweens: Dictionary = {}   # PanelContainer -> Tween (aktiivinen slide+fade)
+
 # ── Build-tray ([B] avaa/sulkee) ────────────────────────────────────────────
 var build_tray_panel: PanelContainer
 var _build_tray_open: bool = false
@@ -118,6 +131,11 @@ var _zone_popover_zid: int = -1
 var _zone_popover_toggles: Dictionary = {}
 var _popover_just_opened: bool = false   # estää saman klikin sulkemasta juuri avattua popoveria
 var _prev_left_ui: bool = false          # oma left-just-seuranta (riippumaton pixel_worldista)
+
+# Konepopoverin live-päivitys (Vaihe 5 kohta 4): rivikohtaiset Label-viitteet + itse
+# kone, jotta collected/need-laskurit voi päivittää uudelleenrakentamatta koko paneelia.
+var _machine_popover_machine: Object = null
+var _machine_popover_rows: Dictionary = {}   # input_mat -> {"label": Label, "need": int}
 
 # Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
 # [{panel(=Button), price_label, cost_fn}]
@@ -143,6 +161,7 @@ const ONBOARDING_TEXTS: Array[String] = [
 var toast_panel: PanelContainer
 var toast_label: Label
 var _toast_timer: float = 0.0
+var _toast_tween: Tween = null
 
 # ── Materiaaliskanneri ─────────────────────────────────────────────────────
 var scanner_panel: PanelContainer
@@ -360,7 +379,7 @@ func _toggle_designation() -> void:
 func _build_mine_row() -> void:
 	mine_row_panel = PanelContainer.new()
 	mine_row_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	mine_row_panel.offset_bottom = -68.0   # actionbarin yläpuolelle
+	mine_row_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM   # actionbarin yläpuolelle
 	mine_row_panel.visible = false
 	mine_row_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
@@ -426,7 +445,7 @@ func _on_brush_changed(value: float) -> void:
 func _build_build_tray() -> void:
 	build_tray_panel = PanelContainer.new()
 	build_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	build_tray_panel.offset_bottom = -68.0
+	build_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	build_tray_panel.visible = false
 	build_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
@@ -460,13 +479,12 @@ func _toggle_build_tray() -> void:
 		_close_bot_tray()
 		_close_context_popover()
 		_set_designation_mode(false)
-		build_tray_panel.visible = true
+		_animate_tray_open(build_tray_panel)
 		_build_tray_open = true
 
 
 func _close_build_tray() -> void:
-	if build_tray_panel != null:
-		build_tray_panel.visible = false
+	_animate_tray_close(build_tray_panel)
 	_build_tray_open = false
 
 
@@ -486,7 +504,7 @@ func _update_build_tray_visibility() -> void:
 func _build_bot_tray() -> void:
 	bot_tray_panel = PanelContainer.new()
 	bot_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	bot_tray_panel.offset_bottom = -68.0
+	bot_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	bot_tray_panel.visible = false
 	bot_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
@@ -557,16 +575,67 @@ func _open_bot_tray() -> void:
 	_close_build_tray()
 	_close_context_popover()
 	_set_designation_mode(false)   # sulkee mine-rivin (sama ankkuripaikka, ei saa jäädä päällekkäin)
-	bot_tray_panel.visible = true
+	_animate_tray_open(bot_tray_panel)
 	_bot_tray_open = true
 	_last_fleet_sig = ""   # pakota bottilistan uudelleenrakennus heti avattaessa
 	_maybe_rebuild_bot_list()
 
 
 func _close_bot_tray() -> void:
-	if bot_tray_panel != null:
-		bot_tray_panel.visible = false
+	_animate_tray_close(bot_tray_panel)
 	_bot_tray_open = false
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TRAY-ANIMAATIOT (Vaihe 5 kohta 2) — lyhyt slide-ylös + fade auki, käänteinen kiinni
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Avaa paneelin heti (visible=true HETI, ei animaation lopussa) jotta
+# _register_panel-pohjainen input-esto (pixel_world.gd: ui_panels-rektitarkistus)
+# pysyy voimassa koko animaation ajan — ainoastaan modulate-alpha ja offset_bottom
+# animoituvat, paneelin lopullinen koko/sijainti on jo asetettu.
+func _animate_tray_open(panel: PanelContainer) -> void:
+	if panel == null:
+		return
+	_kill_tray_tween(panel)
+	panel.visible = true
+	panel.modulate.a = 0.0
+	panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM + TRAY_SLIDE_OFFSET
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 1.0, TRAY_ANIM_DURATION)
+	tw.tween_property(panel, "offset_bottom", TRAY_ANCHOR_OFFSET_BOTTOM, TRAY_ANIM_DURATION)
+	_tray_tweens[panel] = tw
+
+
+# Häivyttää + liu'uttaa paneelin pois ja piilottaa (visible=false) vasta kun animaatio
+# on valmis. Ei-op jos paneeli on jo piilossa (esim. _close_build_tray() kutsuttuna
+# monesta paikasta varmuuden vuoksi).
+func _animate_tray_close(panel: PanelContainer) -> void:
+	if panel == null or not panel.visible:
+		return
+	_kill_tray_tween(panel)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_IN)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 0.0, TRAY_ANIM_DURATION)
+	tw.tween_property(panel, "offset_bottom", TRAY_ANCHOR_OFFSET_BOTTOM + TRAY_SLIDE_OFFSET, TRAY_ANIM_DURATION)
+	tw.chain().tween_callback(func() -> void:
+		panel.visible = false
+		panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
+		panel.modulate.a = 1.0)
+	_tray_tweens[panel] = tw
+
+
+func _kill_tray_tween(panel: PanelContainer) -> void:
+	if _tray_tweens.has(panel):
+		var tw: Tween = _tray_tweens[panel]
+		if tw != null and tw.is_valid():
+			tw.kill()
+		_tray_tweens.erase(panel)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -681,6 +750,7 @@ func _open_zone_popover(zone: Dictionary) -> void:
 	var anchor: Vector2 = pixel_world.grid_to_screen(
 		Vector2(float(rect.position.x) + float(rect.size.x) * 0.5, float(rect.position.y)))
 	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
 	_popover_just_opened = true
 
 
@@ -726,6 +796,7 @@ func _open_machine_popover(kind: String, machine: Variant) -> void:
 
 	var recipes: Dictionary = machine.RECIPES
 	var collected: Dictionary = machine.collected
+	_machine_popover_rows = {}
 	for input_mat: int in recipes.keys():
 		var recipe: Dictionary = recipes[input_mat]
 		var row := HBoxContainer.new()
@@ -736,16 +807,39 @@ func _open_machine_popover(kind: String, machine: Variant) -> void:
 		row.add_child(_mat_swatch(int(recipe["output"])))
 		var have: int = int(collected.get(input_mat, 0))
 		var need: int = int(recipe["count"])
-		row.add_child(_label("%d/%d" % [have, need], 11, COL_DIM))
+		var progress_lbl := _label("%d/%d" % [have, need], 11, COL_DIM)
+		row.add_child(progress_lbl)
+		_machine_popover_rows[input_mat] = {"label": progress_lbl, "need": need}
 
 	get_parent().add_child(panel)
 	_context_popover = panel
 	_context_popover_kind = kind
+	_machine_popover_machine = machine   # Vaihe 5 kohta 4: live-päivitystä varten (ks. _update_machine_popover)
 	_register_panel(panel)
 	var anchor: Vector2 = pixel_world.grid_to_screen(
 		Vector2(machine.grid_pos.x + float(w) * 0.5, float(machine.grid_pos.y)))
 	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
 	_popover_just_opened = true
+
+
+# Vaihe 5 kohta 4: päivittää auki olevan konepopoverin kerätty/tarvittu-laskurit
+# (~2 Hz, kutsutaan _process():n olemassa olevasta ~5 Hz-akusta — riittää ja ylittää
+# pyydetyn taajuuden). Ei rakenna paneelia uudelleen, vain Label.text per rivi.
+# Read-only: lukee vain machine.collected, ei koske pelilogiikkaan.
+func _update_machine_popover() -> void:
+	if _machine_popover_machine == null or not is_instance_valid(_machine_popover_machine):
+		return
+	if _context_popover == null or not is_instance_valid(_context_popover):
+		return
+	var collected: Dictionary = _machine_popover_machine.collected
+	for input_mat in _machine_popover_rows:
+		var entry: Dictionary = _machine_popover_rows[input_mat]
+		var lbl: Label = entry["label"]
+		if not is_instance_valid(lbl):
+			continue
+		var have: int = int(collected.get(input_mat, 0))
+		lbl.text = "%d/%d" % [have, int(entry["need"])]
 
 
 # Sijoittaa popoverin ankkurin yläpuolelle (keskitettynä x-akselilla). Tarkka koko ei
@@ -757,6 +851,23 @@ func _position_popover(panel: Control, anchor_screen: Vector2) -> void:
 	panel.position = anchor_screen - Vector2(est.x * 0.5, est.y + 14.0)
 
 
+# Nopea fade+scale-in (Vaihe 5 kohta 2, ~0.08 s). Skaalataan vain visuaalisesti
+# (Control.scale/pivot_offset) — panel.position/size (siis _register_panel-eston
+# käyttämä get_global_rect()) ei muutu, joten input-esto kattaa koko lopullisen
+# alueen jo ensimmäisestä framesta lähtien vaikka paneeli näyttää vielä pieneltä.
+func _animate_popover_in(panel: Control) -> void:
+	var est := panel.get_combined_minimum_size()
+	panel.pivot_offset = est * 0.5
+	panel.modulate.a = 0.0
+	panel.scale = Vector2(0.9, 0.9)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 1.0, POPOVER_ANIM_DURATION)
+	tw.tween_property(panel, "scale", Vector2.ONE, POPOVER_ANIM_DURATION)
+
+
 func _close_context_popover() -> void:
 	if _context_popover != null and is_instance_valid(_context_popover):
 		_unregister_panel(_context_popover)
@@ -765,6 +876,8 @@ func _close_context_popover() -> void:
 	_context_popover_kind = ""
 	_zone_popover_zid = -1
 	_zone_popover_toggles = {}
+	_machine_popover_machine = null
+	_machine_popover_rows = {}
 
 
 # Pitää popoverin ruudun sisällä (1664×960-ikkuna, mutta lasketaan aina oikeasta
@@ -1040,20 +1153,23 @@ func _fleet_signature(bm: Object) -> String:
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _build_onboarding() -> void:
+	# Vaihe 5 kohta 3: pieni diegeettinen vihjerivi actionbarin YLÄPUOLELLE — ei enää
+	# iso keskuslaatikko. Sama ankkuripaikka kuin mine-rivi/trayt (TRAY_ANCHOR_
+	# OFFSET_BOTTOM); _update_onboarding() piilottaa vihjeen automaattisesti kun
+	# joku niistä on jo auki samalla paikalla (ks. row_busy).
 	onboarding_panel = PanelContainer.new()
-	onboarding_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	onboarding_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	onboarding_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	onboarding_panel.grow_vertical = Control.GROW_DIRECTION_END
-	onboarding_panel.offset_top = 96.0
+	onboarding_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	onboarding_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	onboarding_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	onboarding_panel.add_theme_stylebox_override("panel",
-		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER, 1, 14.0))
+	onboarding_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
 	onboarding_label = Label.new()
-	onboarding_label.text = ONBOARDING_TEXTS[0]
-	onboarding_label.add_theme_font_size_override("font_size", 22)
-	onboarding_label.add_theme_color_override("font_color", COL_TEXT)
+	onboarding_label.text = "> " + ONBOARDING_TEXTS[0]
+	onboarding_label.add_theme_font_size_override("font_size", 12)
+	onboarding_label.add_theme_color_override("font_color", UiThemeRef.COL_BORDER_DIM)
 	onboarding_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	onboarding_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	onboarding_panel.add_child(onboarding_label)
@@ -1077,9 +1193,15 @@ func _update_onboarding() -> void:
 			# Kunnes kolmas botti ostettu
 			if _current_bot_count() > _onboarding_bot_base:
 				_advance_onboarding()
-	if not _onboarding_done:
-		onboarding_label.text = ONBOARDING_TEXTS[_onboarding_step]
-		onboarding_panel.visible = true
+	if _onboarding_done:
+		return
+	onboarding_label.text = "> " + ONBOARDING_TEXTS[_onboarding_step]
+	# Piilota vihje kun mine-rivi/build-tray/bot-tray jo käyttää samaa ankkuripaikkaa
+	# actionbarin yläpuolella — ettei kaksi paneelia näy päällekkäin. Sivuvaikutus on
+	# looginenkin: esim. askel 0:n "paina V" -vihje ei ole enää tarpeen kun mine-rivi
+	# (V:n painamisen seuraus) on jo auki.
+	var row_busy: bool = _get_designation_mode() or _build_tray_open or _bot_tray_open
+	onboarding_panel.visible = not row_busy
 
 
 func _advance_onboarding() -> void:
@@ -1138,19 +1260,38 @@ func _on_demo_complete() -> void:
 	_show_toast("Demo valmis! Jatka vapaasti.", 8.0)
 
 
+# Vaihe 5 kohta 2: fade-in heti näkyviin tullessa. Aiempi toast (jos vielä
+# häivytysvaiheessa) katkaistaan ja korvataan uudella — ei jää kesken roikkumaan.
 func _show_toast(text: String, duration: float) -> void:
 	if toast_label == null:
 		return
+	_kill_toast_tween()
 	toast_label.text = text
 	toast_panel.visible = true
+	toast_panel.modulate.a = 0.0
 	_toast_timer = duration
+	_toast_tween = create_tween()
+	_toast_tween.tween_property(toast_panel, "modulate:a", 1.0, TOAST_FADE_IN_DURATION)
 
 
+# Häivyttää toastin ennen piiloutumista (Vaihe 5 kohta 2) — visible=false vasta
+# fade-outin lopussa, ei enää suoraan aika loppuessa.
 func _update_toast(delta: float) -> void:
-	if _toast_timer > 0.0:
-		_toast_timer -= delta
-		if _toast_timer <= 0.0:
-			toast_panel.visible = false
+	if _toast_timer <= 0.0:
+		return
+	_toast_timer -= delta
+	if _toast_timer <= 0.0:
+		_toast_timer = 0.0
+		_kill_toast_tween()
+		_toast_tween = create_tween()
+		_toast_tween.tween_property(toast_panel, "modulate:a", 0.0, TOAST_FADE_OUT_DURATION)
+		_toast_tween.tween_callback(func() -> void: toast_panel.visible = false)
+
+
+func _kill_toast_tween() -> void:
+	if _toast_tween != null and _toast_tween.is_valid():
+		_toast_tween.kill()
+	_toast_tween = null
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1303,6 +1444,7 @@ func _process(delta: float) -> void:
 		_update_afford()
 		_maybe_rebuild_bot_list()
 		_update_base_filter_availability()
+		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
 
 	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
 	if _debug_visible:
@@ -1414,11 +1556,14 @@ func _frame_or_flat_panel() -> StyleBox:
 
 
 # Ikoninappi (actionbar/trayt): 9-slice button_frame.png kun saatavilla, nearest-filter
-# terävälle pikselilookille. HUOM: sama kehys kaikissa tiloissa (normal/hover/pressed) —
-# aktiivinen työkalu erottuu COL_ACTIVE-modulaatiolla (ks. _update_actionbar_highlight),
-# ei erillisillä texture-varianteilla. button_frame.png:n 8px-marginaali on tarkoitettu
-# tälle 48px-kokoluokalle; pienempiin (<32px) napteihin sitä ei käytetä (ks. UI_REDESIGN_
-# PLAN.md Vaihe 3 kohta 6 — team-leadin sallima StyleBoxFlat-fallback pienille napeille).
+# terävälle pikselilookille. Vaihe 5: normal/hover/pressed ovat erilliset tekstuuri-
+# tintit (UiTheme.icon_button_state_styleboxes) — aktiivinen työkalu erottuu tästä
+# silti omalla COL_ACTIVE-modulaatiollaan (ks. _update_actionbar_highlight), joka
+# kertautuu hover/press-tintin päälle eikä korvaa sitä. button_frame.png:n 8px-
+# marginaali on tarkoitettu tälle 48px-kokoluokalle; pienempiin (<32px) napteihin
+# sitä ei käytetä (ks. UI_REDESIGN_PLAN.md Vaihe 3 kohta 6 — team-leadin sallima
+# StyleBoxFlat-fallback pienille napeille, joka jo erottelee hover/pressed teeman
+# kautta).
 func _make_tool_button(icon: Texture2D, tooltip: String, size: float) -> Button:
 	var b := Button.new()
 	b.icon = icon
@@ -1431,12 +1576,16 @@ func _make_tool_button(icon: Texture2D, tooltip: String, size: float) -> Button:
 	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_CENTER
 	if size >= 40.0:
-		var frame := UiThemeRef.button_frame_style_box()
-		if frame != null:
-			b.add_theme_stylebox_override("normal", frame)
-			b.add_theme_stylebox_override("hover", frame)
-			b.add_theme_stylebox_override("pressed", frame)
-			b.add_theme_stylebox_override("focus", frame)
+		# Vaihe 5 kohta 1: erilliset normal/hover/pressed-tekstuurit (ei enää sama
+		# kehys kaikissa tiloissa) — COL_ACTIVE-modulaatio (_update_actionbar_highlight)
+		# pysyy erillisenä kerroksena tämän päällä, joten aktiivinen työkalu erottuu
+		# silti hoverista.
+		var states := UiThemeRef.icon_button_state_styleboxes()
+		if not states.is_empty():
+			b.add_theme_stylebox_override("normal", states["normal"])
+			b.add_theme_stylebox_override("hover", states["hover"])
+			b.add_theme_stylebox_override("pressed", states["pressed"])
+			b.add_theme_stylebox_override("focus", states["focus"])
 	return b
 
 
