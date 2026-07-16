@@ -9,10 +9,15 @@ const FLOOR_MAT := 3  # MAT_STONE
 const SMELT_COOLDOWN := 1.5  # ~11 hiekkaa/s, vähän alle launcherin tahdin
 
 # Reseptit: input_material -> { count: int, output: int }
+# TALOUSINVARIANTTI: output on aina 2x2 rigid body = 4 px (_spawn_smelted_body), joten
+# count=4 sailyttaa tilavuuden 1:1 ja PRICES-kertoimet toteutuvat per pikseli:
+#   SAND $1 -> GLASS $3 (3x), IRON_ORE $3 -> IRON $5 (1.67x), GOLD_ORE $5 -> GOLD $12 (2.4x).
+# Vanhat countit (16/12/8) TUHOSIVAT arvoa (esim. rauta: $36 sisaan -> $20 ulos = -44 %)
+# -> jalostus teki pelaajasta koyhemman, koko tier-2-kaari oli rikki (BALANCE_REPORT §5).
 const RECIPES := {
-	1:  { "count": 16, "output": 10 },  # Sand -> Glass
-	12: { "count": 12, "output": 14 },  # Iron Ore -> Iron
-	13: { "count": 8,  "output": 15 },  # Gold Ore -> Gold
+	1:  { "count": 4, "output": 10 },  # Sand -> Glass
+	12: { "count": 4, "output": 14 },  # Iron Ore -> Iron
+	13: { "count": 4, "output": 15 },  # Gold Ore -> Gold
 }
 
 var grid_pos: Vector2i = Vector2i.ZERO  # Vasen yläkulma
