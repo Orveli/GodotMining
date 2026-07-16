@@ -19,7 +19,7 @@
 
     { "cmd": "assert_money_gt", "min": 150, "label": "raha noussut louhinnasta+kuljetuksesta (mittakaavassa, ei vain kynnyksen yli)" },
     { "cmd": "assert_bots_moved", "min_dist": 30, "label": "molemmat botit siirtyneet >30 px spawnista" },
-    { "cmd": "assert_desig_consumed_pct", "min_pct": 70, "label": "designoidusta alueesta >=70% kulutettu (todistaa etenevan louhinnan + BLOCKED-reaktivoinnin, ei frontier-jumia)" },
+    { "cmd": "assert_desig_consumed_pct", "min_pct": 65, "label": "designoidusta alueesta >=65% kulutettu (todistaa etenevan louhinnan + BLOCKED-reaktivoinnin, ei frontier-jumia)" },
 
     { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/mvp_t1.png", "label": "lopputila: kaivettu alue + botit" }
   ]

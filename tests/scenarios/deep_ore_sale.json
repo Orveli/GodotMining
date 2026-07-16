@@ -26,6 +26,6 @@
     { "cmd": "assert_money_gt", "min": 4000, "label": "raha > 4000: sama poimittu tilavuus pelkkana kivena tuottaisi enintaan ~2800 (1$/px) -> ylitys todistaa COPPER/RARE_EARTH-premiumin (havaittu ~15250)" },
     { "cmd": "assert_desig_consumed_pct", "min_pct": 60, "label": "malmialueesta >=60% kulutettu (miner+hauler-ketju etenee malmilla, ei jumita malmiseinaan; havaittu 100%)" },
 
-    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/.claude/worktrees/agent-a67d9ca99d7448cbc/tests/output/deep_ore_sale.png", "label": "lopputila: kaivettu malmialue + botit" }
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/deep_ore_sale.png", "label": "lopputila: kaivettu malmialue + botit" }
   ]
 }

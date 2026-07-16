@@ -1,0 +1,20 @@
+{
+  "auto_exit": true, "cpu_ca": true,
+  "_doc": "Audit T4.1 fleet-skaalaus: mittaa $/s eri fleet-kokoonpanoilla luonnollisella pintaterrainilla (price 1). Configit: A=1m1h, B=1m2h, C=2m2h, D=2m4h. 30s mittausikkuna + 10s settle bottien lisayksen jalkeen. add_bot ei muuta rahaa.",
+  "steps": [
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 224, "margin": 16, "depth": 240 },
+    { "cmd": "run_frames", "n": 600 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 1800 }, { "cmd": "dump_bots" },
+    { "cmd": "add_bot", "role": "hauler" },
+    { "cmd": "run_frames", "n": 600 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 1800 }, { "cmd": "dump_bots" },
+    { "cmd": "add_bot", "role": "miner" },
+    { "cmd": "run_frames", "n": 600 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 1800 }, { "cmd": "dump_bots" },
+    { "cmd": "add_bot", "role": "hauler" }, { "cmd": "add_bot", "role": "hauler" },
+    { "cmd": "run_frames", "n": 600 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 1800 }, { "cmd": "dump_bots" },
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/audit/hl_fleet_end.png", "label": "fleet 2m4h" }
+  ]
+}

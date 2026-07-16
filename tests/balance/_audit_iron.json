@@ -1,0 +1,18 @@
+{
+  "auto_exit": true, "cpu_ca": true,
+  "_doc": "Audit T4.1: IRON_ORE (price 3) raaka-$/s 2 aloitusbotilla. Tayta rautaslabi designaatiovyohykkeeseen, mittaa money 15s valein 2 min. Vertaa DIRT/STONE-perusarvoon 3.6 $/s.",
+  "steps": [
+    { "cmd": "fill_rect", "x": 460, "y": 384, "w": 230, "h": 240, "mat": 12 },
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 160, "margin": 16, "depth": 180 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/audit/hl_iron_end.png", "label": "iron 2min" }
+  ]
+}

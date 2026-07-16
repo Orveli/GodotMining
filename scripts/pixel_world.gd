@@ -5174,4 +5174,12 @@ func _notification(what: int) -> void:
 			rd.free_rid(uniform_set)
 			rd.free_rid(grid_buffer)
 			rd.free_rid(shader_rid)
+			# Transfer-shaderin resurssit vuotivat aiemmin exitissa (1 Compute + 2
+			# StorageBuffer + 1 Shader -varoitukset) — vapautetaan samassa syklissa.
+			if transfer_ready:
+				rd.free_rid(transfer_pipeline)
+				rd.free_rid(transfer_uniform_set)
+				rd.free_rid(mat_packed_buffer)
+				rd.free_rid(seed_packed_buffer)
+				rd.free_rid(transfer_shader_rid)
 			rd.free()

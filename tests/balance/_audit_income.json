@@ -1,0 +1,31 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "Audit T1.1 $/s-mittaus: 2 aloitusbottia (1 miner/1 hauler), iso pintadesignaatio basen vasemmalla, money-naytteet 15 s valein 5 min. Deterministinen kiintea 1/60 aika-askel.",
+  "steps": [
+    { "cmd": "dump_bots" },
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 256, "margin": 16, "depth": 200 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 900 }, { "cmd": "dump_bots" },
+    { "cmd": "mvp_shot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/audit/hl_income_end.png", "label": "5 min pinta-louhinta 2 bottia" }
+  ]
+}
