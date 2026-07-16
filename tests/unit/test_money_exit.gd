@@ -15,6 +15,8 @@ const MAT_GOLD_ORE := 13
 const MAT_GOLD := 15
 const MAT_COAL := 16
 const MAT_GRAVEL := 18
+const MAT_COPPER := 20        # syvyysvyohyke 0.35-0.75 (kupari)
+const MAT_RARE_EARTH := 21    # syvyysvyohyke 0.75-1.0 (harvinaiset maametallit, syvin)
 
 var _pass := 0
 var _fail := 0
@@ -30,6 +32,9 @@ func _init() -> void:
 	_test_accept_cargo_increments_earned_total_cumulatively()
 	_test_update_exit_increments_earned_total()
 	_test_prices_include_copper_and_rare_earth()
+	_test_accept_cargo_copper_only()
+	_test_accept_cargo_rare_earth_only()
+	_test_price_monotonic_with_depth()
 	print("\n=== YHTEENVETO ===")
 	print("RESULT: %d passed, %d failed" % [_pass, _fail])
 	if _fail > 0:
@@ -150,3 +155,46 @@ func _test_prices_include_copper_and_rare_earth() -> void:
 	var total := me.accept_cargo({20: 3, 21: 2})  # 3*4 + 2*8 = 12+16 = 28
 	_check(total == 28, "accept_cargo hinnoittelee COPPER_ORE+RARE_EARTH oikein (28), sai %d" % total)
 	me.free()
+
+
+# D3: COPPER myydaan RAAKANA (ei jalostetta). Puhtaan kuparilastin arvo = maara * 4.
+func _test_accept_cargo_copper_only() -> void:
+	var me := _make_base(Vector2i(200, 200))
+	var total := me.accept_cargo({MAT_COPPER: 10})  # 10 * 4 = 40
+	_check(total == 40, "accept_cargo hinnoittelee raakakuparin premiumilla (10*4=40), sai %d" % total)
+	me.free()
+
+
+# D3: RARE_EARTH myydaan RAAKANA syvimman tierin premium-hinnalla. Arvo = maara * 8.
+func _test_accept_cargo_rare_earth_only() -> void:
+	var me := _make_base(Vector2i(200, 200))
+	var total := me.accept_cargo({MAT_RARE_EARTH: 10})  # 10 * 8 = 80
+	_check(total == 80, "accept_cargo hinnoittelee raa'an rare earthin premiumilla (10*8=80), sai %d" % total)
+	# Sama maara rare earthia arvokkaampi kuin kupari (syvempi tier) -> kannustaa kaivautumaan syvalle.
+	var copper := me.accept_cargo({MAT_COPPER: 10})  # 40
+	_check(total > copper, "sama maara RARE_EARTH (%d) > COPPER (%d) -> syvempi malmi kannattaa" % [total, copper])
+	me.free()
+
+
+# Syvyysvyohyke-invariantti: syvempi malmi on AINA arvokkaampi (GDD: syvemma = arvokkaampaa).
+# Tierit (norm. syvyys): STONE/DIRT pinta -> COAL 0-0.35 -> IRON_ORE 0.10-0.55 ->
+# COPPER 0.35-0.75 -> GOLD_ORE 0.55-0.90 -> RARE_EARTH 0.75-1.0. Hinnat NOUSEVAT tata jarjestysta.
+# Suojaa hintasaadolta joka rikkoisi "syvempi = arvokkaampi" -periaatteen.
+func _test_price_monotonic_with_depth() -> void:
+	var p := MoneyExit.PRICES
+	var stone := int(p.get(MAT_STONE, -1))
+	var dirt := int(p.get(MAT_DIRT, -1))
+	var coal := int(p.get(MAT_COAL, -1))
+	var iron_ore := int(p.get(MAT_IRON_ORE, -1))
+	var copper := int(p.get(MAT_COPPER, -1))
+	var gold_ore := int(p.get(MAT_GOLD_ORE, -1))
+	var rare := int(p.get(MAT_RARE_EARTH, -1))
+	_check(stone == 1 and dirt == 1, "pintamateriaalit STONE/DIRT = 1 $/px (sai %d/%d)" % [stone, dirt])
+	# Ketju: DIRT/STONE(1) < COAL(2) < IRON_ORE(3) < COPPER(4) < GOLD_ORE(5) < RARE_EARTH(8).
+	_check(coal > stone, "COAL (%d) > STONE (%d) — matalin malmitier kalliimpi kuin kivi" % [coal, stone])
+	_check(iron_ore > coal, "IRON_ORE (%d) > COAL (%d)" % [iron_ore, coal])
+	_check(copper > iron_ore, "COPPER (%d) > IRON_ORE (%d) — kupari syvemmalla kuin rauta" % [copper, iron_ore])
+	_check(gold_ore > copper, "GOLD_ORE (%d) > COPPER (%d) — kulta syvemmalla kuin kupari" % [gold_ore, copper])
+	_check(rare > gold_ore, "RARE_EARTH (%d) > GOLD_ORE (%d) — syvin tier kallein" % [rare, gold_ore])
+	# Deepest-vs-surface: syvin malmi tuottaa selvan $/s-hypyn pintakiveen nahden.
+	_check(rare >= stone * 8, "RARE_EARTH (%d) >= 8x pintakivi (%d) — syva kaivautuminen nakyy $/s-hyppyna" % [rare, stone])
