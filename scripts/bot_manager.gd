@@ -193,11 +193,11 @@ func add_bot(role: int, p: Vector2) -> Bot:
 #  Osto, roolinvaihto, upgrade, tilastot (A1 + A2 — API_CONTRACT_demo.md)
 # ============================================================
 
-# Seuraavan botin hinta: 50 * 2^(ostetut botit) — alkaa 50:sta ja TUPLAANTUU joka ostolla
-# (50, 100, 200, 400, 800, ...). Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen
-# ostettu (3. botti) = 50.
+# Seuraavan botin hinta: 300 * 1.5^(ostetut botit) — GDD §6.4: eka lisabotti ~2-3 min
+# saastamisen paassa, loiva kasvu tukee lauman skaalausta (300, 450, 675, 1012, 1518, ...).
+# Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen ostettu (3. botti) = 300.
 func next_bot_price() -> int:
-	return 50 * (1 << _bought_count)
+	return int(round(300.0 * pow(1.5, _bought_count)))
 
 
 # Osta botti: tarkistaa hinnan world.moneya vasten, vahentaa rahan, spawnaa basesta.

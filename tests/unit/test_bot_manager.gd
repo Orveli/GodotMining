@@ -281,38 +281,38 @@ func _test_blocked_reactivates_when_neighbor_opens() -> void:
 
 # --- A1: Osto & nouseva hinta ------------------------------------------------
 
-# next_bot_price(): 50 * 2^n (alkaa 50, tuplaantuu joka ostolla), n = ostetut (aloitus-2 ei laske).
+# next_bot_price(): 300 * 1.5^n (GDD §6.4), n = ostetut (aloitus-2 ei laske).
 # buy_bot(): tarkistaa varan, vahentaa rahan, spawnaa world.base.spawn_pos():iin.
 func _test_buy_bot_price_and_spawn() -> void:
 	var w := _make_world()
 	var bm := BotManager.new()
 	bm.setup(w)
-	# Alkutila: 2 aloitusbottia EIVAT ole ostettuja -> ensimmainen osto on silti hinnalla 50.
+	# Alkutila: 2 aloitusbottia EIVAT ole ostettuja -> ensimmainen osto on silti hinnalla 300.
 	bm.add_bot(Bot.Role.MINER, Vector2(10, 10))
 	bm.add_bot(Bot.Role.HAULER, Vector2(20, 10))
-	_check(bm.next_bot_price() == 50, "ensimmaisen ostettavan botin hinta on 50 (aloitusbotit eivat kasvata), sai %d" % bm.next_bot_price())
+	_check(bm.next_bot_price() == 300, "ensimmaisen ostettavan botin hinta on 300 (aloitusbotit eivat kasvata), sai %d" % bm.next_bot_price())
 
 	# Ei varaa -> osto epaonnistuu, raha ja bottimaara ennallaan.
-	w.money = 49
+	w.money = 299
 	var before_count := bm.bot_count()
 	_check(bm.buy_bot(Bot.Role.MINER) == false, "buy_bot palauttaa false kun raha ei riita")
 	_check(bm.bot_count() == before_count, "epaonnistunut osto ei spawnaa bottia")
-	_check(w.money == 49, "epaonnistunut osto ei vahenna rahaa")
+	_check(w.money == 299, "epaonnistunut osto ei vahenna rahaa")
 
 	# Riittava raha -> osto onnistuu, raha vahenee, botti ilmestyy basen spawn_pos:iin.
-	w.money = 50
+	w.money = 300
 	_check(bm.buy_bot(Bot.Role.MINER) == true, "buy_bot onnistuu kun raha riittaa")
 	_check(w.money == 0, "osto vahensi rahan tasan hinnan verran")
 	_check(bm.bot_count() == before_count + 1, "botti lisattiin laumaan")
 	var spawned: Bot = bm.bots[bm.bots.size() - 1]
 	_check(spawned.pos.is_equal_approx(w.base.spawn_pos()), "uusi botti spawnasi basen spawn_pos:iin")
 
-	# Nouseva hinta: 2. ostettu botti (n=1) -> 50*2 = 100 (tuplaantuu).
-	_check(bm.next_bot_price() == 100, "toisen ostetun botin hinta tuplaantuu 100:aan, sai %d" % bm.next_bot_price())
-	w.money = 100
-	_check(bm.buy_bot(Bot.Role.HAULER) == true, "toinen osto onnistuu 100:lla")
-	# 3. ostettu botti (n=2) -> 50*2^2 = 200.
-	_check(bm.next_bot_price() == 200, "kolmannen ostetun botin hinta tuplaantuu 200:aan, sai %d" % bm.next_bot_price())
+	# Nouseva hinta: 2. ostettu botti (n=1) -> 300*1.5 = 450.
+	_check(bm.next_bot_price() == 450, "toisen ostetun botin hinta nousee 450:een, sai %d" % bm.next_bot_price())
+	w.money = 450
+	_check(bm.buy_bot(Bot.Role.HAULER) == true, "toinen osto onnistuu 450:lla")
+	# 3. ostettu botti (n=2) -> 300*1.5^2 = 675.
+	_check(bm.next_bot_price() == 675, "kolmannen ostetun botin hinta nousee 675:een, sai %d" % bm.next_bot_price())
 
 
 # --- A1: Roolinvaihto kesken tyon --------------------------------------------
