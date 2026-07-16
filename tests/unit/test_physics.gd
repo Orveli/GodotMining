@@ -53,11 +53,20 @@ func _test_falling_block() -> void:
 	var physics := PhysicsWorld.new()
 	physics.scan_stone_bodies(grid, color_seed, W, H)
 
-	# Etsi ei-staattinen kappale
+	# scan_stone_bodies merkitsee kaikki skannatut kappaleet staattisiksi (osa maailmaa) —
+	# terrain ei romahda latauksessa. Kappale muuttuu dynaamiseksi vasta kun se irrotetaan
+	# (leikkaus/räjähdys/piirto). Simuloi irrotus: etsi maapohjaa koskematon kappale ja herätä se.
 	var block_id := -1
 	for bid in physics.bodies:
 		var b: RigidBodyData = physics.bodies[bid]
-		if not b.is_static:
+		var touches_ground := false
+		for wp in b.get_world_pixels():
+			if wp.y >= H - 1:
+				touches_ground = true
+				break
+		if not touches_ground:
+			b.is_static = false
+			b.wake_up()
 			block_id = bid
 			break
 
@@ -97,10 +106,19 @@ func _test_bodymap_debug() -> void:
 	var physics := PhysicsWorld.new()
 	physics.scan_stone_bodies(grid, color_seed, W, H)
 
+	# scan_stone_bodies merkitsee kaikki kappaleet staattisiksi — irrota maapohjaa koskematon
+	# kappale dynaamiseksi (kuten leikkaus/räjähdys tekisi pelissä).
 	var block_id := -1
 	for bid in physics.bodies:
 		var b: RigidBodyData = physics.bodies[bid]
-		if not b.is_static:
+		var touches_ground := false
+		for wp in b.get_world_pixels():
+			if wp.y >= H - 1:
+				touches_ground = true
+				break
+		if not touches_ground:
+			b.is_static = false
+			b.wake_up()
 			block_id = bid
 			break
 
