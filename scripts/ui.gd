@@ -382,6 +382,8 @@ func _toggle_designation() -> void:
 func _build_mine_row() -> void:
 	mine_row_panel = PanelContainer.new()
 	mine_row_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	mine_row_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	mine_row_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	mine_row_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM   # actionbarin yläpuolelle
 	mine_row_panel.visible = false
 	mine_row_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
@@ -448,6 +450,8 @@ func _on_brush_changed(value: float) -> void:
 func _build_build_tray() -> void:
 	build_tray_panel = PanelContainer.new()
 	build_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	build_tray_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	build_tray_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	build_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	build_tray_panel.visible = false
 	build_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
@@ -507,6 +511,8 @@ func _update_build_tray_visibility() -> void:
 func _build_bot_tray() -> void:
 	bot_tray_panel = PanelContainer.new()
 	bot_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	bot_tray_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	bot_tray_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	bot_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	bot_tray_panel.visible = false
 	bot_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
