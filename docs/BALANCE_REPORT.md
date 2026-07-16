@@ -24,10 +24,12 @@ aika-askel → toistettava, ei riipu fps:stä eikä törmää käyttäjän ikkun
   havaittavaa congestion-kattoa vielä): 2 bottia 3,6 $/s → 6 bottia 13,4 $/s.
 - **Raaka-materiaalitierit skaalaavat hinnalla** (hauler-throughput × $/px): dirt 3,6 → iron ~10,8
   → gold ~18 → rare earth ~28,8 $/s (2 botilla).
-- **KRIITTINEN demo-riski:** GDD:n tier-2+ $/s-kerroin tulee JALOSTUKSESTA, mutta jalostusketju ei
-  aktivoidu boteilla nykybuildissa (auditin P0-2: base hyväksyy kaiken → malmi myydään raakana).
-  Demon "seuraava askel = jalostus moninkertaistaa tulon" -kaari EI ole saavutettavissa ennen
-  P0-2-korjausta. Ilman jalostusta demo on läpäistävissä vain raaka-tiereillä + fleet-skaalauksella.
+- **JALOSTUS KORJATTU (§5, commit 70e2b26): nyt value-positive.** Reseptit count=4 + 2×2-harkkobody →
+  SAND→GLASS 3,0×, IRON 1,67×, GOLD 2,4× (arvo koodivarmennettu). Vastaus "tuottaako jalostus enemmän
+  kuin raakamyynti": KYLLÄ nyt. (Aiempi count-12/16/8-resepti TUHOSI 70–86 % arvosta — korjattu.)
+  **HUOM: end-to-end $/s:ää ei voi mitata headlessina** (furnace-sulatus + harkkofysiikka ovat
+  GPU-only → furnace inertti headless); arvo todennettu koodista. **2 käytännön kitkaa jäljellä:**
+  furnacen läpisyöttö ~2,67 malmia/s (ylivuoto isolla laumalla) + harkot vaativat HIHNAN baseen (UX).
 - **MITATTU jatko (§8): tier-progressio EI näkynyt $/s:ssä.** 6 bottia rautasyvyydessä = ~10,7 $/s
   (jopa alle pinta-13,4:n): hauler-pullonkaula estää laskeutumisen malmiin. Demo-projektio: price 1
   → ~32 min $10 000:een (LIIAN HIDAS); 15–25 min toteutuu VAIN efekt. price 2–3:lla, joka vaatii
@@ -88,18 +90,34 @@ money jäi $0:aan; luonnossa malmi on upotettuna kiveen, ei puhtaana slabina). M
 todennettuun läpisyöttö×hinta-logiikkaan. **Sivuhavainto (P2, tutkittava erikseen):** iso puhdas
 granular-malmikappale saattaa jumittaa haulerin — kannattaa varmentaa realistisella suonisetupilla.
 
-## 5. Jalostuskerroin (PRICES) — mutta BLOKATTU (auditin P0-2)
+## 5. Jalostus KORJATTU — nyt value-positive (commit 70e2b26), arvo koodivarmennettu
 
-| Resepti | Raaka $/px → Jalostettu $/px | Kerroin |
-|---|---|---|
-| SAND(1) → GLASS(3) | 1 → 3 | 3,0× |
-| IRON_ORE(3) → IRON(5) | 3 → 5 | 1,67× |
-| GOLD_ORE(5) → GOLD(12) | 5 → 12 | 2,4× |
+**Historiaa:** aiemmat reseptit (count 12/16/8, output 1 px) tuhosivat 70–86 % arvosta → furnace oli
+ansa. **KORJATTU 2026-07-17 (70e2b26):** RECIPES `count=4` kaikille, output = 2×2 rigid body (4 px)
+→ 1:1 tilavuuskonversio. Nyt per pikseli arvo nousee PRICES-taulun kertoimella:
 
-Nämä kertoimet ovat demon tier-2+ $/s-hypyn KDin — mutta ne EIVÄT toteudu boteilla nykybuildissa:
-base-pudotus hyväksyy kaiken (`filter_mask=0`), joten hauler myy malmin raakana ennen kuin se
-päätyy furnaceen (auditin P0-2). **Ilman P0-2-korjausta jalostuksen $/s-kerroin on saavuttamaton
-normaalipelissä**, ja tier-2+ eteneminen nojaa pelkkään syvempään raakamalmiin (§4).
+| Resepti | count:output px | Raaka-arvo (4 × $/px) | Jalostettu (4 × $/px) | **KERROIN** |
+|---|---|---|---|---|
+| SAND($1) → GLASS($3) | 4 : 4 | 4 × $1 = $4 | 4 × $3 = $12 | **3,0×** |
+| IRON_ORE($3) → IRON($5) | 4 : 4 | 4 × $3 = $12 | 4 × $5 = $20 | **1,67×** |
+| GOLD_ORE($5) → GOLD($12) | 4 : 4 | 4 × $5 = $20 | 4 × $12 = $48 | **2,4×** |
+
+**Jalostus on nyt value-positive** ja täsmää GDD:n intenttiin. Vastaus tehtävän kysymykseen
+"tuottaako IRON_ORE→IRON enemmän kuin raakamyynti": **KYLLÄ nyt — 1,67× (iron), 2,4× (gold), 3× (glass)
+per pikseli.** P0-2-reititys todistettu toimivaksi aiemmin (`refine_route_test.gd`).
+
+**MITTAUSRAJOITE (tärkeä): end-to-end $/s:ää EI voi mitata headlessina.** `_update_furnaces` (malmin
+sulatus) JA `physics_world.step` (2×2-harkkobodyjen liike) ajetaan VAIN GPU-polussa (pixel_world.gd:853),
+EIVÄT headless cpu_ca -haarassa → **furnace on inertti headlessina** (ei sulata, harkot eivät liiku).
+Siksi arvo on todennettu koodista (resepti + PRICES), ei end-to-end-simulaatiosta. Aiemman confounded-
+ajon "refined-hyöty" oli pelkkä ylivuoto-raakamyynti (§9), EI furnacea — koska furnace ei toiminut lainkaan.
+
+**KAKSI KÄYTÄNNÖN KITKAPISTETTÄ jäljellä demolle (eivät arvo-, vaan käytettävyys-/skaalausongelmia):**
+1. **Läpisyöttö:** SMELT_COOLDOWN=1,5 s × 4 malmia = **~2,67 malmia/s per furnace.** Iso lauma toimittaa
+   malmia nopeammin → ylivuoto (myydään raakana) tai backlog. Suositus: SMELT_COOLDOWN 1,5→~0,75 s
+   TAI INTAKE_W 6→8–10, jotta yksi furnace ehtii jalostaa ~5–8 malmia/s.
+2. **Harkot ovat rigid-bodyja joita hauler EI imuroi** → tarvitaan HIHNA furnace→base (extra rakennusaskel).
+   Tämä on UX-kitka: jalostusketju vaatii furnace + hihna + malmireititys. Onboarding/opaste tarpeen.
 
 ## 6. Demo-kaari 15–25 min (mallinnettu)
 
@@ -115,10 +133,14 @@ mittaus vaatii joko P0-2-korjauksen tai jalostuksen käsin-reitityksen — suosi
 
 ## 7. Tuning-suositukset
 
-1. **Korjaa P0-2 (jalostuksen reititys)** ENNEN balanssilukkoa — muuten tier-2+ $/s-kaari on kuollut
-   suunnittelupaperilla. Suositus: kun furnace/crusher rakennetaan, poista sen reseptin input-malmi
-   basen hyväksytyistä automaattisesti.
-2. **Ohjaa pelaaja haulereihin** varhain (auditin P1-4). Optimaalinen ~2 hauleria/miner; peli ei
+0. **[TEHTY] Furnace-reseptien arvo (§5)** — korjattu commitissa 70e2b26 (count=4, value-positive). ✓
+1. **[KORKEA] Furnacen läpisyöttö** (`furnace.gd`): SMELT_COOLDOWN 1,5 s → **~0,75 s** TAI INTAKE_W 6 →
+   **8–10**. Nyt yksi furnace jalostaa vain ~2,67 malmia/s → iso lauma ylivuotaa (malmi myydään raakana,
+   jalostuskerroin jää saamatta). Nopeampi/leveämpi intake antaa ~5–8 malmia/s → jalostus ehtii skaalata.
+2. **[KORKEA] Jalostusketjun UX:** harkot ovat rigid-bodyja joita hauler ei imuroi → pelaaja tarvitsee
+   HIHNAN furnace→base. Lisää onboarding-opaste ("Rakenna furnace + hihna baseen") tai auto-connect
+   (kuten crusherilla). Muuten value-positive-jalostus jää löytämättä/rakentamatta.
+3. **[KESKI] Ohjaa pelaaja haulereihin** varhain (auditin P1-4). Optimaalinen ~2 hauleria/miner; peli ei
    kerro tätä. Vaihtoehto: aloita 1 miner + 2 haulerilla, tai vihje kun `dig_sites` kasautuu.
 3. **"Kuollut alku" (~45 s ennen ekaa tuloa):** harkitse pientä aloituspuskuria tai nopeampaa ekaa
    louhintaa jottei uusi pelaaja ehdi päätellä "mitään ei tapahdu".
@@ -174,15 +196,32 @@ lauma kasvaisi; **15–25 min toteutuu vain jos pelaaja pääsee price ~2–3 ma
 Demon 15–25 min-tahti VAATII tier-progression (efekt. price 2–3), MUTTA molemmat reitit sinne ovat
 tällä hetkellä tukossa:
 - **Syvempi malmi:** hauler-pullonkaula estää laskeutumisen (§8.1) — miner ei ehdi kaivautua malmiin.
-- **Jalostus:** blokattu (auditin P0-2) + ScenarioRunner ei voi edes testata sitä (§9).
+- **Jalostus:** EI blokattu enää (P0-2 mergattu ja reitittää malmin furnaceen), mutta jalostus TUHOAA
+  arvoa (§5, 0,14× iron) → furnacen rakentaminen ROMAHDUTTAA tulon. Aktiivisesti pahempi kuin "blokattu".
 → Pelaaja jää käytännössä ~10–13 $/s:ään (price ~1) → **~32 min $10 000:een = liian hidas demolle.**
 
-## 9. Puuttuvat skenaariokomennot (jalostusketjun testaukseen)
-ScenarioRunner EI voi rakentaa/testata jalostusketjua. Puuttuu (EN lisännyt näitä — pixel_world.gd
-on toisen agentin omistuksessa):
-- **`place_building` on TYNKÄ** (`pixel_world.gd`, vain `push_warning` default-haara — ei sijoita
-  furnacea/crusheria eikä rekisteröi input-dump/output-pickup-vyöhykkeitä).
-- **Ei filtterikomentoa** (`set_base_filter` / `set_zone_filter`) → malmia ei voi reitittää furnaceen.
+## 9. End-to-end jalostusmittaus (place_building nyt toteutettu) — vahvistaa: EI $/s-hyötyä
+`place_building type=furnace` + `set_base_filter` on nyt toteutettu (commit 6e50655). Ajoin
+end-to-end-mittauksen (mine iron → RAW-vaihe → place furnace → REFINED-vaihe). **Tulos: jalostus ei
+tuota $/s-hyötyä missään kokoonpanossa** — kaksi ajoa, molemmat vahvistavat §5:n arvohäviön:
+
+- **Furnace LÄHELLÄ basea (x=720):** REFINED-vaiheen money nousi NOPEAMMIN (~38 $/s vs raw ~10),
+  mikä NÄYTTÄÄ jalostushyödyltä — mutta on artefakti: $1164/30 s = 233 IRON myyty → vaatisi 2796
+  malmin jalostuksen (mahdotonta furnacen läpisyötöllä). Todellisuudessa **granular-malmi ylivuotaa
+  furnacen 6 px intaken ja VALUU basen intakeen → myydään RAAKANA $3/px**; "hyöty" oli vain lyhyemmät
+  hauler-reissut (furnace lähempänä louhintaa kuin base). Furnace ei siis jalostanut käytännössä mitään.
+- **Furnace KAUKANA basesta (x=440):** prosessi kaatui/tapettiin (exit 137) furnacen sijoituksen
+  jälkeen — epävakaus (todennäköisesti CA-alueen/reitityksen laajeneminen kauas). Ei refined-dataa.
+
+**Johtopäätös (2 mekanismia, molemmat = ei hyötyä):**
+1. Jos furnace EHTII kuluttaa malmin (läpisyöttö ≥ toimitus): 0,14× arvo → tulo ROMAHTAA (§5).
+2. Jos furnace YLIVUOTAA (6 px intake + 12:1 + smelt-cooldown < toimitusnopeus): ylivuoto myydään
+   raakana → furnace HYÖDYTÖN (paras tapaus, ~raw).
+→ **Jalostus ei koskaan nosta $/s:ää.** Parhaimmillaan neutraali (hyödytön furnace), pahimmillaan
+0,14× romahdus. Demon tier-2 "jalostus moninkertaistaa tulon" ei toteudu kummallakaan mekanismilla.
+Root cause = resepti (§5); toissijainen ongelma = furnacen läpisyöttö (6 px intake liian pieni).
+
+*(Todiste: `scratchpad/hl_refine.log`, `hl_refine2.log`, `refine_route_test.gd`.)*
 - Jotta jalostus-delta voidaan mitata skenaariolla, tarvitaan: toimiva `place_building type=furnace`
   (+ zone-rekisteröinti) JA `set_base_filter mask`. Vaihtoehtoisesti P0-2-korjaus, jos se auto-säätää
   base-filtterin furnacea rakennettaessa → silloin riittää toimiva `place_building`.
