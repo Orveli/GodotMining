@@ -135,7 +135,14 @@ var current_material: int = MAT_SAND
 var brush_size: int = 5
 var frame_count: int = 0
 var fps_timer: float = 0.0
-var gpu_passes: int = 8  # Adaptiivinen passimäärä (4-12); Margolus vaatii min 4 passia
+# Kiinteä Margolus-passimäärä 1x-nopeudella. Aiempi adaptiivinen FPS-säätö (4-12)
+# poistettu (T2.2/D4-b): se oli kuollutta koodia — _process() palautti gpu_passesin
+# perusarvoon joka frame säädön jälkeen — ja se olisi tehnyt simulaationopeudesta
+# laitteistoriippuvaisen (nopeampi GPU = enemmän passeja = sim eteni nopeammin).
+# Kiinteä arvo antaa deterministisen sim-nopeuden. Margolus vaatii vähintään 4 passia
+# (täysi TL/TR/BL/BR-sykli); 8 = kaksi täyttä sykliä.
+const GPU_PASSES_BASE := 8
+var gpu_passes: int = GPU_PASSES_BASE  # Frame-kohtainen passimäärä = GPU_PASSES_BASE * int(sim_speed)
 var sim_speed: float = 1.0  # 1=normaali, 4/8/16=nopea
 var _logic_frame_counter: int = 0
 var logic_frame_interval: int = 4  # CPU game logic ajetaan joka 4. frame
@@ -760,13 +767,14 @@ func _process(delta: float) -> void:
 			paint_pending = false
 
 		var _t0 := Time.get_ticks_usec()
+		# Ajan nopeus: pause (sim_speed = 0) ohittaa koko CA-kutsun -> ei yhtään Margolus-
+		# passia. Muuten passimäärä johdetaan kiinteästä perusarvosta simulaationopeuden
+		# mukaan: 1x=8, 2x=16, 3x=24, 4x=32 — aina >= 4 ja neljän monikerta, joten täydet
+		# Margolus-syklit pysyvät ehjinä. Skaalaus tehdään framejen VÄLISSÄ (ei kesken
+		# _simulate_gpu()-silmukan), joten offset-sykli ei katkea kesken framen.
 		if sim_speed > 0.0:
-			# max(1, ...) pakottaisi aina vähintään yhden passin — tauko ohittaa siksi
-			# koko kutsun, ei vain kerro nollalla.
-			var saved_passes := gpu_passes
-			gpu_passes = max(1, gpu_passes * int(sim_speed))
+			gpu_passes = GPU_PASSES_BASE * int(sim_speed)
 			_simulate_gpu()
-			gpu_passes = saved_passes
 		_t_gpu = float(Time.get_ticks_usec() - _t0) / 1000.0
 
 		# Lataa tulos takaisin CPU:lle
@@ -2086,8 +2094,17 @@ func _input(event: InputEvent) -> void:
 				elif bomb_mode:
 					bomb_mode = false
 					print("Pommi-moodi peruttu")
-			KEY_F5: save_world()
-			KEY_F9: load_world()
+			# Save/load poistettu pelaajalta (T2.4/D2): tallennus kattaa vain grid +
+			# rakennukset + rahat, EI botteja/vyöhykkeitä/designaatioita/demo-edistymää,
+			# joten F9-lataus rikkoisi pelitilan. Siirretty saman debug-gaten taakse
+			# kuin muut debug-näppäimet — save_world()/load_world() säilytetään
+			# debug-/F4-valikkokäyttöä varten (ei poisteta).
+			KEY_F5:
+				if not _debug_hotkey_blocked():
+					save_world()
+			KEY_F9:
+				if not _debug_hotkey_blocked():
+					load_world()
 			KEY_I: _save_ai_screenshot()
 
 
@@ -2202,7 +2219,7 @@ func _simulate_gpu() -> void:
 	var groups_x := ceili(float(W) / 16.0)
 	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
 
-	# Adaptiivinen passimäärä — vähennetään jos GPU ei pysy tahdissa
+	# Kiinteä passimäärä (gpu_passes = GPU_PASSES_BASE * sim_speed), asetettu _process():ssa
 	var push := PackedByteArray()
 	push.resize(48)  # Laajennettu gravity gun -kentillä
 	push.encode_u32(0, W)
@@ -2267,12 +2284,10 @@ func _simulate_gpu() -> void:
 	rd.submit()
 	rd.sync()
 
-	# Mittaa GPU-aika ja säädä passimäärää adaptiivisesti
+	# Mittaa GPU-aika (F4-debugvalikko lukee gpu_time_ms). Passimäärää EI enää säädetä
+	# adaptiivisesti: passit ovat kiinteät (GPU_PASSES_BASE * sim_speed) determinismin
+	# vuoksi, ja _process() asettaa gpu_passesin framejen välissä.
 	gpu_time_ms = float(Time.get_ticks_usec() - t0) / 1000.0
-	if gpu_time_ms > 12.0 and gpu_passes > 4:
-		gpu_passes -= 1  # Liian hidas → vähemmän passeja
-	elif gpu_time_ms < 6.0 and gpu_passes < 12:
-		gpu_passes += 1  # Varaa riittää → enemmän passeja
 
 
 func _download_from_gpu() -> void:
