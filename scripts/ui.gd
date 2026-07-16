@@ -1,23 +1,65 @@
 extends PanelContainer
 # ═══════════════════════════════════════════════════════════════════════════
 # UI 2.0 — kaivosyhtiön johtajan käyttöliittymä (DEMO_PLAN §3.1, kortti B1)
+# UI-REDESIGN Vaiheet 1-4 (docs/UI_REDESIGN_PLAN.md):
+#   Vaihe 1-2: yhteinen Theme + minimalisoitu HUD ("HUD = vain pisteet").
+#   Vaihe 3: ikoni-actionbar + build/bot-trayt (korvaa vanhan TabContainerin).
+#   Vaihe 4: diegeettiset kontekstipaneelit (klikkaa base/kone/vyöhyke maailmassa)
+#            + bottien tila maailmassa (scripts/ui_bot_status_overlay.gd).
 #
 # Rakenne (kaikki ohjelmallinen):
-#   • YLÄPALKKI (tämä PanelContainer): raha isolla, $/s, bottilaskuri, FPS
-#   • TYÖKALURIVI (alhaalla): designaatio [V] + moodit pensseli/laatikko/solu + koko
-#   • ALAPANEELI (TAB togglaa): kolme välilehteä BOTIT / RAKENNUKSET / LOGISTIIKKA
-#   • ONBOARDING: max 3 peräkkäistä opastetta
-#   • TOASTIT: kuuntelee world.milestone-signaalia (jos on)
-#   • MATERIAALISKANNERI (oikea yläkulma): ympäristön koostumus
+#   • YLÄPALKKI (vasen-ylä): raha isolla, $/s — FPS + bottilaskuri piilossa, F3 paljastaa
+#   • ACTIONBAR (alakeskellä): 4 ikoninappia — Louhi[V] / Rakenna[B] / Botit[T] / Pyyhi[E]
+#   • MINE-RIVI (actionbarin yllä, näkyy vain louhinta aktiivisena): pensseli/laatikko/
+#     solu + pensselikoko
+#   • BUILD-TRAY (actionbarin yllä, [B] avaa/sulkee): uuni/crusher/hihna/pickup/dump
+#   • BOT-TRAY (actionbarin yllä, [T]/TAB avaa/sulkee TAI klikkaa base maailmassa):
+#     osta miner/hauler, roolijako, upgrade-lista, "Base hyväksyy" -materiaalitogglet
+#   • KONTEKSTIPOPOVER (ilmestyy klikatun kohteen viereen maailmassa): vyöhykkeen
+#     materiaalifiltteri + poisto, TAI koneen resepti (input→output + edistymä)
+#   • ONBOARDING / TOASTIT / MATERIAALISKANNERI — ennallaan Vaiheesta 1-2
 #
-# RINNAKKAISKEHITYS: bot_manager/logistics-rajapinnat (lane A) ja
-# pixel_world-kytkennät (lane G) tulevat myöhemmin. Kaikki niiden kutsut on
-# guardattu has_method()/has_signal()/get():llä — napit joiden backend puuttuu
-# näkyvät harmaina. Integraatiossa kaikki herää eloon.
+# Ulkoasu yhdestä yhteisestä teemasta (scripts/ui_theme.gd: UiTheme). Isot paneelit
+# (trayt, popoverit) käyttävät UiTheme.panel_frame_style_box() -9-slice-kehystä kun
+# assets/ui/panels/panel_frame.png on saatavilla, muuten StyleBoxFlat-fallback.
+#
+# DIEGEETTINEN MAAILMAKLIKKAUS: pixel_world.gd emittöi world_object_clicked-signaalin
+# _handle_input():ssa VAIN kun mikään työkalu ei ole aktiivinen (ei designaatiota, ei
+# rakennustilaa, ei vyöhykesijoitusta) ja klikkaus osuu rekisteröityyn kohteeseen.
+# Tarkoituksellinen valinta: silloin klikkaus ohjautuu AINA paneeliin, ei koskaan
+# hiekkamaalaukseen — ks. pixel_world.gd:n kommentti kohdassa "elif left_just and not
+# bomb_mode..." Materiaali-ikonit (vyöhyke-/base-filtterit) johdetaan MAT_COLORS/
+# MAT_NAMES -taulukoista, EI PNG-assetteina (assets/ui/README.md).
+#
+# RINNAKKAISKEHITYS: bot_manager/logistics-rajapinnat ja pixel_world-kytkennät on jo
+# integroitu (lane A/G). Kaikki kutsut on silti guardattu has_method()/has_signal()/
+# get():llä — napit joiden backend puuttuu näkyvät harmaina eivätkä kaadu.
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Preload (ei class_name-viittaus) — vältetään class-cachen resolvointiviive
+# ensimmäisellä ajolla (ks. CLAUDE.md: Godot Testing Gotchas).
+const UiThemeRef := preload("res://scripts/ui_theme.gd")
+const BotStatusOverlayScript := preload("res://scripts/ui_bot_status_overlay.gd")
+
+# ── Ikonit (assets/ui/icons/, 24×24 px) — piirretään 2× (48px) nearest-filterillä ──
+const ICON_TOOL_MINE := preload("res://assets/ui/icons/tool_mine.png")
+const ICON_TOOL_BUILD := preload("res://assets/ui/icons/tool_build.png")
+const ICON_TOOL_BOTS := preload("res://assets/ui/icons/tool_bots.png")
+const ICON_TOOL_ERASE := preload("res://assets/ui/icons/tool_erase.png")
+const ICON_DESIG_BRUSH := preload("res://assets/ui/icons/desig_brush.png")
+const ICON_DESIG_BOX := preload("res://assets/ui/icons/desig_box.png")
+const ICON_DESIG_CELL := preload("res://assets/ui/icons/desig_cell.png")
+const ICON_BUILD_FURNACE := preload("res://assets/ui/icons/build_furnace.png")
+const ICON_BUILD_CRUSHER := preload("res://assets/ui/icons/build_crusher.png")
+const ICON_BUILD_CONVEYOR := preload("res://assets/ui/icons/build_conveyor.png")
+const ICON_ZONE_PICKUP := preload("res://assets/ui/icons/zone_pickup.png")
+const ICON_ZONE_DUMP := preload("res://assets/ui/icons/zone_dump.png")
+const ICON_BOT_MINER := preload("res://assets/ui/icons/bot_miner.png")
+const ICON_BOT_HAULER := preload("res://assets/ui/icons/bot_hauler.png")
 
 @onready var pixel_world: TextureRect = get_node("../../PixelWorld")
 
+const MAT_EMPTY := 0
 # Roolit (bot.gd Role-enum: MINER=0, HAULER=1)
 const ROLE_MINER := 0
 const ROLE_HAULER := 1
@@ -25,46 +67,82 @@ const ROLE_HAULER := 1
 const ZONE_PICKUP := 0
 const ZONE_DUMP := 1
 
-# Värit
-const COL_MONEY := Color(0.35, 0.92, 0.48)
-const COL_BAD := Color(0.95, 0.42, 0.42)
-const COL_DIM := Color(0.52, 0.52, 0.58)
-const COL_ACTIVE := Color(1.5, 1.5, 0.6)
-const COL_TEXT := Color(0.9, 0.92, 0.95)
+# ── Game feel / animaatiot (Vaihe 5 kohta 2) ────────────────────────────────
+# Yhteinen ankkuripaikka actionbarin yläpuolella (mine-rivi, build-tray, bot-tray,
+# onboarding-vihje) — yksi vakio siroteltujen -68.0-literaalien sijaan.
+const TRAY_ANCHOR_OFFSET_BOTTOM := -68.0
+const TRAY_ANIM_DURATION := 0.12
+const TRAY_SLIDE_OFFSET := 18.0
+const POPOVER_ANIM_DURATION := 0.08
+const TOAST_FADE_IN_DURATION := 0.15
+const TOAST_FADE_OUT_DURATION := 0.25
 
-# ── Yläpalkki ──────────────────────────────────────────────────────────────
+# Värit — amber-paletti (UiThemeRef.COL_*), EI sinistä
+const COL_MONEY := UiThemeRef.COL_MONEY
+const COL_BAD := UiThemeRef.COL_BAD
+const COL_DIM := UiThemeRef.COL_TEXT_DIM
+const COL_ACTIVE := UiThemeRef.COL_ACTIVE
+const COL_TEXT := UiThemeRef.COL_TEXT
+
+# ── Yläpalkki (kompakti, vasen-ylä) ─────────────────────────────────────────
 var money_label: Label
 var income_label: Label
 var fleet_label: Label
 var fps_label: Label
+var debug_row: HBoxContainer
+var _debug_visible: bool = false
 
-# ── Työkalurivi ────────────────────────────────────────────────────────────
-var toolbar_panel: PanelContainer
-var btn_desig: Button
+# ── Actionbar (alakeskellä, aina näkyvissä) ─────────────────────────────────
+var actionbar_panel: PanelContainer
+var tool_btn_mine: Button
+var tool_btn_build: Button
+var tool_btn_bots: Button
+var tool_btn_erase: Button
+
+# ── Mine-rivi (näkyy vain kun louhinta aktiivinen) ──────────────────────────
+var mine_row_panel: PanelContainer
 var desig_mode_buttons: Array[Button] = []
 var _desig_tool_mode: int = 0
 var brush_slider: HSlider
 var brush_label: Label
 
-# ── Alapaneeli (välilehdet) ────────────────────────────────────────────────
-var bottom_panel: PanelContainer
-var tab_container: TabContainer
-# Botit-välilehti
+# ── Tray-animaatiot (Vaihe 5 kohta 2) ───────────────────────────────────────
+var _tray_tweens: Dictionary = {}   # PanelContainer -> Tween (aktiivinen slide+fade)
+
+# ── Build-tray ([B] avaa/sulkee) ────────────────────────────────────────────
+var build_tray_panel: PanelContainer
+var _build_tray_open: bool = false
+
+# ── Bot-tray ([T]/TAB avaa/sulkee TAI klikkaa base) ─────────────────────────
+var bot_tray_panel: PanelContainer
+var _bot_tray_open: bool = false
 var role_minus_btn: Button
 var role_plus_btn: Button
 var role_count_label: Label
 var bot_list_vbox: VBoxContainer
 var _last_fleet_sig: String = ""
 var _bot_upgrade_items: Array = []   # [{ "btn": Button, "price": int }]
-# Logistiikka-välilehti
-var base_filter_checks: Dictionary = {}   # mat_id -> CheckBox
-var zone_filter_checks: Dictionary = {}   # mat_id -> CheckBox (valittu vyöhyke)
-var zone_list_vbox: VBoxContainer
-var _selected_zone_id: int = -1
-var _zones_cache: Array = []
+var base_filter_toggles: Dictionary = {}   # mat_id -> Button ("Base hyväksyy" -rivi)
 
-# Ostettavat kortit joiden hinta/varaa-tila päivittyy: [{panel, price_label, cost_fn}]
+# ── Kontekstipopover (vyöhyke- tai konepaneeli, ilmestyy maailmakohteen viereen) ──
+var _context_popover: PanelContainer = null
+var _context_popover_kind: String = ""
+var _zone_popover_zid: int = -1
+var _zone_popover_toggles: Dictionary = {}
+var _popover_just_opened: bool = false   # estää saman klikin sulkemasta juuri avattua popoveria
+var _prev_left_ui: bool = false          # oma left-just-seuranta (riippumaton pixel_worldista)
+
+# Konepopoverin live-päivitys (Vaihe 5 kohta 4): rivikohtaiset Label-viitteet + itse
+# kone, jotta collected/need-laskurit voi päivittää uudelleenrakentamatta koko paneelia.
+var _machine_popover_machine: Object = null
+var _machine_popover_rows: Dictionary = {}   # input_mat -> {"label": Label, "need": int}
+
+# Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
+# [{panel(=Button), price_label, cost_fn}]
 var _afford_items: Array = []
+
+# ── Bottien tila maailmassa (diegeettinen overlay, Vaihe 4 kohta 10) ───────
+var bot_status_overlay: Control
 
 # ── Onboarding ─────────────────────────────────────────────────────────────
 var onboarding_panel: PanelContainer
@@ -83,6 +161,7 @@ const ONBOARDING_TEXTS: Array[String] = [
 var toast_panel: PanelContainer
 var toast_label: Label
 var _toast_timer: float = 0.0
+var _toast_tween: Tween = null
 
 # ── Materiaaliskanneri ─────────────────────────────────────────────────────
 var scanner_panel: PanelContainer
@@ -94,7 +173,7 @@ const SCANNER_RADIUS: int = 50
 # Päivitysakku raskaammille päivityksille (~5 Hz)
 var _ui_accum: float = 0.0
 
-# Materiaalinimet ja -värit skannerille (ID:t 0–21)
+# Materiaalinimet ja -värit skannerille + materiaali-icon-toggleille (ID:t 0–21)
 const MAT_NAMES: Dictionary = {
 	1: "Hiekka", 2: "Vesi", 3: "Kivi", 4: "Puu", 5: "Tuli", 6: "Öljy",
 	7: "Höyry", 8: "Tuhka", 9: "Puu↓", 10: "Lasi", 11: "Multa",
@@ -108,7 +187,7 @@ const MAT_COLORS: Dictionary = {
 	16: "#2e2b36", 18: "#6b6055", 19: "#2d2830", 20: "#b87340", 21: "#5abfa8",
 }
 
-# Materiaalifiltterien (logistiikka) valikoima
+# Materiaalifiltterien (logistiikka: base-hyväksyntä + vyöhykepopoverit) valikoima
 const FILTER_MATS: Array = [
 	[11, "Multa"], [1, "Hiekka"], [18, "Sora"], [16, "Hiili"],
 	[12, "Rautamalmi"], [13, "Kultamalmi"], [20, "Kupari"], [21, "Harv.maa"],
@@ -121,14 +200,18 @@ const FILTER_MATS: Array = [
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _ready() -> void:
+	theme = UiThemeRef.build_theme()   # yksi yhteinen teema koko UI:lle (Vaihe 1)
 	_register_panel(self)   # yläpalkki hiiri-inputin estoon
 
 	_build_top_bar()
-	_build_toolbar()
-	_build_bottom_panel()
+	_build_actionbar()
+	_build_mine_row()
+	_build_build_tray()
+	_build_bot_tray()
 	_build_scanner_panel()
 	_build_toast()
 	_build_onboarding()
+	_build_bot_status_overlay()
 	_connect_world_signals()
 
 	# Lisäpaneelit rekisteröidään estoon vasta kun ne on lisätty (deferred)
@@ -136,15 +219,18 @@ func _ready() -> void:
 
 
 func _connect_world_signals() -> void:
-	# Välitavoite-toastit ja demo-loppu — vain jos lane G on lisännyt signaalit
+	# Välitavoite-toastit, demo-loppu ja diegeettinen maailmaklikkaus — vain jos
+	# lane G / Vaihe 4 -kytkentä on lisännyt signaalin.
 	if pixel_world.has_signal("milestone"):
 		pixel_world.milestone.connect(_on_milestone)
 	if pixel_world.has_signal("demo_complete"):
 		pixel_world.demo_complete.connect(_on_demo_complete)
+	if pixel_world.has_signal("world_object_clicked"):
+		pixel_world.world_object_clicked.connect(_on_world_object_clicked)
 
 
 func _register_ui_panels() -> void:
-	for panel in [bottom_panel, toolbar_panel, scanner_panel]:
+	for panel in [actionbar_panel, mine_row_panel, build_tray_panel, bot_tray_panel, scanner_panel]:
 		_register_panel(panel)
 
 
@@ -161,97 +247,166 @@ func _register_panel(panel: Control) -> void:
 		pixel_world.set("ui_panel", panel)
 
 
+# Poistaa paneelin input-eston listalta (kutsutaan kun dynaaminen popover tuhotaan,
+# ettei ui_panels-taulukko kasva loputtomiin vanhentuneilla viitteillä).
+func _unregister_panel(panel: Control) -> void:
+	if pixel_world == null or not is_instance_valid(panel):
+		return
+	var panels = pixel_world.get("ui_panels")
+	if panels != null and panels is Array:
+		panels.erase(panel)
+
+
 # ── Yläpalkki ──────────────────────────────────────────────────────────────
 
 func _build_top_bar() -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.07, 0.08, 0.11, 0.96)
-	style.border_width_bottom = 2
-	style.border_color = Color(0.25, 0.55, 0.85, 0.7)
-	style.content_margin_left = 12.0
-	style.content_margin_right = 12.0
-	style.content_margin_top = 2.0
-	style.content_margin_bottom = 2.0
+	# Kompakti paneeli vasempaan yläkulmaan — EI enää full-width-palkkia (Vaihe 2).
+	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	offset_left = 10.0
+	offset_top = 10.0
+
+	var style := UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 10.0)
 	add_theme_stylebox_override("panel", style)
 
-	var hbox := HBoxContainer.new()
-	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_theme_constant_override("separation", 10)
-	add_child(hbox)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 0)
+	add_child(vbox)
 
-	# Raha isolla
+	# Raha isolla, amber
 	money_label = Label.new()
 	money_label.text = "$0"
 	money_label.add_theme_font_size_override("font_size", 26)
 	money_label.add_theme_color_override("font_color", COL_MONEY)
-	money_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(money_label)
+	vbox.add_child(money_label)
 
-	# $/s-mittari (piilotetaan jos world.income_per_s puuttuu)
+	# $/s-mittari (piilotetaan jos world.income_per_s puuttuu tai on ~0)
 	income_label = Label.new()
 	income_label.text = ""
-	income_label.add_theme_font_size_override("font_size", 15)
-	income_label.add_theme_color_override("font_color", COL_MONEY)
-	income_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(income_label)
+	income_label.visible = false
+	income_label.add_theme_font_size_override("font_size", 13)
+	income_label.add_theme_color_override("font_color", COL_DIM)
+	vbox.add_child(income_label)
 
-	hbox.add_child(_sep())
+	# Debug-rivi: FPS + bottilaskuri — piilossa oletuksena, F3 paljastaa
+	debug_row = HBoxContainer.new()
+	debug_row.add_theme_constant_override("separation", 10)
+	debug_row.visible = _debug_visible
+	vbox.add_child(debug_row)
 
-	# Bottilaskuri rooleittain
 	fleet_label = Label.new()
 	fleet_label.text = ""
-	fleet_label.add_theme_font_size_override("font_size", 15)
+	fleet_label.add_theme_font_size_override("font_size", 13)
 	fleet_label.add_theme_color_override("font_color", COL_TEXT)
-	fleet_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(fleet_label)
+	debug_row.add_child(fleet_label)
 
-	# Täyte työntää FPS:n oikealle
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_child(spacer)
-
-	# FPS pienenä
 	fps_label = Label.new()
 	fps_label.text = "FPS 0"
 	fps_label.add_theme_font_size_override("font_size", 12)
-	fps_label.add_theme_color_override("font_color", Color(0.55, 0.58, 0.62))
-	fps_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(fps_label)
+	fps_label.add_theme_color_override("font_color", COL_DIM)
+	debug_row.add_child(fps_label)
 
 
-# ── Työkalurivi ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTIONBAR (Vaihe 3, kohta 1) — 4 ikoninappia alakeskellä
+# ═══════════════════════════════════════════════════════════════════════════
 
-func _build_toolbar() -> void:
-	toolbar_panel = PanelContainer.new()
-	toolbar_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	toolbar_panel.offset_top = -40.0
-	toolbar_panel.offset_bottom = 0.0
-	toolbar_panel.add_theme_stylebox_override("panel", _dark_style(0.95))
+func _build_actionbar() -> void:
+	actionbar_panel = PanelContainer.new()
+	actionbar_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	actionbar_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	actionbar_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	actionbar_panel.offset_bottom = -12.0
+	actionbar_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 8)
+	actionbar_panel.add_child(hb)
+
+	tool_btn_mine = _make_tool_button(ICON_TOOL_MINE, "Louhi [V]\nMerkkaa alue louhittavaksi", 48.0)
+	tool_btn_mine.pressed.connect(_on_tool_mine_pressed)
+	hb.add_child(tool_btn_mine)
+
+	tool_btn_build = _make_tool_button(ICON_TOOL_BUILD, "Rakenna [B]\nAvaa rakennus- ja vyöhykevalikon", 48.0)
+	tool_btn_build.pressed.connect(_on_tool_build_pressed)
+	hb.add_child(tool_btn_build)
+
+	# HUOM: tooltip sanoo [TAB] eikä [T] — kirjain T on jo pixel_world.gd:n legacy-
+	# kaivaustyökalun sädekierrolla (KEY_T, ks. _input()), eikä sitä voi vapauttaa
+	# rikkomatta toimivaa mekaniikkaa. TAB on ainoa toimiva pikanäppäin botti-traylle.
+	tool_btn_bots = _make_tool_button(ICON_TOOL_BOTS, "Botit [TAB]\nOsta ja hallitse botteja", 48.0)
+	tool_btn_bots.pressed.connect(_on_tool_bots_pressed)
+	hb.add_child(tool_btn_bots)
+
+	tool_btn_erase = _make_tool_button(ICON_TOOL_ERASE, "Pyyhi [E]\nPoista maalattua materiaalia", 48.0)
+	tool_btn_erase.pressed.connect(_on_tool_erase_pressed)
+	hb.add_child(tool_btn_erase)
+
+	get_parent().add_child.call_deferred(actionbar_panel)
+
+
+func _on_tool_mine_pressed() -> void:
+	_close_build_tray()
+	_close_bot_tray()
+	_close_context_popover()
+	_toggle_designation()
+
+
+func _on_tool_build_pressed() -> void:
+	_toggle_build_tray()
+
+
+func _on_tool_bots_pressed() -> void:
+	_toggle_bot_tray()
+
+
+func _on_tool_erase_pressed() -> void:
+	_close_build_tray()
+	_close_bot_tray()
+	_close_context_popover()
+	_set_designation_mode(false)
+	pixel_world.build_mode = pixel_world.BUILD_NONE
+	pixel_world.current_material = MAT_EMPTY   # sama efekti kuin E-näppäin
+
+
+func _toggle_designation() -> void:
+	var on := not _get_designation_mode()
+	_set_designation_mode(on)
+	if on:
+		pixel_world.build_mode = 0  # BUILD_NONE
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MINE-RIVI (Vaihe 3, kohta 2) — näkyy vain kun louhinta aktiivinen
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _build_mine_row() -> void:
+	mine_row_panel = PanelContainer.new()
+	mine_row_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	mine_row_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM   # actionbarin yläpuolelle
+	mine_row_panel.visible = false
+	mine_row_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 6)
-	toolbar_panel.add_child(hb)
+	mine_row_panel.add_child(hb)
 
-	# Designaatio-toggle [V]
-	btn_desig = _make_btn("Louhinta [V]", 13)
-	btn_desig.pressed.connect(_toggle_designation)
-	hb.add_child(btn_desig)
-
-	hb.add_child(_sep())
-
-	# Kolme moodinappia: pensseli / laatikko / solu
-	var mode_names := ["Pensseli", "Laatikko", "Solu"]
-	for i in mode_names.size():
-		var b := _make_btn(mode_names[i], 12)
+	var mode_icons: Array[Texture2D] = [ICON_DESIG_BRUSH, ICON_DESIG_BOX, ICON_DESIG_CELL]
+	var mode_tips: Array[String] = [
+		"Pensseli\nPidä pohjassa ja maalaa säteellä",
+		"Laatikko\nVedä suorakulmio",
+		"Solu\nKlikkaa yksi solu kerrallaan",
+	]
+	desig_mode_buttons.clear()
+	for i in mode_icons.size():
+		var b := _make_tool_button(mode_icons[i], mode_tips[i], 36.0)
 		b.pressed.connect(_set_desig_mode.bind(i))
 		hb.add_child(b)
 		desig_mode_buttons.append(b)
 
 	hb.add_child(_sep())
 
-	# Pensselikoko (uusiokäyttö brush_size:sta)
 	brush_label = Label.new()
-	brush_label.text = "Koko: %d" % int(pixel_world.brush_size)
+	brush_label.text = "Koko %d" % int(pixel_world.brush_size)
 	brush_label.add_theme_font_size_override("font_size", 12)
 	brush_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	hb.add_child(brush_label)
@@ -262,28 +417,13 @@ func _build_toolbar() -> void:
 	brush_slider.step = 1.0
 	brush_slider.value = float(pixel_world.brush_size)
 	brush_slider.focus_mode = Control.FOCUS_NONE
-	brush_slider.custom_minimum_size = Vector2(100.0, 0.0)
+	brush_slider.custom_minimum_size = Vector2(90.0, 0.0)
 	brush_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	brush_slider.tooltip_text = "Pensselikoko"
 	brush_slider.value_changed.connect(_on_brush_changed)
 	hb.add_child(brush_slider)
 
-	hb.add_child(_sep())
-
-	var hint := Label.new()
-	hint.text = "Oikea hiiri = poista"
-	hint.add_theme_font_size_override("font_size", 11)
-	hint.add_theme_color_override("font_color", COL_DIM)
-	hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hb.add_child(hint)
-
-	get_parent().add_child.call_deferred(toolbar_panel)
-
-
-func _toggle_designation() -> void:
-	var on := not _get_designation_mode()
-	_set_designation_mode(on)
-	if on:
-		pixel_world.build_mode = 0  # BUILD_NONE
+	get_parent().add_child.call_deferred(mine_row_panel)
 
 
 func _set_desig_mode(mode: int) -> void:
@@ -298,233 +438,506 @@ func _set_desig_mode(mode: int) -> void:
 
 func _on_brush_changed(value: float) -> void:
 	pixel_world.brush_size = int(value)
-	brush_label.text = "Koko: %d" % int(value)
+	brush_label.text = "Koko %d" % int(value)
 
 
-# ── Alapaneeli (välilehdet) ────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+#  BUILD-TRAY (Vaihe 3, kohta 3) — [B] avaa/sulkee
+# ═══════════════════════════════════════════════════════════════════════════
 
-func _build_bottom_panel() -> void:
-	bottom_panel = PanelContainer.new()
-	bottom_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	bottom_panel.offset_top = -270.0
-	bottom_panel.offset_bottom = -40.0   # työkalurivin yläpuolelle
-	bottom_panel.add_theme_stylebox_override("panel", _dark_style(0.97))
+func _build_build_tray() -> void:
+	build_tray_panel = PanelContainer.new()
+	build_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	build_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
+	build_tray_panel.visible = false
+	build_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
-	tab_container = TabContainer.new()
-	tab_container.add_theme_font_size_override("font_size", 13)
-	bottom_panel.add_child(tab_container)
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 10)
+	build_tray_panel.add_child(hb)
 
-	_build_bots_tab()
-	_build_buildings_tab()
-	_build_logistics_tab()
+	_add_tray_item(hb, ICON_BUILD_FURNACE, "Sulatusuuni\nHiekka→lasi, malmi→harkko",
+		func() -> int: return _building_cost("furnace"),
+		func() -> void: _buy_building(pixel_world.BUILD_FURNACE, _building_cost("furnace")))
+	_add_tray_item(hb, ICON_BUILD_CRUSHER, "Murskain\nKivi/sora→hiekka",
+		func() -> int: return _building_cost("crusher"),
+		func() -> void: _buy_building(pixel_world.BUILD_CRUSHER, _building_cost("crusher")))
+	_add_tray_item(hb, ICON_BUILD_CONVEYOR, "Kuljetushihna\nSiirtää materiaalia ilman bottia",
+		func() -> int: return _building_cost("conveyor"),
+		func() -> void: _buy_building(pixel_world.BUILD_CONVEYOR_START, _building_cost("conveyor")))
+	_add_tray_item(hb, ICON_ZONE_PICKUP, "Nouto-vyöhyke\nHaulerit hakevat täältä",
+		func() -> int: return _zone_cost(80),
+		func() -> void: _place_zone(ZONE_PICKUP, 80))
+	_add_tray_item(hb, ICON_ZONE_DUMP, "Pudotus-vyöhyke\nHaulerit purkavat tänne",
+		func() -> int: return _zone_cost(60),
+		func() -> void: _place_zone(ZONE_DUMP, 60))
 
-	get_parent().add_child.call_deferred(bottom_panel)
+	get_parent().add_child.call_deferred(build_tray_panel)
 
 
-func _tab_root(title: String) -> VBoxContainer:
-	var margin := MarginContainer.new()
-	margin.name = title
-	margin.add_theme_constant_override("margin_left", 10)
-	margin.add_theme_constant_override("margin_right", 10)
-	margin.add_theme_constant_override("margin_top", 8)
-	margin.add_theme_constant_override("margin_bottom", 8)
+func _toggle_build_tray() -> void:
+	if _build_tray_open:
+		_close_build_tray()
+	else:
+		_close_bot_tray()
+		_close_context_popover()
+		_set_designation_mode(false)
+		_animate_tray_open(build_tray_panel)
+		_build_tray_open = true
+
+
+func _close_build_tray() -> void:
+	_animate_tray_close(build_tray_panel)
+	_build_tray_open = false
+
+
+# Sulkee trayn automaattisesti heti kun sijoitustila alkaa (rakennus TAI vyöhyke) —
+# UI_REDESIGN_PLAN.md Vaihe 3 kohta 3: "Tray sulkeutuu kun sijoitustila alkaa tai [B]/Esc."
+func _update_build_tray_visibility() -> void:
+	if not _build_tray_open:
+		return
+	if pixel_world.build_mode != pixel_world.BUILD_NONE or pixel_world.zone_placement_type >= 0:
+		_close_build_tray()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BOT-TRAY (Vaihe 3 kohta 4 + Vaihe 4 kohta 8) — [T]/TAB TAI klikkaa base
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _build_bot_tray() -> void:
+	bot_tray_panel = PanelContainer.new()
+	bot_tray_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	bot_tray_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
+	bot_tray_panel.visible = false
+	bot_tray_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
-	margin.add_child(vb)
-	tab_container.add_child(margin)
-	return vb
-
-
-func _build_bots_tab() -> void:
-	var root := _tab_root("BOTIT")
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 12)
-	hb.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(hb)
-
-	# ── Vasen: osto + roolijako ──
-	var left := VBoxContainer.new()
-	left.add_theme_constant_override("separation", 8)
-	hb.add_child(left)
+	bot_tray_panel.add_child(vb)
 
 	var buy_row := HBoxContainer.new()
 	buy_row.add_theme_constant_override("separation", 8)
-	left.add_child(buy_row)
-	_add_afford_card(buy_row, "Osta Miner", "Louhii merkatut alueet", _bot_price,
-		_buy_bot.bind(ROLE_MINER))
-	_add_afford_card(buy_row, "Osta Hauler", "Kuljettaa saaliin baseen", _bot_price,
-		_buy_bot.bind(ROLE_HAULER))
+	vb.add_child(buy_row)
+	_add_tray_item(buy_row, ICON_BOT_MINER, "Osta Miner\nLouhii merkatut alueet",
+		_bot_price, _buy_bot.bind(ROLE_MINER))
+	_add_tray_item(buy_row, ICON_BOT_HAULER, "Osta Hauler\nKuljettaa saaliin baseen",
+		_bot_price, _buy_bot.bind(ROLE_HAULER))
 
 	var role_row := HBoxContainer.new()
 	role_row.add_theme_constant_override("separation", 6)
-	left.add_child(role_row)
-	role_row.add_child(_label("Minereitä:", 13))
+	vb.add_child(role_row)
+	role_row.add_child(_label("Minereitä:", 12))
 	role_minus_btn = _make_btn("−", 16)
-	role_minus_btn.custom_minimum_size = Vector2(30.0, 0.0)
+	role_minus_btn.custom_minimum_size = Vector2(26.0, 0.0)
 	role_minus_btn.pressed.connect(_on_role_change.bind(-1))
 	role_row.add_child(role_minus_btn)
-	role_count_label = _label("—", 16)
-	role_count_label.custom_minimum_size = Vector2(28.0, 0.0)
+	role_count_label = _label("—", 14)
+	role_count_label.custom_minimum_size = Vector2(24.0, 0.0)
 	role_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	role_row.add_child(role_count_label)
 	role_plus_btn = _make_btn("+", 16)
-	role_plus_btn.custom_minimum_size = Vector2(30.0, 0.0)
+	role_plus_btn.custom_minimum_size = Vector2(26.0, 0.0)
 	role_plus_btn.pressed.connect(_on_role_change.bind(1))
 	role_row.add_child(role_plus_btn)
 
-	# ── Oikea: bottilista + Mk-upgradet ──
-	var right := VBoxContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hb.add_child(right)
-	right.add_child(_label("Botit & upgradet", 12, COL_DIM))
+	vb.add_child(_label("Botit & upgradet", 11, COL_DIM))
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(340.0, 170.0)
+	scroll.custom_minimum_size = Vector2(280.0, 100.0)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	bot_list_vbox = VBoxContainer.new()
 	bot_list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bot_list_vbox.add_theme_constant_override("separation", 2)
 	scroll.add_child(bot_list_vbox)
-	right.add_child(scroll)
+	vb.add_child(scroll)
+
+	vb.add_child(HSeparator.new())
+	vb.add_child(_label("Base hyväksyy:", 11, COL_DIM))
+	var filter_row := HBoxContainer.new()
+	filter_row.add_theme_constant_override("separation", 3)
+	vb.add_child(filter_row)
+	base_filter_toggles = _build_mat_toggle_row(filter_row, 0)
+	_wire_mat_toggle_row(base_filter_toggles, _on_base_filter_changed)
+
+	get_parent().add_child.call_deferred(bot_tray_panel)
 
 
-func _build_buildings_tab() -> void:
-	var root := _tab_root("RAKENNUKSET")
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	root.add_child(row)
-	# VAIN Furnace / Crusher / Hihna — sand_mine/spawner/linko/kaivos poistuvat (lane E)
-	_add_afford_card(row, "Furnace", "Sulattaa malmit harkoiksi",
-		func() -> int: return _building_cost("furnace"),
-		func() -> void: _buy_building(pixel_world.BUILD_FURNACE, _building_cost("furnace")))
-	_add_afford_card(row, "Crusher", "Murskaa kiven soraksi",
-		func() -> int: return _building_cost("crusher"),
-		func() -> void: _buy_building(pixel_world.BUILD_CRUSHER, _building_cost("crusher")))
-	_add_afford_card(row, "Hihna", "Kuljettaa ilman bottia",
-		func() -> int: return _building_cost("conveyor"),
-		func() -> void: _buy_building(pixel_world.BUILD_CONVEYOR_START, _building_cost("conveyor")))
-
-	root.add_child(_label("Klikkaa kortti → sijoita hiirellä. Esc / oikea hiiri peruu.", 11, COL_DIM))
+func _toggle_bot_tray() -> void:
+	if _bot_tray_open:
+		_close_bot_tray()
+	else:
+		_open_bot_tray()
 
 
-func _build_logistics_tab() -> void:
-	var root := _tab_root("LOGISTIIKKA")
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 14)
-	hb.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(hb)
-
-	# ── Vasen: sijoituskortit + suodattimet ──
-	var left := VBoxContainer.new()
-	left.add_theme_constant_override("separation", 8)
-	hb.add_child(left)
-
-	var card_row := HBoxContainer.new()
-	card_row.add_theme_constant_override("separation", 8)
-	left.add_child(card_row)
-	_add_afford_card(card_row, "Pickup-piste", "Haulerit hakevat täältä",
-		func() -> int: return _zone_cost(80),
-		func() -> void: _place_zone(ZONE_PICKUP, 80))
-	_add_afford_card(card_row, "Dump-piste", "Haulerit purkavat tänne",
-		func() -> int: return _zone_cost(60),
-		func() -> void: _place_zone(ZONE_DUMP, 60))
-
-	left.add_child(_label("Base hyväksyy:", 12, COL_DIM))
-	base_filter_checks = _build_filter_grid(left, func() -> void: _on_base_filter_changed())
-
-	left.add_child(_label("Valittu vyöhyke:", 12, COL_DIM))
-	zone_filter_checks = _build_filter_grid(left, func() -> void: _on_zone_filter_changed())
-
-	# ── Oikea: vyöhykelista ──
-	var right := VBoxContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hb.add_child(right)
-	right.add_child(_label("Vyöhykkeet", 12, COL_DIM))
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(300.0, 170.0)
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	zone_list_vbox = VBoxContainer.new()
-	zone_list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	zone_list_vbox.add_theme_constant_override("separation", 2)
-	scroll.add_child(zone_list_vbox)
-	right.add_child(scroll)
+# Avaa bot-trayn. Käytetään sekä [T]-napista/-näppäimestä että basen maailmaklikkauksesta
+# (Vaihe 4 kohta 8: "sama paneeli kuin [T]"). YKSINKERTAISTUS: paneeli pysyy aina
+# ankkuroituna actionbarin yläpuolelle riippumatta avaustavasta — ei sijoiteta dynaamisesti
+# basen viereen, koska Control-ankkurit ja vapaa position-asetus olisivat ristiriidassa
+# (ks. raportti). Looginen ja johdonmukainen: sama nappi tekee saman asian kummastakin
+# lähteestä.
+func _open_bot_tray() -> void:
+	_close_build_tray()
+	_close_context_popover()
+	_set_designation_mode(false)   # sulkee mine-rivin (sama ankkuripaikka, ei saa jäädä päällekkäin)
+	_animate_tray_open(bot_tray_panel)
+	_bot_tray_open = true
+	_last_fleet_sig = ""   # pakota bottilistan uudelleenrakennus heti avattaessa
+	_maybe_rebuild_bot_list()
 
 
-# Rakentaa materiaalifiltteri-checkbox-ruudukon; palauttaa mat_id -> CheckBox
-func _build_filter_grid(parent: VBoxContainer, on_toggle: Callable) -> Dictionary:
-	var grid := GridContainer.new()
-	grid.columns = 4
-	parent.add_child(grid)
-	var checks: Dictionary = {}
+func _close_bot_tray() -> void:
+	_animate_tray_close(bot_tray_panel)
+	_bot_tray_open = false
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TRAY-ANIMAATIOT (Vaihe 5 kohta 2) — lyhyt slide-ylös + fade auki, käänteinen kiinni
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Avaa paneelin heti (visible=true HETI, ei animaation lopussa) jotta
+# _register_panel-pohjainen input-esto (pixel_world.gd: ui_panels-rektitarkistus)
+# pysyy voimassa koko animaation ajan — ainoastaan modulate-alpha ja offset_bottom
+# animoituvat, paneelin lopullinen koko/sijainti on jo asetettu.
+func _animate_tray_open(panel: PanelContainer) -> void:
+	if panel == null:
+		return
+	_kill_tray_tween(panel)
+	panel.visible = true
+	panel.modulate.a = 0.0
+	panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM + TRAY_SLIDE_OFFSET
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 1.0, TRAY_ANIM_DURATION)
+	tw.tween_property(panel, "offset_bottom", TRAY_ANCHOR_OFFSET_BOTTOM, TRAY_ANIM_DURATION)
+	_tray_tweens[panel] = tw
+
+
+# Häivyttää + liu'uttaa paneelin pois ja piilottaa (visible=false) vasta kun animaatio
+# on valmis. Ei-op jos paneeli on jo piilossa (esim. _close_build_tray() kutsuttuna
+# monesta paikasta varmuuden vuoksi).
+func _animate_tray_close(panel: PanelContainer) -> void:
+	if panel == null or not panel.visible:
+		return
+	_kill_tray_tween(panel)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_IN)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 0.0, TRAY_ANIM_DURATION)
+	tw.tween_property(panel, "offset_bottom", TRAY_ANCHOR_OFFSET_BOTTOM + TRAY_SLIDE_OFFSET, TRAY_ANIM_DURATION)
+	tw.chain().tween_callback(func() -> void:
+		panel.visible = false
+		panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
+		panel.modulate.a = 1.0)
+	_tray_tweens[panel] = tw
+
+
+func _kill_tray_tween(panel: PanelContainer) -> void:
+	if _tray_tweens.has(panel):
+		var tw: Tween = _tray_tweens[panel]
+		if tw != null and tw.is_valid():
+			tw.kill()
+		_tray_tweens.erase(panel)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MATERIAALI-ICON-TOGGLET (Vaihe 4 kohta 7) — korvaa checkbox-ruudukon.
+#  Väri MAT_COLORS-taulukosta, EI PNG-assetteja (assets/ui/README.md).
+#  Uudelleenkäytetään sekä "Base hyväksyy" -rivillä (bot-tray) että
+#  vyöhykepopoverin filtteririvillä.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Rakentaa rivin materiaali-toggle-nappeja. initial_mask: 0 = kaikki päällä (ei rajausta,
+# sama semantiikka kuin Logistics.mask_accepts). Palauttaa mat_id -> Button; kutsuja
+# kytkee toggled-signaalin itse _wire_mat_toggle_row():lla (kun tietää mihin kohteeseen
+# muutos kohdistuu).
+func _build_mat_toggle_row(parent: Control, initial_mask: int) -> Dictionary:
+	var toggles: Dictionary = {}
 	for m in FILTER_MATS:
-		var cb := CheckBox.new()
-		cb.text = m[1]
-		cb.button_pressed = true
-		cb.focus_mode = Control.FOCUS_NONE
-		cb.disabled = true  # logistiikka-backend puuttuu -> herää integraatiossa
-		cb.add_theme_font_size_override("font_size", 11)
-		cb.toggled.connect(func(_v: bool) -> void: on_toggle.call())
-		checks[int(m[0])] = cb
-		grid.add_child(cb)
-	return checks
+		var mat_id := int(m[0])
+		var accepted: bool = initial_mask == 0 or (initial_mask & (1 << mat_id)) != 0
+		var btn := _make_mat_toggle(mat_id, accepted)
+		parent.add_child(btn)
+		toggles[mat_id] = btn
+	return toggles
+
+
+func _wire_mat_toggle_row(toggles: Dictionary, on_change: Callable) -> void:
+	for mat_id in toggles:
+		var btn: Button = toggles[mat_id]
+		btn.toggled.connect(func(_v: bool) -> void: on_change.call())
+
+
+func _make_mat_toggle(mat_id: int, initial: bool) -> Button:
+	var b := Button.new()
+	b.toggle_mode = true
+	b.button_pressed = initial
+	b.custom_minimum_size = Vector2(18.0, 18.0)
+	b.focus_mode = Control.FOCUS_NONE
+	b.tooltip_text = String(MAT_NAMES.get(mat_id, "?"))
+	var col := Color(String(MAT_COLORS.get(mat_id, "#888888")))
+	var on_sb := UiThemeRef.panel_style_box(col, UiThemeRef.COL_BORDER, 1, 1.0)
+	var off_sb := UiThemeRef.panel_style_box(col.darkened(0.6), UiThemeRef.COL_BORDER_DIM, 1, 1.0)
+	b.add_theme_stylebox_override("normal", off_sb)
+	b.add_theme_stylebox_override("hover", off_sb)
+	b.add_theme_stylebox_override("pressed", on_sb)
+	b.add_theme_stylebox_override("hover_pressed", on_sb)
+	b.add_theme_stylebox_override("focus", off_sb)
+	return b
+
+
+# Ei-interaktiivinen materiaalivärineliö (koneen resepti-ikonina, ks. _open_machine_popover).
+func _mat_swatch(mat_id: int) -> Control:
+	var r := ColorRect.new()
+	r.custom_minimum_size = Vector2(16.0, 16.0)
+	r.color = Color(String(MAT_COLORS.get(mat_id, "#888888")))
+	r.tooltip_text = String(MAT_NAMES.get(mat_id, "?"))
+	r.mouse_filter = Control.MOUSE_FILTER_PASS
+	return r
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  OSTOKORTIT (hinta + varaa-tila)
+#  DIEGEETTINEN MAAILMAKLIKKAUS + KONTEKSTIPOPOVERIT (Vaihe 4, kohdat 7-9)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Rakentaa kortin (nimi + hinta + kuvaus) joka reagoi vasempaan klikkaukseen.
-func _add_afford_card(parent: Control, title: String, desc: String,
-		cost_fn: Callable, on_click: Callable) -> void:
+func _on_world_object_clicked(kind: String, data: Dictionary) -> void:
+	match kind:
+		"base":
+			_open_bot_tray()
+		"furnace", "crusher":
+			_open_machine_popover(kind, data.get("obj"))
+		"zone":
+			_open_zone_popover(data.get("zone", {}))
+
+
+# Vyöhykkeen (pickup/dump) materiaalifiltteri + poisto. Korvaa vanhan checkbox-
+# ruudukon ja vyöhykelistan kokonaan — vyöhykettä muokataan klikkaamalla sitä maailmassa.
+func _open_zone_popover(zone: Dictionary) -> void:
+	if zone.is_empty():
+		return
+	_close_context_popover()
+	_close_build_tray()
+	_close_bot_tray()
+
+	var zid := int(zone.get("id", -1))
+	var ztype := String(zone.get("type", "?"))
+	var mask := int(zone.get("filter_mask", 0))
+	var rect: Rect2i = zone.get("rect", Rect2i())
+
 	var panel := PanelContainer.new()
-	panel.mouse_filter = Control.MOUSE_FILTER_STOP
-	panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	panel.custom_minimum_size = Vector2(150.0, 0.0)
-
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.12, 0.13, 0.18, 0.98)
-	style.set_corner_radius_all(4)
-	style.set_content_margin_all(6.0)
-	style.set_border_width_all(1)
-	style.border_color = Color(0.3, 0.35, 0.45, 0.8)
-	panel.add_theme_stylebox_override("panel", style)
-
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 	var vb := VBoxContainer.new()
-	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	vb.add_theme_constant_override("separation", 1)
+	vb.add_theme_constant_override("separation", 4)
 	panel.add_child(vb)
 
-	var name_lbl := Label.new()
-	name_lbl.text = title
-	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	name_lbl.add_theme_font_size_override("font_size", 14)
-	name_lbl.add_theme_color_override("font_color", COL_TEXT)
-	vb.add_child(name_lbl)
+	vb.add_child(_label("%s #%d" % [ztype.capitalize(), zid], 12, COL_TEXT))
+	vb.add_child(_label("Hyväksytyt materiaalit:", 10, COL_DIM))
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 3)
+	vb.add_child(row)
+	var toggles := _build_mat_toggle_row(row, mask)
+	_zone_popover_toggles = toggles
+	_zone_popover_zid = zid
+	_wire_mat_toggle_row(toggles, _on_zone_popover_filter_changed)
+
+	var remove_btn := _make_btn("Poista vyöhyke", 11)
+	remove_btn.pressed.connect(_on_zone_popover_remove)
+	vb.add_child(remove_btn)
+
+	get_parent().add_child(panel)
+	_context_popover = panel
+	_context_popover_kind = "zone"
+	_register_panel(panel)
+	var anchor: Vector2 = pixel_world.grid_to_screen(
+		Vector2(float(rect.position.x) + float(rect.size.x) * 0.5, float(rect.position.y)))
+	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
+	_popover_just_opened = true
+
+
+func _on_zone_popover_filter_changed() -> void:
+	var lg := _logistics()
+	if lg == null or _zone_popover_zid < 0 or not lg.has_method("set_zone_filter"):
+		return
+	lg.set_zone_filter(_zone_popover_zid, _filter_mask_from(_zone_popover_toggles))
+
+
+func _on_zone_popover_remove() -> void:
+	var lg := _logistics()
+	if lg != null and lg.has_method("remove_zone") and _zone_popover_zid >= 0:
+		lg.remove_zone(_zone_popover_zid)
+	_close_context_popover()
+
+
+# Koneen (furnace/crusher) resepti-popover: input→output-materiaalit väripaletista +
+# kerätty/tarvittu-edistymä. Koneilla ON queryttävä rekisteri (pixel_world.furnaces/
+# crushers, grid_pos + RECIPES-const) — ei tarvitse pikseliskannausta.
+func _open_machine_popover(kind: String, machine: Variant) -> void:
+	if machine == null or not is_instance_valid(machine):
+		return
+	_close_context_popover()
+	_close_build_tray()
+	_close_bot_tray()
+
+	var w: int
+	var h: int
+	if kind == "furnace":
+		w = machine.FURNACE_W
+		h = machine.FURNACE_H
+	else:
+		w = machine.CRUSHER_W
+		h = machine.CRUSHER_H
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+	vb.add_child(_label(kind.capitalize(), 13, COL_TEXT))
+
+	var recipes: Dictionary = machine.RECIPES
+	var collected: Dictionary = machine.collected
+	_machine_popover_rows = {}
+	for input_mat: int in recipes.keys():
+		var recipe: Dictionary = recipes[input_mat]
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		vb.add_child(row)
+		row.add_child(_mat_swatch(input_mat))
+		row.add_child(_label("→", 12, COL_DIM))
+		row.add_child(_mat_swatch(int(recipe["output"])))
+		var have: int = int(collected.get(input_mat, 0))
+		var need: int = int(recipe["count"])
+		var progress_lbl := _label("%d/%d" % [have, need], 11, COL_DIM)
+		row.add_child(progress_lbl)
+		_machine_popover_rows[input_mat] = {"label": progress_lbl, "need": need}
+
+	get_parent().add_child(panel)
+	_context_popover = panel
+	_context_popover_kind = kind
+	_machine_popover_machine = machine   # Vaihe 5 kohta 4: live-päivitystä varten (ks. _update_machine_popover)
+	_register_panel(panel)
+	var anchor: Vector2 = pixel_world.grid_to_screen(
+		Vector2(machine.grid_pos.x + float(w) * 0.5, float(machine.grid_pos.y)))
+	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
+	_popover_just_opened = true
+
+
+# Vaihe 5 kohta 4: päivittää auki olevan konepopoverin kerätty/tarvittu-laskurit
+# (~2 Hz, kutsutaan _process():n olemassa olevasta ~5 Hz-akusta — riittää ja ylittää
+# pyydetyn taajuuden). Ei rakenna paneelia uudelleen, vain Label.text per rivi.
+# Read-only: lukee vain machine.collected, ei koske pelilogiikkaan.
+func _update_machine_popover() -> void:
+	if _machine_popover_machine == null or not is_instance_valid(_machine_popover_machine):
+		return
+	if _context_popover == null or not is_instance_valid(_context_popover):
+		return
+	var collected: Dictionary = _machine_popover_machine.collected
+	for input_mat in _machine_popover_rows:
+		var entry: Dictionary = _machine_popover_rows[input_mat]
+		var lbl: Label = entry["label"]
+		if not is_instance_valid(lbl):
+			continue
+		var have: int = int(collected.get(input_mat, 0))
+		lbl.text = "%d/%d" % [have, int(entry["need"])]
+
+
+# Sijoittaa popoverin ankkurin yläpuolelle (keskitettynä x-akselilla). Tarkka koko ei
+# ole vielä tiedossa ensimmäisellä framella (layout deferred) — _clamp_context_popover()
+# korjaa asemaa joka frame kunnes koko on asettunut.
+func _position_popover(panel: Control, anchor_screen: Vector2) -> void:
+	panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	var est := panel.get_combined_minimum_size()
+	panel.position = anchor_screen - Vector2(est.x * 0.5, est.y + 14.0)
+
+
+# Nopea fade+scale-in (Vaihe 5 kohta 2, ~0.08 s). Skaalataan vain visuaalisesti
+# (Control.scale/pivot_offset) — panel.position/size (siis _register_panel-eston
+# käyttämä get_global_rect()) ei muutu, joten input-esto kattaa koko lopullisen
+# alueen jo ensimmäisestä framesta lähtien vaikka paneeli näyttää vielä pieneltä.
+func _animate_popover_in(panel: Control) -> void:
+	var est := panel.get_combined_minimum_size()
+	panel.pivot_offset = est * 0.5
+	panel.modulate.a = 0.0
+	panel.scale = Vector2(0.9, 0.9)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT)
+	tw.set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(panel, "modulate:a", 1.0, POPOVER_ANIM_DURATION)
+	tw.tween_property(panel, "scale", Vector2.ONE, POPOVER_ANIM_DURATION)
+
+
+func _close_context_popover() -> void:
+	if _context_popover != null and is_instance_valid(_context_popover):
+		_unregister_panel(_context_popover)
+		_context_popover.queue_free()
+	_context_popover = null
+	_context_popover_kind = ""
+	_zone_popover_zid = -1
+	_zone_popover_toggles = {}
+	_machine_popover_machine = null
+	_machine_popover_rows = {}
+
+
+# Pitää popoverin ruudun sisällä (1664×960-ikkuna, mutta lasketaan aina oikeasta
+# viewport-koosta). Ajetaan joka frame kun popover on auki — halpa (yksi rect-vertailu).
+func _clamp_context_popover() -> void:
+	if _context_popover == null or not is_instance_valid(_context_popover):
+		return
+	var sz := _context_popover.size
+	var vp := get_viewport_rect().size
+	var pos := _context_popover.position
+	pos.x = clampf(pos.x, 4.0, maxf(4.0, vp.x - sz.x - 4.0))
+	pos.y = clampf(pos.y, 4.0, maxf(4.0, vp.y - sz.y - 4.0))
+	_context_popover.position = pos
+
+
+# Sulkee popoverin kun klikataan sen ulkopuolelle (Vaihe 4 kohta 7: "sulkeutuu
+# klikkauksesta muualle / Esc"). Oma left-just-seuranta koska pixel_world.gd:n oma
+# klikkauskäsittely ei tiedä UI:n popover-tilasta. _popover_just_opened-lippu estää
+# saman klikin (joka avasi popoverin) sulkemasta sitä heti samalla framella.
+func _handle_popover_outside_click() -> void:
+	var left := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	var left_just := left and not _prev_left_ui
+	_prev_left_ui = left
+	if _popover_just_opened:
+		_popover_just_opened = false
+		return
+	if not left_just:
+		return
+	if _context_popover == null or not is_instance_valid(_context_popover):
+		return
+	var mp := get_viewport().get_mouse_position()
+	if not _context_popover.get_global_rect().has_point(mp):
+		_close_context_popover()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TRAY-KOHTEET (ikoni + hinta allekkain, himmenee ilman varaa)
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _add_tray_item(parent: Control, icon: Texture2D, tooltip: String,
+		cost_fn: Callable, on_click: Callable) -> void:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 2)
+	parent.add_child(vb)
+
+	var btn := _make_tool_button(icon, tooltip, 48.0)
+	btn.pressed.connect(on_click)
+	vb.add_child(btn)
 
 	var price_lbl := Label.new()
 	price_lbl.text = ""
-	price_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	price_lbl.add_theme_font_size_override("font_size", 15)
+	price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	price_lbl.add_theme_font_size_override("font_size", 12)
 	price_lbl.add_theme_color_override("font_color", COL_MONEY)
 	vb.add_child(price_lbl)
 
-	if desc != "":
-		var desc_lbl := Label.new()
-		desc_lbl.text = desc
-		desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		desc_lbl.add_theme_font_size_override("font_size", 10)
-		desc_lbl.add_theme_color_override("font_color", Color(0.6, 0.62, 0.68))
-		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc_lbl.custom_minimum_size = Vector2(136.0, 0.0)
-		vb.add_child(desc_lbl)
-
-	panel.gui_input.connect(func(e: InputEvent) -> void:
-		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
-			on_click.call())
-
-	parent.add_child(panel)
-	_afford_items.append({ "panel": panel, "price_label": price_lbl, "cost_fn": cost_fn })
+	_afford_items.append({ "panel": btn, "price_label": price_lbl, "cost_fn": cost_fn })
 
 
 func _update_afford() -> void:
@@ -571,7 +984,7 @@ func _can_afford(cost: int) -> bool:
 	return int(pixel_world.money) >= cost
 
 
-# Botin hinta next_bot_price():stä; -1 jos backend puuttuu (kortti harmaana)
+# Botin hinta next_bot_price():stä; -1 jos backend puuttuu (nappi harmaana)
 func _bot_price() -> int:
 	var bm := _bm()
 	if bm != null and bm.has_method("next_bot_price"):
@@ -654,81 +1067,16 @@ func _on_base_filter_changed() -> void:
 	var lg := _logistics()
 	if lg == null or not lg.has_method("set_base_filter"):
 		return
-	lg.set_base_filter(_filter_mask_from(base_filter_checks))
+	lg.set_base_filter(_filter_mask_from(base_filter_toggles))
 
 
-func _on_zone_filter_changed() -> void:
+# Himmentää "Base hyväksyy" -togglet jos logistics-backend puuttuu (harvinaista —
+# lane A on jo integroitu, mutta guardattu kuten muukin backend-riippuvainen UI).
+func _update_base_filter_availability() -> void:
 	var lg := _logistics()
-	if lg == null or _selected_zone_id < 0 or not lg.has_method("set_zone_filter"):
-		return
-	lg.set_zone_filter(_selected_zone_id, _filter_mask_from(zone_filter_checks))
-
-
-func _update_logistics() -> void:
-	var lg := _logistics()
-	var base_enabled: bool = lg != null and lg.has_method("set_base_filter")
-	for mat_id in base_filter_checks:
-		base_filter_checks[mat_id].disabled = not base_enabled
-
-	_refresh_zone_list(lg)
-
-	var zone_enabled: bool = lg != null and _selected_zone_id >= 0 and lg.has_method("set_zone_filter")
-	for mat_id in zone_filter_checks:
-		zone_filter_checks[mat_id].disabled = not zone_enabled
-
-
-func _refresh_zone_list(lg: Object) -> void:
-	if zone_list_vbox == null:
-		return
-	if lg == null or not lg.has_method("get_zones"):
-		if zone_list_vbox.get_child_count() != 1:
-			_clear_children(zone_list_vbox)
-			zone_list_vbox.add_child(_label("Logistiikka ei saatavilla (odottaa lane A)", 11, COL_DIM))
-		return
-
-	var zones: Array = lg.get_zones()
-	# Rakenna lista uudelleen vain jos vyöhykkeet muuttuivat
-	if _zones_signature(zones) == _zones_signature(_zones_cache):
-		return
-	_zones_cache = zones
-	_clear_children(zone_list_vbox)
-	if zones.is_empty():
-		zone_list_vbox.add_child(_label("Ei vyöhykkeitä", 11, COL_DIM))
-		return
-	for z in zones:
-		var zid := int(z.get("id", -1))
-		var ztype := String(z.get("type", "?"))
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 4)
-		var sel := _make_btn("%s #%d" % [ztype.capitalize(), zid], 11)
-		sel.pressed.connect(_on_select_zone.bind(zid))
-		row.add_child(sel)
-		var rem := _make_btn("Poista", 11)
-		rem.pressed.connect(_on_remove_zone.bind(zid))
-		row.add_child(rem)
-		zone_list_vbox.add_child(row)
-
-
-func _on_select_zone(zid: int) -> void:
-	_selected_zone_id = zid
-	# Lataa vyöhykkeen nykyinen filtteri checkboxeihin
-	for z in _zones_cache:
-		if int(z.get("id", -1)) == zid:
-			var mask := int(z.get("filter_mask", 0))
-			for mat_id in zone_filter_checks:
-				# mask 0 = ei rajausta -> kaikki päällä
-				zone_filter_checks[mat_id].set_pressed_no_signal(
-					mask == 0 or (mask & (1 << int(mat_id))) != 0)
-			break
-
-
-func _on_remove_zone(zid: int) -> void:
-	var lg := _logistics()
-	if lg == null or not lg.has_method("remove_zone"):
-		return
-	lg.remove_zone(zid)
-	if _selected_zone_id == zid:
-		_selected_zone_id = -1
+	var enabled: bool = lg != null and lg.has_method("set_base_filter")
+	for mat_id in base_filter_toggles:
+		base_filter_toggles[mat_id].disabled = not enabled
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -803,37 +1151,28 @@ func _fleet_signature(bm: Object) -> String:
 	return "n%d" % (arr.size() if arr != null else 0)
 
 
-func _zones_signature(zones: Array) -> String:
-	var parts := PackedStringArray()
-	for z in zones:
-		parts.append("%d:%s:%d" % [int(z.get("id", -1)), String(z.get("type", "?")), int(z.get("filter_mask", 0))])
-	return "|".join(parts)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  ONBOARDING
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _build_onboarding() -> void:
+	# Vaihe 5 kohta 3: pieni diegeettinen vihjerivi actionbarin YLÄPUOLELLE — ei enää
+	# iso keskuslaatikko. Sama ankkuripaikka kuin mine-rivi/trayt (TRAY_ANCHOR_
+	# OFFSET_BOTTOM); _update_onboarding() piilottaa vihjeen automaattisesti kun
+	# joku niistä on jo auki samalla paikalla (ks. row_busy).
 	onboarding_panel = PanelContainer.new()
-	onboarding_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	onboarding_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	onboarding_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	onboarding_panel.grow_vertical = Control.GROW_DIRECTION_END
-	onboarding_panel.offset_top = 96.0
+	onboarding_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	onboarding_panel.offset_bottom = TRAY_ANCHOR_OFFSET_BOTTOM
 	onboarding_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.82)
-	style.set_corner_radius_all(6)
-	style.set_content_margin_all(14.0)
-	style.set_border_width_all(1)
-	style.border_color = Color(0.3, 0.6, 0.9, 0.5)
-	onboarding_panel.add_theme_stylebox_override("panel", style)
+	onboarding_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
 
 	onboarding_label = Label.new()
-	onboarding_label.text = ONBOARDING_TEXTS[0]
-	onboarding_label.add_theme_font_size_override("font_size", 22)
-	onboarding_label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.85))
+	onboarding_label.text = "> " + ONBOARDING_TEXTS[0]
+	onboarding_label.add_theme_font_size_override("font_size", 12)
+	onboarding_label.add_theme_color_override("font_color", UiThemeRef.COL_BORDER_DIM)
 	onboarding_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	onboarding_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	onboarding_panel.add_child(onboarding_label)
@@ -857,9 +1196,15 @@ func _update_onboarding() -> void:
 			# Kunnes kolmas botti ostettu
 			if _current_bot_count() > _onboarding_bot_base:
 				_advance_onboarding()
-	if not _onboarding_done:
-		onboarding_label.text = ONBOARDING_TEXTS[_onboarding_step]
-		onboarding_panel.visible = true
+	if _onboarding_done:
+		return
+	onboarding_label.text = "> " + ONBOARDING_TEXTS[_onboarding_step]
+	# Piilota vihje kun mine-rivi/build-tray/bot-tray jo käyttää samaa ankkuripaikkaa
+	# actionbarin yläpuolella — ettei kaksi paneelia näy päällekkäin. Sivuvaikutus on
+	# looginenkin: esim. askel 0:n "paina V" -vihje ei ole enää tarpeen kun mine-rivi
+	# (V:n painamisen seuraus) on jo auki.
+	var row_busy: bool = _get_designation_mode() or _build_tray_open or _bot_tray_open
+	onboarding_panel.visible = not row_busy
 
 
 func _advance_onboarding() -> void:
@@ -897,17 +1242,12 @@ func _build_toast() -> void:
 	toast_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toast_panel.visible = false
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.08, 0.14, 0.09, 0.92)
-	style.set_corner_radius_all(5)
-	style.set_content_margin_all(8.0)
-	style.set_border_width_all(1)
-	style.border_color = COL_MONEY
-	toast_panel.add_theme_stylebox_override("panel", style)
+	toast_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER, 1, 8.0))
 
 	toast_label = Label.new()
 	toast_label.add_theme_font_size_override("font_size", 18)
-	toast_label.add_theme_color_override("font_color", Color(0.85, 1.0, 0.85))
+	toast_label.add_theme_color_override("font_color", COL_TEXT)
 	toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	toast_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toast_panel.add_child(toast_label)
@@ -923,19 +1263,38 @@ func _on_demo_complete() -> void:
 	_show_toast("Demo valmis! Jatka vapaasti.", 8.0)
 
 
+# Vaihe 5 kohta 2: fade-in heti näkyviin tullessa. Aiempi toast (jos vielä
+# häivytysvaiheessa) katkaistaan ja korvataan uudella — ei jää kesken roikkumaan.
 func _show_toast(text: String, duration: float) -> void:
 	if toast_label == null:
 		return
+	_kill_toast_tween()
 	toast_label.text = text
 	toast_panel.visible = true
+	toast_panel.modulate.a = 0.0
 	_toast_timer = duration
+	_toast_tween = create_tween()
+	_toast_tween.tween_property(toast_panel, "modulate:a", 1.0, TOAST_FADE_IN_DURATION)
 
 
+# Häivyttää toastin ennen piiloutumista (Vaihe 5 kohta 2) — visible=false vasta
+# fade-outin lopussa, ei enää suoraan aika loppuessa.
 func _update_toast(delta: float) -> void:
-	if _toast_timer > 0.0:
-		_toast_timer -= delta
-		if _toast_timer <= 0.0:
-			toast_panel.visible = false
+	if _toast_timer <= 0.0:
+		return
+	_toast_timer -= delta
+	if _toast_timer <= 0.0:
+		_toast_timer = 0.0
+		_kill_toast_tween()
+		_toast_tween = create_tween()
+		_toast_tween.tween_property(toast_panel, "modulate:a", 0.0, TOAST_FADE_OUT_DURATION)
+		_toast_tween.tween_callback(func() -> void: toast_panel.visible = false)
+
+
+func _kill_toast_tween() -> void:
+	if _toast_tween != null and _toast_tween.is_valid():
+		_toast_tween.kill()
+	_toast_tween = null
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -951,12 +1310,10 @@ func _build_scanner_panel() -> void:
 	scanner_panel.offset_top = 56.0
 	scanner_panel.offset_left = -188.0
 	scanner_panel.offset_bottom = 256.0
+	scanner_panel.visible = _debug_visible   # debug-tila (F3) — piilossa oletuksena
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.72)
-	style.set_corner_radius_all(4)
-	style.set_content_margin_all(6.0)
-	scanner_panel.add_theme_stylebox_override("panel", style)
+	scanner_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 6.0))
 
 	scanner_label = RichTextLabel.new()
 	scanner_label.bbcode_enabled = true
@@ -1029,15 +1386,48 @@ func update_material_scanner() -> void:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  BOTTIEN TILA MAAILMASSA (Vaihe 4, kohta 10 — erillinen overlay-piirto)
+# ═══════════════════════════════════════════════════════════════════════════
+
+func _build_bot_status_overlay() -> void:
+	bot_status_overlay = BotStatusOverlayScript.new()
+	bot_status_overlay.setup(pixel_world)
+	get_parent().add_child.call_deferred(bot_status_overlay)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  PÄÄSILMUKKA
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _input(event: InputEvent) -> void:
-	# TAB togglaa alapaneelin näkyvyyden
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_TAB:
-		if bottom_panel != null:
-			bottom_panel.visible = not bottom_panel.visible
+	if not (event is InputEventKey and event.pressed and not event.echo):
+		return
+	# TAB togglaa bot-trayn (korvaa vanhan bottom_panelin, Vaihe 3 kohta 5).
+	if event.keycode == KEY_TAB:
+		_toggle_bot_tray()
 		get_viewport().set_input_as_handled()
+	# B togglaa build-trayn (UI_REDESIGN_PLAN.md: "Rakenna [B]"). Vapaa näppäin —
+	# pixel_world.gd:n KEY_B-tapaus on vain kuolleessa build_menu_visible-haarassa
+	# (ei koskaan true), joten ei konfliktia legacy-inputin kanssa.
+	elif event.keycode == KEY_B:
+		_toggle_build_tray()
+		get_viewport().set_input_as_handled()
+	# F3 togglaa debug-tilan (FPS, bottilaskuri, materiaaliskanneri).
+	# Ei kutsuta set_input_as_handled():a — debug_overlay.gd kuuntelee samaa
+	# näppäintä omaan overlayynsa, eikä sitä saa syödä täällä.
+	elif event.keycode == KEY_F3:
+		_debug_visible = not _debug_visible
+		_apply_debug_visibility()
+	# Esc sulkee ylimmän auki olevan UI-elementin (popover -> build-tray -> bot-tray).
+	# Ei syödä eventtiä — pixel_world.gd:llä on oma, riippumaton Esc-käsittelynsä
+	# (rakennus-/vyöhykesijoituksen peruutus), joka ei liity tähän UI-tilaan.
+	elif event.keycode == KEY_ESCAPE:
+		if _context_popover != null:
+			_close_context_popover()
+		elif _build_tray_open:
+			_close_build_tray()
+		elif _bot_tray_open:
+			_close_bot_tray()
 
 
 func _process(delta: float) -> void:
@@ -1049,7 +1439,10 @@ func _process(delta: float) -> void:
 	fps_label.text = "FPS %d" % Engine.get_frames_per_second()
 	_update_toast(delta)
 	_update_onboarding()
-	_update_toolbar_highlight()
+	_update_actionbar_highlight()
+	_update_build_tray_visibility()
+	_handle_popover_outside_click()
+	_clamp_context_popover()
 
 	# Raskaammat päivitykset ~5 Hz
 	_ui_accum += delta
@@ -1059,23 +1452,37 @@ func _process(delta: float) -> void:
 		_update_fleet()
 		_update_afford()
 		_maybe_rebuild_bot_list()
-		_update_logistics()
+		_update_base_filter_availability()
+		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
 
-	# Materiaaliskanneri harvakseltaan
-	_scanner_frame += 1
-	if _scanner_frame >= SCANNER_INTERVAL:
-		_scanner_frame = 0
-		update_material_scanner()
+	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
+	if _debug_visible:
+		_scanner_frame += 1
+		if _scanner_frame >= SCANNER_INTERVAL:
+			_scanner_frame = 0
+			update_material_scanner()
+
+
+# Näyttää/piilottaa debug-tilan elementit (FPS, bottilaskuri, skanneri) F3:lla.
+func _apply_debug_visibility() -> void:
+	if debug_row != null:
+		debug_row.visible = _debug_visible
+	if scanner_panel != null:
+		scanner_panel.visible = _debug_visible
 
 
 func _update_income() -> void:
-	# $/s-mittari — vain jos lane G on lisännyt income_per_s-kentän
+	# $/s-mittari — vain jos lane G on lisännyt income_per_s-kentän, piilotetaan
+	# myös jos arvo on ~0 (ei mitään näytettävää)
 	var inc = pixel_world.get("income_per_s")
 	if inc == null:
 		income_label.visible = false
 		return
-	income_label.visible = true
 	var f := float(inc)
+	if absf(f) < 0.05:
+		income_label.visible = false
+		return
+	income_label.visible = true
 	income_label.text = "+$%d/s" % int(round(f))
 	income_label.add_theme_color_override("font_color", COL_MONEY if f > 0.0 else COL_DIM)
 
@@ -1104,13 +1511,22 @@ func _update_fleet() -> void:
 		role_plus_btn.disabled = true
 
 
-func _update_toolbar_highlight() -> void:
-	if btn_desig == null:
+func _update_actionbar_highlight() -> void:
+	if tool_btn_mine == null:
 		return
 	var dm: bool = _get_designation_mode()
-	btn_desig.modulate = COL_ACTIVE if dm else Color.WHITE
+	tool_btn_mine.modulate = COL_ACTIVE if dm else Color.WHITE
+	mine_row_panel.visible = dm
 	for i in desig_mode_buttons.size():
 		desig_mode_buttons[i].modulate = COL_ACTIVE if (dm and i == _desig_tool_mode) else Color.WHITE
+
+	var building: bool = pixel_world.build_mode != pixel_world.BUILD_NONE
+	tool_btn_build.modulate = COL_ACTIVE if (building or _build_tray_open) else Color.WHITE
+
+	tool_btn_bots.modulate = COL_ACTIVE if _bot_tray_open else Color.WHITE
+
+	var erasing: bool = (not dm) and (not building) and int(pixel_world.current_material) == MAT_EMPTY
+	tool_btn_erase.modulate = COL_ACTIVE if erasing else Color.WHITE
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1139,6 +1555,49 @@ func _sep() -> VSeparator:
 	return VSeparator.new()
 
 
+# Isot paneelit (trayt, popoverit): 9-slice panel_frame.png kun saatavilla, muuten
+# StyleBoxFlat-fallback samalla amber-paletilla (UiTheme.panel_style_box()).
+func _frame_or_flat_panel() -> StyleBox:
+	var frame := UiThemeRef.panel_frame_style_box()
+	if frame != null:
+		return frame
+	return UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 10.0)
+
+
+# Ikoninappi (actionbar/trayt): 9-slice button_frame.png kun saatavilla, nearest-filter
+# terävälle pikselilookille. Vaihe 5: normal/hover/pressed ovat erilliset tekstuuri-
+# tintit (UiTheme.icon_button_state_styleboxes) — aktiivinen työkalu erottuu tästä
+# silti omalla COL_ACTIVE-modulaatiollaan (ks. _update_actionbar_highlight), joka
+# kertautuu hover/press-tintin päälle eikä korvaa sitä. button_frame.png:n 8px-
+# marginaali on tarkoitettu tälle 48px-kokoluokalle; pienempiin (<32px) napteihin
+# sitä ei käytetä (ks. UI_REDESIGN_PLAN.md Vaihe 3 kohta 6 — team-leadin sallima
+# StyleBoxFlat-fallback pienille napeille, joka jo erottelee hover/pressed teeman
+# kautta).
+func _make_tool_button(icon: Texture2D, tooltip: String, size: float) -> Button:
+	var b := Button.new()
+	b.icon = icon
+	b.expand_icon = true
+	b.text = ""
+	b.custom_minimum_size = Vector2(size, size)
+	b.focus_mode = Control.FOCUS_NONE
+	b.tooltip_text = tooltip
+	b.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_CENTER
+	if size >= 40.0:
+		# Vaihe 5 kohta 1: erilliset normal/hover/pressed-tekstuurit (ei enää sama
+		# kehys kaikissa tiloissa) — COL_ACTIVE-modulaatio (_update_actionbar_highlight)
+		# pysyy erillisenä kerroksena tämän päällä, joten aktiivinen työkalu erottuu
+		# silti hoverista.
+		var states := UiThemeRef.icon_button_state_styleboxes()
+		if not states.is_empty():
+			b.add_theme_stylebox_override("normal", states["normal"])
+			b.add_theme_stylebox_override("hover", states["hover"])
+			b.add_theme_stylebox_override("pressed", states["pressed"])
+			b.add_theme_stylebox_override("focus", states["focus"])
+	return b
+
+
 func _make_btn(text: String, font_size: int = 12) -> Button:
 	var btn := Button.new()
 	btn.text = text
@@ -1154,18 +1613,6 @@ func _label(text: String, font_size: int = 12, color: Color = COL_TEXT) -> Label
 	lbl.add_theme_color_override("font_color", color)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	return lbl
-
-
-func _dark_style(alpha: float) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.07, 0.08, 0.11, alpha)
-	style.border_width_top = 2
-	style.border_color = Color(0.25, 0.4, 0.6, 0.7)
-	style.content_margin_left = 8.0
-	style.content_margin_right = 8.0
-	style.content_margin_top = 4.0
-	style.content_margin_bottom = 4.0
-	return style
 
 
 func _clear_children(node: Node) -> void:
