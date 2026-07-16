@@ -1,20 +1,31 @@
 extends PanelContainer
 # ═══════════════════════════════════════════════════════════════════════════
 # UI 2.0 — kaivosyhtiön johtajan käyttöliittymä (DEMO_PLAN §3.1, kortti B1)
+# UI-REDESIGN Vaiheet 1-2 (docs/UI_REDESIGN_PLAN.md): yhteinen Theme +
+# minimalisoitu HUD. "HUD = vain pisteet" — kaikki muu piilossa oletuksena.
 #
 # Rakenne (kaikki ohjelmallinen):
-#   • YLÄPALKKI (tämä PanelContainer): raha isolla, $/s, bottilaskuri, FPS
+#   • YLÄPALKKI (tämä PanelContainer, kompakti vasen-ylä): raha isolla, $/s
+#     — FPS + bottilaskuri piilossa, F3 paljastaa (debug-tila)
 #   • TYÖKALURIVI (alhaalla): designaatio [V] + moodit pensseli/laatikko/solu + koko
-#   • ALAPANEELI (TAB togglaa): kolme välilehteä BOTIT / RAKENNUKSET / LOGISTIIKKA
+#   • ALAPANEELI (TAB togglaa, oletuksena piilossa): kolme välilehteä
+#     BOTIT / RAKENNUKSET / LOGISTIIKKA
 #   • ONBOARDING: max 3 peräkkäistä opastetta
 #   • TOASTIT: kuuntelee world.milestone-signaalia (jos on)
-#   • MATERIAALISKANNERI (oikea yläkulma): ympäristön koostumus
+#   • MATERIAALISKANNERI (oikea yläkulma): ympäristön koostumus — piilossa,
+#     F3 paljastaa (GDD §7.3, säilyy koodissa)
+#
+# Ulkoasu tulee yhdestä yhteisestä teemasta (scripts/ui_theme.gd: UiTheme).
 #
 # RINNAKKAISKEHITYS: bot_manager/logistics-rajapinnat (lane A) ja
 # pixel_world-kytkennät (lane G) tulevat myöhemmin. Kaikki niiden kutsut on
 # guardattu has_method()/has_signal()/get():llä — napit joiden backend puuttuu
 # näkyvät harmaina. Integraatiossa kaikki herää eloon.
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Preload (ei class_name-viittaus) — vältetään class-cachen resolvointiviive
+# ensimmäisellä ajolla (ks. CLAUDE.md: Godot Testing Gotchas).
+const UiThemeRef := preload("res://scripts/ui_theme.gd")
 
 @onready var pixel_world: TextureRect = get_node("../../PixelWorld")
 
@@ -25,18 +36,20 @@ const ROLE_HAULER := 1
 const ZONE_PICKUP := 0
 const ZONE_DUMP := 1
 
-# Värit
-const COL_MONEY := Color(0.35, 0.92, 0.48)
-const COL_BAD := Color(0.95, 0.42, 0.42)
-const COL_DIM := Color(0.52, 0.52, 0.58)
-const COL_ACTIVE := Color(1.5, 1.5, 0.6)
-const COL_TEXT := Color(0.9, 0.92, 0.95)
+# Värit — amber-paletti (UiThemeRef.COL_*), EI sinistä
+const COL_MONEY := UiThemeRef.COL_MONEY
+const COL_BAD := UiThemeRef.COL_BAD
+const COL_DIM := UiThemeRef.COL_TEXT_DIM
+const COL_ACTIVE := UiThemeRef.COL_ACTIVE
+const COL_TEXT := UiThemeRef.COL_TEXT
 
-# ── Yläpalkki ──────────────────────────────────────────────────────────────
+# ── Yläpalkki (kompakti, vasen-ylä) ─────────────────────────────────────────
 var money_label: Label
 var income_label: Label
 var fleet_label: Label
 var fps_label: Label
+var debug_row: HBoxContainer
+var _debug_visible: bool = false
 
 # ── Työkalurivi ────────────────────────────────────────────────────────────
 var toolbar_panel: PanelContainer
@@ -121,6 +134,7 @@ const FILTER_MATS: Array = [
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _ready() -> void:
+	theme = UiThemeRef.build_theme()   # yksi yhteinen teema koko UI:lle (Vaihe 1)
 	_register_panel(self)   # yläpalkki hiiri-inputin estoon
 
 	_build_top_bar()
@@ -164,59 +178,50 @@ func _register_panel(panel: Control) -> void:
 # ── Yläpalkki ──────────────────────────────────────────────────────────────
 
 func _build_top_bar() -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.07, 0.08, 0.11, 0.96)
-	style.border_width_bottom = 2
-	style.border_color = Color(0.25, 0.55, 0.85, 0.7)
-	style.content_margin_left = 12.0
-	style.content_margin_right = 12.0
-	style.content_margin_top = 2.0
-	style.content_margin_bottom = 2.0
+	# Kompakti paneeli vasempaan yläkulmaan — EI enää full-width-palkkia (Vaihe 2).
+	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	offset_left = 10.0
+	offset_top = 10.0
+
+	var style := UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 10.0)
 	add_theme_stylebox_override("panel", style)
 
-	var hbox := HBoxContainer.new()
-	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_theme_constant_override("separation", 10)
-	add_child(hbox)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 0)
+	add_child(vbox)
 
-	# Raha isolla
+	# Raha isolla, amber
 	money_label = Label.new()
 	money_label.text = "$0"
 	money_label.add_theme_font_size_override("font_size", 26)
 	money_label.add_theme_color_override("font_color", COL_MONEY)
-	money_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(money_label)
+	vbox.add_child(money_label)
 
-	# $/s-mittari (piilotetaan jos world.income_per_s puuttuu)
+	# $/s-mittari (piilotetaan jos world.income_per_s puuttuu tai on ~0)
 	income_label = Label.new()
 	income_label.text = ""
-	income_label.add_theme_font_size_override("font_size", 15)
-	income_label.add_theme_color_override("font_color", COL_MONEY)
-	income_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(income_label)
+	income_label.visible = false
+	income_label.add_theme_font_size_override("font_size", 13)
+	income_label.add_theme_color_override("font_color", COL_DIM)
+	vbox.add_child(income_label)
 
-	hbox.add_child(_sep())
+	# Debug-rivi: FPS + bottilaskuri — piilossa oletuksena, F3 paljastaa
+	debug_row = HBoxContainer.new()
+	debug_row.add_theme_constant_override("separation", 10)
+	debug_row.visible = _debug_visible
+	vbox.add_child(debug_row)
 
-	# Bottilaskuri rooleittain
 	fleet_label = Label.new()
 	fleet_label.text = ""
-	fleet_label.add_theme_font_size_override("font_size", 15)
+	fleet_label.add_theme_font_size_override("font_size", 13)
 	fleet_label.add_theme_color_override("font_color", COL_TEXT)
-	fleet_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(fleet_label)
+	debug_row.add_child(fleet_label)
 
-	# Täyte työntää FPS:n oikealle
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_child(spacer)
-
-	# FPS pienenä
 	fps_label = Label.new()
 	fps_label.text = "FPS 0"
 	fps_label.add_theme_font_size_override("font_size", 12)
-	fps_label.add_theme_color_override("font_color", Color(0.55, 0.58, 0.62))
-	fps_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hbox.add_child(fps_label)
+	fps_label.add_theme_color_override("font_color", COL_DIM)
+	debug_row.add_child(fps_label)
 
 
 # ── Työkalurivi ────────────────────────────────────────────────────────────
@@ -226,7 +231,8 @@ func _build_toolbar() -> void:
 	toolbar_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	toolbar_panel.offset_top = -40.0
 	toolbar_panel.offset_bottom = 0.0
-	toolbar_panel.add_theme_stylebox_override("panel", _dark_style(0.95))
+	toolbar_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER, 1, 6.0))
 
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 6)
@@ -308,7 +314,9 @@ func _build_bottom_panel() -> void:
 	bottom_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	bottom_panel.offset_top = -270.0
 	bottom_panel.offset_bottom = -40.0   # työkalurivin yläpuolelle
-	bottom_panel.add_theme_stylebox_override("panel", _dark_style(0.97))
+	bottom_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 6.0))
+	bottom_panel.visible = false   # oletuksena piilossa (Vaihe 2) — TAB togglaa
 
 	tab_container = TabContainer.new()
 	tab_container.add_theme_font_size_override("font_size", 13)
@@ -481,14 +489,8 @@ func _add_afford_card(parent: Control, title: String, desc: String,
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	panel.custom_minimum_size = Vector2(150.0, 0.0)
-
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.12, 0.13, 0.18, 0.98)
-	style.set_corner_radius_all(4)
-	style.set_content_margin_all(6.0)
-	style.set_border_width_all(1)
-	style.border_color = Color(0.3, 0.35, 0.45, 0.8)
-	panel.add_theme_stylebox_override("panel", style)
+	panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL_LIGHT, UiThemeRef.COL_BORDER_DIM, 1, 6.0))
 
 	var vb := VBoxContainer.new()
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -514,7 +516,7 @@ func _add_afford_card(parent: Control, title: String, desc: String,
 		desc_lbl.text = desc
 		desc_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		desc_lbl.add_theme_font_size_override("font_size", 10)
-		desc_lbl.add_theme_color_override("font_color", Color(0.6, 0.62, 0.68))
+		desc_lbl.add_theme_color_override("font_color", COL_DIM)
 		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		desc_lbl.custom_minimum_size = Vector2(136.0, 0.0)
 		vb.add_child(desc_lbl)
@@ -822,18 +824,13 @@ func _build_onboarding() -> void:
 	onboarding_panel.offset_top = 96.0
 	onboarding_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.82)
-	style.set_corner_radius_all(6)
-	style.set_content_margin_all(14.0)
-	style.set_border_width_all(1)
-	style.border_color = Color(0.3, 0.6, 0.9, 0.5)
-	onboarding_panel.add_theme_stylebox_override("panel", style)
+	onboarding_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER, 1, 14.0))
 
 	onboarding_label = Label.new()
 	onboarding_label.text = ONBOARDING_TEXTS[0]
 	onboarding_label.add_theme_font_size_override("font_size", 22)
-	onboarding_label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.85))
+	onboarding_label.add_theme_color_override("font_color", COL_TEXT)
 	onboarding_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	onboarding_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	onboarding_panel.add_child(onboarding_label)
@@ -897,17 +894,12 @@ func _build_toast() -> void:
 	toast_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toast_panel.visible = false
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.08, 0.14, 0.09, 0.92)
-	style.set_corner_radius_all(5)
-	style.set_content_margin_all(8.0)
-	style.set_border_width_all(1)
-	style.border_color = COL_MONEY
-	toast_panel.add_theme_stylebox_override("panel", style)
+	toast_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER, 1, 8.0))
 
 	toast_label = Label.new()
 	toast_label.add_theme_font_size_override("font_size", 18)
-	toast_label.add_theme_color_override("font_color", Color(0.85, 1.0, 0.85))
+	toast_label.add_theme_color_override("font_color", COL_TEXT)
 	toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	toast_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	toast_panel.add_child(toast_label)
@@ -951,12 +943,10 @@ func _build_scanner_panel() -> void:
 	scanner_panel.offset_top = 56.0
 	scanner_panel.offset_left = -188.0
 	scanner_panel.offset_bottom = 256.0
+	scanner_panel.visible = _debug_visible   # debug-tila (F3) — piilossa oletuksena
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.72)
-	style.set_corner_radius_all(4)
-	style.set_content_margin_all(6.0)
-	scanner_panel.add_theme_stylebox_override("panel", style)
+	scanner_panel.add_theme_stylebox_override("panel",
+		UiThemeRef.panel_style_box(UiThemeRef.COL_BG_PANEL, UiThemeRef.COL_BORDER_DIM, 1, 6.0))
 
 	scanner_label = RichTextLabel.new()
 	scanner_label.bbcode_enabled = true
@@ -1033,11 +1023,19 @@ func update_material_scanner() -> void:
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _input(event: InputEvent) -> void:
+	if not (event is InputEventKey and event.pressed and not event.echo):
+		return
 	# TAB togglaa alapaneelin näkyvyyden
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_TAB:
+	if event.keycode == KEY_TAB:
 		if bottom_panel != null:
 			bottom_panel.visible = not bottom_panel.visible
 		get_viewport().set_input_as_handled()
+	# F3 togglaa debug-tilan (FPS, bottilaskuri, materiaaliskanneri).
+	# Ei kutsuta set_input_as_handled():a — debug_overlay.gd kuuntelee samaa
+	# näppäintä omaan overlayynsa, eikä sitä saa syödä täällä.
+	elif event.keycode == KEY_F3:
+		_debug_visible = not _debug_visible
+		_apply_debug_visibility()
 
 
 func _process(delta: float) -> void:
@@ -1061,21 +1059,34 @@ func _process(delta: float) -> void:
 		_maybe_rebuild_bot_list()
 		_update_logistics()
 
-	# Materiaaliskanneri harvakseltaan
-	_scanner_frame += 1
-	if _scanner_frame >= SCANNER_INTERVAL:
-		_scanner_frame = 0
-		update_material_scanner()
+	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
+	if _debug_visible:
+		_scanner_frame += 1
+		if _scanner_frame >= SCANNER_INTERVAL:
+			_scanner_frame = 0
+			update_material_scanner()
+
+
+# Näyttää/piilottaa debug-tilan elementit (FPS, bottilaskuri, skanneri) F3:lla.
+func _apply_debug_visibility() -> void:
+	if debug_row != null:
+		debug_row.visible = _debug_visible
+	if scanner_panel != null:
+		scanner_panel.visible = _debug_visible
 
 
 func _update_income() -> void:
-	# $/s-mittari — vain jos lane G on lisännyt income_per_s-kentän
+	# $/s-mittari — vain jos lane G on lisännyt income_per_s-kentän, piilotetaan
+	# myös jos arvo on ~0 (ei mitään näytettävää)
 	var inc = pixel_world.get("income_per_s")
 	if inc == null:
 		income_label.visible = false
 		return
-	income_label.visible = true
 	var f := float(inc)
+	if absf(f) < 0.05:
+		income_label.visible = false
+		return
+	income_label.visible = true
 	income_label.text = "+$%d/s" % int(round(f))
 	income_label.add_theme_color_override("font_color", COL_MONEY if f > 0.0 else COL_DIM)
 
@@ -1154,18 +1165,6 @@ func _label(text: String, font_size: int = 12, color: Color = COL_TEXT) -> Label
 	lbl.add_theme_color_override("font_color", color)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	return lbl
-
-
-func _dark_style(alpha: float) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.07, 0.08, 0.11, alpha)
-	style.border_width_top = 2
-	style.border_color = Color(0.25, 0.4, 0.6, 0.7)
-	style.content_margin_left = 8.0
-	style.content_margin_right = 8.0
-	style.content_margin_top = 4.0
-	style.content_margin_bottom = 4.0
-	return style
 
 
 func _clear_children(node: Node) -> void:
