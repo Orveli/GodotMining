@@ -4511,13 +4511,27 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 				_scenario_failures += 1
 			_scenario_tests += 1
 		"place_building":
+			# Sijoittaa koneen ILMAN hintaa (testi-apu, kuten fill_rect). Kaytttaa samaa
+			# sijoituspolkua kuin pelin build-flow -> zonet rekisteroituvat logisticsiin
+			# ja P0-2:n base-filtterin auto-adjust ajetaan (jalostusketju testattavissa).
 			var btype: String = step.get("type", "")
 			var bx: int = step.get("x", 0)
 			var by: int = step.get("y", 0)
 			var pos := Vector2(bx, by)
 			match btype:
+				"furnace": _place_furnace(pos)
+				"crusher": _place_crusher(pos)
 				_: push_warning("ScenarioRunner: tuntematon rakennus '%s'" % btype)
 			print("ScenarioRunner: place_building type=%s (%d,%d)" % [btype, bx, by])
+		"set_base_filter":
+			# Asettaa basen dropoff-vyohykkeen filtterimaskin suoraan (testi-apu).
+			# HUOM: merkitsee vyohykkeen user_modified-lipulla (kuten pelaajan kasisaato).
+			var fmask: int = step.get("mask", 0)
+			if logistics != null:
+				logistics.set_zone_filter(logistics.base_dropoff_id(), fmask)
+				print("ScenarioRunner: set_base_filter mask=%d" % fmask)
+			else:
+				push_warning("ScenarioRunner: set_base_filter — logistics puuttuu")
 		"explode":
 			var ex: int = step.get("x", W / 2)
 			var ey: int = step.get("y", SIM_HEIGHT / 2)
