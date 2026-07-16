@@ -92,7 +92,12 @@ const COL_TEXT := UiThemeRef.COL_TEXT
 # ── Yläpalkki (kompakti, vasen-ylä) ─────────────────────────────────────────
 var money_label: Label
 var income_label: Label
-var fleet_label: Label
+# Pysyvä bottilaskuri (D5): miner/hauler aktiiviset/kaikki rahamittarin alla,
+# aina näkyvissä (ei enää vain F3-debugin takana).
+var fleet_row: HBoxContainer
+var fleet_miner_label: Label
+var fleet_hauler_label: Label
+var fleet_label: Label            # F3-debug-rivin bottilaskuri (säilyy ennallaan)
 var fps_label: Label
 var debug_row: HBoxContainer
 var _debug_visible: bool = false
@@ -295,6 +300,38 @@ func _build_top_bar() -> void:
 	income_label.add_theme_font_size_override("font_size", 13)
 	income_label.add_theme_color_override("font_color", COL_DIM)
 	vbox.add_child(income_label)
+
+	# ── Pysyvä bottilaskuri (D5) — miner N/M + hauler N/M rahamittarin alla ────
+	# Aina näkyvissä (toisin kuin alla oleva F3-debug-rivi). Lisätään saman VBoxin
+	# lapseksi → container hoitaa asettelun automaattisesti, EI omia ankkureita.
+	# (Paneelin lyttäys-gotcha koskee vain uusia set_anchors_preset-paneeleita, ei
+	# container-lapsia — siksi tähän ei tarvita grow_horizontal/grow_vertical-säätöä.)
+	fleet_row = HBoxContainer.new()
+	fleet_row.add_theme_constant_override("separation", 3)
+	vbox.add_child(fleet_row)
+
+	fleet_row.add_child(_make_stat_icon(ICON_BOT_MINER, "Miner-botit: aktiiviset / kaikki"))
+	fleet_miner_label = Label.new()
+	fleet_miner_label.text = "0/0"
+	fleet_miner_label.tooltip_text = "Miner-botit: aktiiviset / kaikki"
+	fleet_miner_label.add_theme_font_size_override("font_size", 14)
+	fleet_miner_label.add_theme_color_override("font_color", COL_TEXT)
+	fleet_miner_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	fleet_row.add_child(fleet_miner_label)
+
+	# Väli miner- ja hauler-ryhmän väliin
+	var fleet_gap := Control.new()
+	fleet_gap.custom_minimum_size = Vector2(10.0, 0.0)
+	fleet_row.add_child(fleet_gap)
+
+	fleet_row.add_child(_make_stat_icon(ICON_BOT_HAULER, "Hauler-botit: aktiiviset / kaikki"))
+	fleet_hauler_label = Label.new()
+	fleet_hauler_label.text = "0/0"
+	fleet_hauler_label.tooltip_text = "Hauler-botit: aktiiviset / kaikki"
+	fleet_hauler_label.add_theme_font_size_override("font_size", 14)
+	fleet_hauler_label.add_theme_color_override("font_color", COL_TEXT)
+	fleet_hauler_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	fleet_row.add_child(fleet_hauler_label)
 
 	# Debug-rivi: FPS + bottilaskuri — piilossa oletuksena, F3 paljastaa
 	debug_row = HBoxContainer.new()
@@ -1519,23 +1556,36 @@ func _update_income() -> void:
 
 
 func _update_fleet() -> void:
+	# Päivitetään ~5 Hz (samassa tahdissa $/s-mittarin kanssa, ks. _process). Yksi
+	# get_fleet_stats()-kutsu ruokkii sekä pysyvän yläpalkkilaskurin (D5) että
+	# F3-debug-rivin — ei duplikaattikutsua.
 	var bm := _bm()
 	if bm != null and bm.has_method("get_fleet_stats"):
 		var s: Dictionary = bm.get_fleet_stats()
-		fleet_label.text = "Miner %d/%d    Hauler %d/%d" % [
-			int(s.get("miners_active", 0)), int(s.get("miners", 0)),
-			int(s.get("haulers_active", 0)), int(s.get("haulers", 0))]
-		role_count_label.text = "%d" % int(s.get("miners", 0))
+		var mi_a := int(s.get("miners_active", 0))
+		var mi := int(s.get("miners", 0))
+		var ha_a := int(s.get("haulers_active", 0))
+		var ha := int(s.get("haulers", 0))
+		# Pysyvä yläpalkin bottilaskuri (aktiiviset/kaikki)
+		fleet_miner_label.text = "%d/%d" % [mi_a, mi]
+		fleet_hauler_label.text = "%d/%d" % [ha_a, ha]
+		# F3-debug-rivi ennallaan
+		fleet_label.text = "Miner %d/%d    Hauler %d/%d" % [mi_a, mi, ha_a, ha]
+		role_count_label.text = "%d" % mi
 		var has_setrole: bool = bm.has_method("set_role")
 		role_minus_btn.disabled = not has_setrole
 		role_plus_btn.disabled = not has_setrole
 	elif bm != null:
 		var arr = bm.get("bots")
+		fleet_miner_label.text = "—"
+		fleet_hauler_label.text = "—"
 		fleet_label.text = "Botteja: %d" % (arr.size() if arr != null else 0)
 		role_count_label.text = "—"
 		role_minus_btn.disabled = true
 		role_plus_btn.disabled = true
 	else:
+		fleet_miner_label.text = "0/0"
+		fleet_hauler_label.text = "0/0"
 		fleet_label.text = ""
 		role_count_label.text = "—"
 		role_minus_btn.disabled = true
@@ -1647,6 +1697,20 @@ func _make_btn(text: String, font_size: int = 12) -> Button:
 	btn.focus_mode = Control.FOCUS_NONE
 	btn.add_theme_font_size_override("font_size", font_size)
 	return btn
+
+
+# Pieni tilastoikoni (yläpalkin bottilaskuri): TextureRect nearest-filterillä terävää
+# pikselilookia varten. Skaalataan annettuun kokoon kuvasuhde säilyttäen.
+func _make_stat_icon(icon: Texture2D, tooltip: String = "", size: float = 20.0) -> TextureRect:
+	var tr := TextureRect.new()
+	tr.texture = icon
+	tr.custom_minimum_size = Vector2(size, size)
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	tr.tooltip_text = tooltip
+	return tr
 
 
 func _label(text: String, font_size: int = 12, color: Color = COL_TEXT) -> Label:
