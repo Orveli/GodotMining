@@ -11,8 +11,10 @@ extends SceneTree
 # Aja headless:
 #   godot --headless --path . --script res://tests/unit/test_bot_manager.gd
 
-const SIM_W := 1664
-const SIM_H := 960
+# Planeettakoko (mirroroi BotManager/NavGrid/DesignationGrid-vakioita): 4096x448.
+# x wrappaa (sauma), y ei. Kaikki testikoordinaatit mahtuvat gridiin (y < 448, cell-y < 28).
+const SIM_W := 4096
+const SIM_H := 448
 const MAT_EMPTY := 0
 const MAT_STONE := 3
 const MAT_DIRT := 11
@@ -173,7 +175,7 @@ func _count_mat_in_cell(w: FakeWorld, dx: int, dy: int, mat: int) -> int:
 func _test_miner_mines_stone_cell() -> void:
 	var w := _make_world()
 	var dx := 40
-	var dy := 40
+	var dy := 15  # cell-y < NH=28 (planeetta H=448)
 	_fill_rect(w, dx * DCELL, dy * DCELL, DCELL, DCELL, MAT_STONE)
 	w.nav.rebuild_full(w.grid)
 
@@ -208,7 +210,7 @@ func _test_miner_mines_stone_cell() -> void:
 func _test_miner_progresses_on_granular() -> void:
 	var w := _make_world()
 	var dx := 50
-	var dy := 50
+	var dy := 18  # cell-y < NH=28 (planeetta H=448)
 	_fill_rect(w, dx * DCELL, dy * DCELL, DCELL, DCELL, MAT_DIRT)
 	w.nav.rebuild_full(w.grid)
 
@@ -363,7 +365,7 @@ func _test_set_role_interrupts_claim_and_dumps_cargo() -> void:
 
 	# 1) Miner jolla on CLAIMED-designaatio -> roolinvaihto vapauttaa sen QUEUEDiksi.
 	var dx := 30
-	var dy := 30
+	var dy := 20  # cell-y < NH=28 (planeetta H=448)
 	w.desig.set_cell(dx, dy, D_CLAIMED)
 	var miner := bm.add_bot(Bot.Role.MINER, Vector2(dx * DCELL, dy * DCELL))
 	miner.target_cell = Vector2i(dx, dy)
@@ -467,7 +469,7 @@ func _test_hauler_routes_to_accepting_dump_zone() -> void:
 	bm.logistics = Logistics.new()
 
 	# Dump-vyohyke joka hyvaksyy IRON_ORE:n, sijoitettu basesta erilleen (ei paalla structure_pixels).
-	var dump_rect := Rect2i(1000, 500, 20, 20)
+	var dump_rect := Rect2i(1000, 300, 20, 20)
 	var dump_id := bm.logistics.add_dump_point(dump_rect, 1 << MAT_IRON_ORE)
 
 	var hauler := bm.add_bot(Bot.Role.HAULER, Vector2(1100, 100))
@@ -513,7 +515,7 @@ func _test_hauler_stays_idle_with_cargo_when_no_dump_accepts() -> void:
 	bm.setup(w)
 	bm.logistics = Logistics.new()
 	# Ainoa dump-vyohyke hyvaksyy vain DIRTin -> ei hyvaksy IRON_ORE-kuormaa.
-	bm.logistics.add_dump_point(Rect2i(1000, 500, 20, 20), 1 << MAT_DIRT)
+	bm.logistics.add_dump_point(Rect2i(1000, 300, 20, 20), 1 << MAT_DIRT)
 
 	var hauler := bm.add_bot(Bot.Role.HAULER, Vector2(1100, 100))
 	hauler.add_cargo(MAT_IRON_ORE, 30)
@@ -739,8 +741,8 @@ func _run_overlap_sim() -> float:
 	w.base = null
 	var bm := BotManager.new()
 	bm.setup(w)
-	var b0 := bm.add_bot(Bot.Role.MINER, Vector2(600.0, 600.0))
-	var b1 := bm.add_bot(Bot.Role.MINER, Vector2(600.0, 600.0))
+	var b0 := bm.add_bot(Bot.Role.MINER, Vector2(600.0, 300.0))
+	var b1 := bm.add_bot(Bot.Role.MINER, Vector2(600.0, 300.0))
 	for _i in 8:
 		bm.tick(0.067)
 	return b0.pos.distance_to(b1.pos)
@@ -754,12 +756,12 @@ func _test_separation_push_capped() -> void:
 	w.base = null
 	var bm := BotManager.new()
 	bm.setup(w)
-	var center := bm.add_bot(Bot.Role.MINER, Vector2(500.0, 500.0))
+	var center := bm.add_bot(Bot.Role.MINER, Vector2(500.0, 300.0))
 	# 8 naapuria kaikki +x-puolella (SEP_RADIUS=12 sisalla) -> nettotyonto -x, raaka pituus > 1.
 	var offs := [Vector2(2, 0), Vector2(3, 0), Vector2(4, 0), Vector2(2, 2),
 			Vector2(3, 2), Vector2(2, -2), Vector2(3, -2), Vector2(4, 1)]
 	for off in offs:
-		bm.add_bot(Bot.Role.MINER, Vector2(500.0, 500.0) + off)
+		bm.add_bot(Bot.Role.MINER, Vector2(500.0, 300.0) + off)
 	bm._build_crowd_index()
 	var before := center.pos
 	var delta := 0.067
@@ -809,9 +811,9 @@ func _test_timed_dump_drains_over_time() -> void:
 	bm.setup(w)
 	bm.logistics = Logistics.new()
 	# Iso dump-vyohyke joka hyvaksyy DIRTin (mahtuu koko kuorma reilusti).
-	var dump_rect := Rect2i(1000, 500, 30, 30)
+	var dump_rect := Rect2i(1000, 300, 30, 30)
 	bm.logistics.add_dump_point(dump_rect, 1 << MAT_DIRT)
-	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1015.0, 515.0))
+	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1015.0, 315.0))
 	b.add_cargo(MAT_DIRT, 40)
 	b.dump_target = bm.logistics.choose_dump(b.cargo, b.pos)
 	b.state = Bot.BotState.DUMP
@@ -855,7 +857,7 @@ func _test_dump_cargo_conserved_when_destination_full() -> void:
 	bm.setup(w)
 	bm.logistics = Logistics.new()
 	# Pieni 3x3 dump-alue (9 solua); esitaytetaan 4 solua STONElla -> tilaa tasan 5 DIRT-px.
-	var dump_rect := Rect2i(1000, 500, 3, 3)
+	var dump_rect := Rect2i(1000, 300, 3, 3)
 	bm.logistics.add_dump_point(dump_rect, 1 << MAT_DIRT)
 	var filled := 0
 	for yy in range(dump_rect.position.y, dump_rect.position.y + dump_rect.size.y):
@@ -863,7 +865,7 @@ func _test_dump_cargo_conserved_when_destination_full() -> void:
 			if filled < 4:
 				w.grid[yy * SIM_W + xx] = MAT_STONE
 				filled += 1
-	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1001.0, 501.0))
+	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1001.0, 301.0))
 	b.add_cargo(MAT_DIRT, 20)
 	b.dump_target = bm.logistics.choose_dump(b.cargo, b.pos)
 	b.state = Bot.BotState.DUMP
@@ -895,9 +897,9 @@ func _test_dump_watchdog_sells_leftover() -> void:
 	var bm := BotManager.new()
 	bm.setup(w)
 	bm.logistics = Logistics.new()
-	var dump_rect := Rect2i(1000, 500, 30, 30)
+	var dump_rect := Rect2i(1000, 300, 30, 30)
 	bm.logistics.add_dump_point(dump_rect, 1 << MAT_DIRT)
-	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1015.0, 515.0))
+	var b := bm.add_bot(Bot.Role.HAULER, Vector2(1015.0, 315.0))
 	b.add_cargo(MAT_DIRT, 30)
 	b.dump_target = bm.logistics.choose_dump(b.cargo, b.pos)
 	b.state = Bot.BotState.DUMP
