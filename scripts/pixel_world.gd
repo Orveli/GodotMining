@@ -159,7 +159,7 @@ var paint_pending := false
 
 # ── P1: Dirty-rect-osittainen GPU-upload + asynkroninen readback ──────────────
 # Dirty-alueseuranta: framen aikana CPU:lla muutetut gridin alueet kerätään
-# yhdistettyyn bounding boxiin, jotta _upload_paint_to_gpu() lataa GPU:lle vain
+# yhdistettyyn bounding boxiin, jotta _simulate_gpu():n dirty-upload lataa GPU:lle vain
 # muuttuneet rivit (yksi buffer_update per puskuri) eikä koko 1.6M-solun puskuria.
 # TURVAINVARIANTTI: downloadin/adoptoinnin ja seuraavan uploadin välissä ei aja
 # yhtään sim-passia, joten GPU:n packed-bufferit dirty-alueen ULKOPUOLELLA ovat
@@ -646,6 +646,11 @@ func _setup_compute() -> void:
 	gpu_ready = true
 	print("GPU compute shader valmis!")
 
+	# P1: onko asynkroninen readback käytettävissä (Godot 4.4+). Jos ei, käytetään
+	# synkronista fallbackia (_simulate_gpu hoitaa molemmat polut).
+	_async_readback_supported = rd.has_method("buffer_get_data_async")
+	print("P1: async readback ", "käytettävissä" if _async_readback_supported else "EI käytettävissä (synkroninen fallback)")
+
 	# Transfer shader setup
 	_setup_transfer()
 
@@ -844,6 +849,15 @@ func _process(delta: float) -> void:
 		])
 		fps_timer = 0.0
 
+	# ── P1: omaksu edellisen framen asynkroninen GPU-tulos CPU-peiliin ENNEN mitään
+	# CPU-kirjoituksia (pommit/input/intro/botit). Näin tuoreet kirjoitukset menevät
+	# peilin päälle eivätkä katoa, ja seuraava upload+sim sisältää ne. rd.sync() blokkaa
+	# vain jos GPU ei ehtinyt valmiiksi — tyypillisesti ~0 ms (laski framen rinnalla).
+	if gpu_ready:
+		var _t0_dl := Time.get_ticks_usec()
+		_apply_readback()
+		_t_download = float(Time.get_ticks_usec() - _t0_dl) / 1000.0
+
 	# Kaivaustyökalun cooldown
 	if pickaxe_cooldown > 0.0:
 		pickaxe_cooldown -= delta
@@ -865,35 +879,14 @@ func _process(delta: float) -> void:
 		_update_landing_intro(delta)
 
 	if gpu_ready:
-		# Vaihe 1: CA-simulaatio GPU:lla
-		# Maalaukset ladataan ennen simulaatiota jos paint_pending. Tämä pysyy AINA
-		# ehdottomana (ei sim_speed-riippuvainen): _download_from_gpu() alla ajetaan
-		# joka frame myös pausen aikana, joten pausella tehty maalaus katoaisi heti
-		# saman framen downloadissa jos sitä ei ladattaisi GPU:lle ensin.
-		if paint_pending:
-			_upload_paint_to_gpu()
-			paint_pending = false
-
+		# ── P1: uusi framerakenne ────────────────────────────────────────────────
+		# CPU-pelilogiikka (fysiikka/koneet/botit) ajetaan ENSIN: se lukee framen alussa
+		# adoptoitua peiliä (edellisen framen sim-tulos) ja kirjoittaa muutokset dirtyn
+		# kautta. GPU-submit (upload + CA-sim + extract + async readback) tehdään VASTA
+		# _process():n LOPUSSA (kaikkien CPU-kirjoitusten jälkeen), jolloin GPU laskee
+		# seuraavan framen CPU-työn rinnalla.
 		var _t0 := Time.get_ticks_usec()
-		# Ajan nopeus: pause (sim_speed = 0) ohittaa koko CA-kutsun -> ei yhtään Margolus-
-		# passia. Muuten passimäärä johdetaan kiinteästä perusarvosta simulaationopeuden
-		# mukaan: 1x=8, 2x=16, 3x=24, 4x=32 — aina >= 4 ja neljän monikerta, joten täydet
-		# Margolus-syklit pysyvät ehjinä. Skaalaus tehdään framejen VÄLISSÄ (ei kesken
-		# _simulate_gpu()-silmukan), joten offset-sykli ei katkea kesken framen.
-		if sim_speed > 0.0:
-			# maxi(1, roundi(...)): murtoluku-sim_speed (esim. skenaarion 0.5) ei saa
-			# tiputtaa passeja nollaan kun sim ei ole pausella (int() typisti).
-			gpu_passes = GPU_PASSES_BASE * maxi(1, roundi(sim_speed))
-			_simulate_gpu()
-		_t_gpu = float(Time.get_ticks_usec() - _t0) / 1000.0
-
-		# Lataa tulos takaisin CPU:lle
-		_t0 = Time.get_ticks_usec()
-		_download_from_gpu()
-		_t_download = float(Time.get_ticks_usec() - _t0) / 1000.0
-
 		# Vaihe 2b: Skannaa kivi-kappaleet ensimmäisellä framella (tai resetin jälkeen)
-		_t0 = Time.get_ticks_usec()
 		if not physics_initialized:
 			physics_world.scan_stone_bodies(grid, color_seed, W, SIM_HEIGHT)
 			physics_initialized = true
@@ -978,13 +971,12 @@ func _process(delta: float) -> void:
 			if bot_overlay != null:
 				bot_overlay.queue_redraw()
 
-		# Vaihe 6: Lataa CPU:n muutokset GPU:lle — yhdistetty lataus
-		# paint_pending voi asettua uudelleen logiikan aikana (esim. explode())
-		# grid_modified = fysiikka/logiikka muutti gridiä
-		# → ladataan kerran kattaen molemmat, ei koskaan kahdesti per frame
-		if grid_modified or paint_pending:
-			_upload_paint_to_gpu()
-			paint_pending = false
+		# HUOM: GPU-submit (_simulate_gpu) EI ole enää tässä — se ajetaan _process():n LOPUSSA
+		# kaikkien CPU-kirjoitusten (input/logiikka/skenaario) JÄLKEEN, jotta framen kaikki
+		# muutokset ehtivät dirty-lataukseen ennen simua eivätkä katoa seuraavan framen
+		# _apply_readback-adoptoinnissa. grid_modified pidetään yllä luettavuussyistä.
+		if grid_modified:
+			pass
 	else:
 		# Headless / GPU-eton polku (esim. --headless-testiajo): CA ei paivity, joten grid
 		# pysyy worldgenin + bottikirjoitusten mukaisena CPU:lla. Aja pelkka bottisimulaatio
@@ -1045,6 +1037,24 @@ func _process(delta: float) -> void:
 	# Päivitä rakennuskerroksen skaalaus (grid → screen)
 	if building_layer and size.x > 0:
 		building_layer.scale = Vector2(size.x / float(W), size.y / float(SIM_HEIGHT))
+
+	# ── P1: GPU-submit VIIMEISENÄ ────────────────────────────────────────────────
+	# Ajetaan vasta kun KAIKKI framen CPU-kirjoitukset (input, pelilogiikka, skenaario-
+	# fill_rect/place_body, jne.) on tehty — muuten niiden dirty ehtisi mennä simun ohi ja
+	# seuraavan framen _apply_readback ylikirjoittaisi ne peilistä (= katoaisivat). Nyt kaikki
+	# framen muutokset ladataan GPU:lle, simuloidaan, ja tulos omaksutaan ensi framessa.
+	# Pause (sim_speed=0) ohittaa simun: dirty kertyy ja ladataan vasta kun sim jatkuu; näkyvä
+	# kuva päivittyy silti heti _upload_render():stä (CPU-peili) — pause ei tarvitse GPU-kierrosta.
+	if gpu_ready:
+		var _t0_gpu := Time.get_ticks_usec()
+		if sim_speed > 0.0:
+			# maxi(1, roundi(...)): murtoluku-sim_speed (esim. skenaarion 0.5) ei saa tiputtaa
+			# passeja nollaan kun sim ei ole pausella. Passimäärä asetetaan framejen VÄLISSÄ
+			# (ei kesken _simulate_gpu()-silmukan) -> Margolus-offset-sykli pysyy ehjänä.
+			gpu_passes = GPU_PASSES_BASE * maxi(1, roundi(sim_speed))
+			_simulate_gpu()
+			paint_pending = false
+		_t_gpu = float(Time.get_ticks_usec() - _t0_gpu) / 1000.0
 
 
 func _handle_input(_delta: float) -> void:
@@ -1281,7 +1291,7 @@ const MAT_DISPLAY_NAMES := {
 
 # Kursorin alla olevan materiaalin näyttönimi hover-inspektointiin. Palauttaa tyhjän
 # merkkijonon jos kursori on ruudun ulkopuolella tai tyhjän (EMPTY) päällä. Lukee
-# CPU-peilikuvan gridistä, joka ladataan GPU:lta joka frame (_download_from_gpu),
+# CPU-peilikuvan gridistä, joka omaksutaan GPU:lta joka frame (_apply_readback),
 # joten myös irtopikselit (putoava hiekka/sora ym.) näkyvät oikein.
 func hovered_material_name() -> String:
 	var gp := _mouse_to_grid()
@@ -2746,7 +2756,7 @@ func _cut(cx: int, cy: int) -> void:
 
 # ── P1: dirty-alueen merkitsijät ─────────────────────────────────────────────
 # Kaikki CPU-kirjoitukset grid/color_seed-taulukoihin kulkevat näiden kautta niin,
-# että _upload_paint_to_gpu() osaa ladata GPU:lle vain muuttuneet rivit. Burstit ja
+# että _simulate_gpu():n dirty-upload osaa ladata GPU:lle vain muuttuneet rivit. Burstit ja
 # epävarmat polut (fysiikka, räjähdykset, worldgen) merkitsevät koko maailman likaiseksi
 # — korrektius ennen optimaalisuutta; steady-state (botit + koneet) pysyy osittaisena.
 func _mark_grid_dirty_all() -> void:
@@ -2840,40 +2850,30 @@ func _add_pack_pass(cl: int) -> void:
 	rd.compute_list_dispatch(cl, ceili(float(total_quads) / 64.0), 1, 1)
 
 
-func _upload_paint_to_gpu() -> void:
-	# Turvaverkko: jos joku polku asetti paint_pending mutta ei merkinnyt dirtyä,
-	# tehdään täysi lataus ettei GPU jää jälkeen (desync). Ei pitäisi tapahtua —
-	# kaikki kirjoituspolut on instrumentoitu — mutta halpa varmistus.
-	if not _dirty_all and not _dirty_any:
-		if not _warned_dirty_fallback:
-			_warned_dirty_fallback = true
-			print("P1 WARN: _upload_paint_to_gpu ilman dirty-merkintää -> täysi lataus")
-		_dirty_all = true
-	if transfer_ready:
-		# GPU-pakkaus: lataa vain dirty-rivit packed-buffereihin ja aja pack-shader.
-		_buffer_update_packed_dirty()
-		var cl := rd.compute_list_begin()
-		_add_pack_pass(cl)
-		rd.compute_list_end()
-		rd.submit()
-		rd.sync()
-	else:
-		# Fallback: GDScript-looppi (koko puskuri; ei transfer-shaderia)
-		if _gpu_upload_buf.size() != TOTAL * 4:
-			_gpu_upload_buf.resize(TOTAL * 4)
-			_gpu_upload_buf.fill(0)
-		var i := 0
-		var off := 0
-		while i < TOTAL:
-			_gpu_upload_buf[off] = grid[i]
-			_gpu_upload_buf[off + 1] = color_seed[i]
-			i += 1
-			off += 4
-		rd.buffer_update(grid_buffer, 0, _gpu_upload_buf.size(), _gpu_upload_buf)
-	_reset_grid_dirty()
+# Non-transfer-fallback (transfer_ready == false): kirjoita koko CPU-peili suoraan
+# grid_bufferiin interleaved-muodossa (mat + seed / solu). Käytetään vain jos transfer-
+# shaderi ei kääntynyt; normaalipeli käyttää packed-puskureita + pack-passia.
+func _upload_grid_buffer_full() -> void:
+	if _gpu_upload_buf.size() != TOTAL * 4:
+		_gpu_upload_buf.resize(TOTAL * 4)
+		_gpu_upload_buf.fill(0)
+	var i := 0
+	var off := 0
+	while i < TOTAL:
+		_gpu_upload_buf[off] = grid[i]
+		_gpu_upload_buf[off + 1] = color_seed[i]
+		i += 1
+		off += 4
+	rd.buffer_update(grid_buffer, 0, _gpu_upload_buf.size(), _gpu_upload_buf)
 
 
 func _simulate_gpu() -> void:
+	# ── P1: aktiivisen framen GPU-työ yhtenä submitina (ei synkronista stallia) ──
+	# 1) Lataa CPU-peilin dirty-rivit packed-buffereihin ja aja pack (packed→grid_buffer)
+	# 2) Aja CA-sim-passit + extract (grid_buffer→packed)
+	# 3) Pyydä asynkroninen readback packed-buffereista (adoptoidaan ENSI framessa)
+	# 4) submit ILMAN synciä — sync tehdään ensi framen alussa (_apply_readback), jolloin
+	#    GPU ehtii laskea koko framen ajan CPU-logiikan ja Godotin renderöinnin rinnalla.
 	# Per-pikseli dispatch: jokainen pikseli = yksi thread
 	var groups_x := ceili(float(W) / 16.0)
 	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
@@ -2886,7 +2886,32 @@ func _simulate_gpu() -> void:
 
 	var t0 := Time.get_ticks_usec()
 
+	# Turvaverkko: jos joku kirjoituspolku asetti paint_pending mutta ei merkinnyt dirtyä,
+	# tehdään täysi lataus ettei GPU jää jälkeen (desync). Kaikki polut on instrumentoitu —
+	# tämä on halpa varmistus. (paint_pending nollataan _process():ssa _simulate_gpu jälkeen.)
+	if paint_pending and not _dirty_all and not _dirty_any:
+		if not _warned_dirty_fallback:
+			_warned_dirty_fallback = true
+			print("P1 WARN: paint_pending ilman dirty-merkintää -> täysi lataus")
+		_dirty_all = true
+
+	# Non-transfer-fallback: ei packed-puskureita -> kirjoita koko grid_buffer suoraan.
+	if not transfer_ready:
+		if _dirty_all or _dirty_any:
+			_upload_grid_buffer_full()
+
+	# Dirty-upload (transfer-polku): siirrä CPU:n muutokset packed-buffereihin ennen pack-passia.
+	var did_upload := transfer_ready and (_dirty_all or _dirty_any)
+	if did_upload:
+		_buffer_update_packed_dirty()
+
 	var cl := rd.compute_list_begin()
+
+	# Pack-passi (packed→grid_buffer) vain jos CPU kirjoitti tällä framella. Ajetaan koko
+	# puskurille (halpaa GPU-työtä); kallis osa oli CPU→GPU-siirto jonka dirty leikkaa.
+	if did_upload:
+		_add_pack_pass(cl)
+		rd.compute_list_add_barrier(cl)
 
 	for pass_i in gpu_passes:
 		if pass_i > 0:
@@ -2940,35 +2965,80 @@ func _simulate_gpu() -> void:
 		rd.compute_list_dispatch(cl, groups_x_r, groups_y_r, 1)
 
 	rd.compute_list_end()
-	rd.submit()
-	rd.sync()
 
-	# Mittaa GPU-aika (F4-debugvalikko lukee gpu_time_ms). Passimäärää EI enää säädetä
-	# adaptiivisesti: passit ovat kiinteät (GPU_PASSES_BASE * sim_speed) determinismin
-	# vuoksi, ja _process() asettaa gpu_passesin framejen välissä.
+	# Dirty nollataan heti — sim on submitattu ja packed sisältää tulevan tuloksen.
+	_reset_grid_dirty()
+
+	if transfer_ready and _async_readback_supported:
+		# Pyydä asynkroninen readback: callbackit laukeavat ensi framen rd.sync():ssä.
+		_readback_got_grid = false
+		_readback_got_seed = false
+		rd.buffer_get_data_async(mat_packed_buffer, _on_grid_readback)
+		rd.buffer_get_data_async(seed_packed_buffer, _on_seed_readback)
+		rd.submit()
+		_gpu_submitted = true
+		_readback_pending = true
+	else:
+		# Fallback (vanha Godot ilman async-readbackia): synkroninen submit + sync + luku.
+		rd.submit()
+		rd.sync()
+		_gpu_submitted = false
+		_readback_pending = false
+		if transfer_ready:
+			grid = rd.buffer_get_data(mat_packed_buffer)
+			color_seed = rd.buffer_get_data(seed_packed_buffer)
+			if grid.size() > TOTAL:
+				grid = grid.slice(0, TOTAL)
+			if color_seed.size() > TOTAL:
+				color_seed = color_seed.slice(0, TOTAL)
+		else:
+			var out_buf := rd.buffer_get_data(grid_buffer)
+			var j := 0
+			var o := 0
+			while j < TOTAL:
+				grid[j] = out_buf[o]
+				color_seed[j] = out_buf[o + 1]
+				j += 1
+				o += 4
+
+	# Mittaa GPU-aika (F4-debugvalikko lukee gpu_time_ms). Async-tilassa tämä on lähinnä
+	# compute-listan rakennus + submit (ei GPU-odotusta) — todellinen odotus näkyy
+	# _t_download-mittarissa (_apply_readback:n rd.sync()).
 	gpu_time_ms = float(Time.get_ticks_usec() - t0) / 1000.0
 
 
-func _download_from_gpu() -> void:
-	if transfer_ready:
-		# GPU-purettu data: suora lataus ilman GDScript-looppia
-		grid = rd.buffer_get_data(mat_packed_buffer)
-		color_seed = rd.buffer_get_data(seed_packed_buffer)
-		# Trimmaa jos bufferi on isompi kuin TOTAL
-		if grid.size() > TOTAL:
-			grid = grid.slice(0, TOTAL)
-		if color_seed.size() > TOTAL:
-			color_seed = color_seed.slice(0, TOTAL)
-	else:
-		# Fallback: GDScript-looppi
-		var output := rd.buffer_get_data(grid_buffer)
-		var i := 0
-		var off := 0
-		while i < TOTAL:
-			grid[i] = output[off]
-			color_seed[i] = output[off + 1]
-			i += 1
-			off += 4
+# P1: async-readback-callbackit. Godot kutsuu näitä rd.sync():n aikana ja antaa
+# packed-datan (1 tavu/solu). Ei omaksuta tässä — vain talteen; adoptointi tehdään
+# _apply_readback():ssa framen alussa hallitussa järjestyksessä.
+func _on_grid_readback(data: PackedByteArray) -> void:
+	_pending_grid = data
+	_readback_got_grid = true
+
+
+func _on_seed_readback(data: PackedByteArray) -> void:
+	_pending_seed = data
+	_readback_got_seed = true
+
+
+# P1: framen alussa (ennen CPU-kirjoituksia): kuittaa edellisen framen GPU-työ ja
+# omaksu sen sim-tulos CPU-peiliin. rd.sync() blokkaa vain jos GPU ei ehtinyt valmiiksi;
+# tyypillisesti se on jo valmis (laski CPU-logiikan + Godot-renderin rinnalla) -> ~0 ms.
+# CPU-peili on siis 1 framen vanha sim-tila. Renderöinti kulkee peilin kautta (_upload_render),
+# joten näkyvä kuva on 1 framen jäljessä simulaatiosta — 60 fps:llä ~16 ms, ei havaittava.
+# Tuoreet CPU-kirjoitukset (maalaus/botit) tehdään adoptoinnin JÄLKEEN, joten ne näkyvät heti
+# eivätkä katoa; ja koska ne ladataan GPU:lle ennen simua, seuraava readback sisältää ne.
+func _apply_readback() -> void:
+	if not (_gpu_submitted and _readback_pending):
+		return
+	rd.sync()
+	_gpu_submitted = false
+	_readback_pending = false
+	if _readback_got_grid and _pending_grid.size() >= TOTAL:
+		grid = _pending_grid.slice(0, TOTAL) if _pending_grid.size() > TOTAL else _pending_grid
+	if _readback_got_seed and _pending_seed.size() >= TOTAL:
+		color_seed = _pending_seed.slice(0, TOTAL) if _pending_seed.size() > TOTAL else _pending_seed
+	_readback_got_grid = false
+	_readback_got_seed = false
 
 
 func _upload_render() -> void:
@@ -6033,6 +6103,12 @@ func _autofill_test() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		if gpu_ready and rd != null:
+			# P1: kuittaa mahdollinen kesken oleva asynkroninen submit ennen RID-vapautusta,
+			# ettei GPU ole työn kesken / async-callback laukea vapautetun tilan päälle.
+			if _gpu_submitted:
+				rd.sync()
+				_gpu_submitted = false
+				_readback_pending = false
 			rd.free_rid(pipeline)
 			rd.free_rid(uniform_set)
 			rd.free_rid(grid_buffer)
