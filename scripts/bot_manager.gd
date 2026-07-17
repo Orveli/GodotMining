@@ -8,14 +8,16 @@ class_name BotManager
 extends RefCounted
 
 # --- Simulaatioruudukko (kontraktin mukainen kiinteä koko) ---
-const SIM_W := 1664
-const SIM_H := 960
+# Planeetta: x-akseli jaksollinen (sauma x=0 <-> x=SIM_W-1). Liike/etaisyydet/skannaus
+# wrapaavat x:ssa PlanetGeom-apureilla; y (syvyys) ei wrappaa.
+const SIM_W := 4096
+const SIM_H := 448
 
 # --- Designaatiogridi (peilaus DesignationGridista) ---
 # DCELL = NCELL = 16 -> designaatiosolu vastaa navsolua 1:1 (saavutettavuus suoraviivainen).
 const DCELL := 16
-const GW := 104
-const GH := 60
+const GW := 256
+const GH := 28
 const D_NONE := 0
 const D_QUEUED := 1
 const D_BLOCKED := 2
@@ -37,8 +39,8 @@ const IDLE_REASON_WAITING_CHARGER := 6
 
 # --- Navigaatiogridi (peilaus NavGridista) ---
 const NCELL := 16
-const NW := 104
-const NH := 60
+const NW := 256
+const NH := 28
 
 # --- Materiaali-ID:t ---
 const MAT_EMPTY := 0
@@ -493,7 +495,8 @@ func _tick_cooldowns(delta: float) -> void:
 func _build_crowd_index() -> void:
 	_crowd_index.clear()
 	for b in bots:
-		var cx := clampi(int(b.pos.x), 0, SIM_W - 1) / NCELL
+		# x wrappaa (jaksollinen); y clampataan gridiin ennen jakoa NCELLilla.
+		var cx := PlanetGeom.wrap_x(int(b.pos.x), SIM_W) / NCELL
 		var cy := clampi(int(b.pos.y), 0, SIM_H - 1) / NCELL
 		var key := cy * NW + cx
 		if _crowd_index.has(key):
@@ -508,7 +511,8 @@ func _build_crowd_index() -> void:
 # olla samassa pisteessa).
 func _crowd_neighbors(b: Bot, radius: float) -> Array:
 	var res: Array = []
-	var bcx := clampi(int(b.pos.x), 0, SIM_W - 1) / NCELL
+	# x wrappaa (jaksollinen); y clampataan gridiin.
+	var bcx := PlanetGeom.wrap_x(int(b.pos.x), SIM_W) / NCELL
 	var bcy := clampi(int(b.pos.y), 0, SIM_H - 1) / NCELL
 	for oy in range(-1, 2):
 		var cy := bcy + oy
@@ -516,16 +520,16 @@ func _crowd_neighbors(b: Bot, radius: float) -> Array:
 			continue
 		var row := cy * NW
 		for ox in range(-1, 2):
-			var cx := bcx + ox
-			if cx < 0 or cx >= NW:
-				continue
+			# x-naapurusto wrappaa sauman yli; vain y rajaa gridin ulkopuolen.
+			var cx := PlanetGeom.wrap_x(bcx + ox, NW)
 			var key := row + cx
 			if not _crowd_index.has(key):
 				continue
 			for other in (_crowd_index[key] as Array):
 				if other == b:
 					continue
-				var dd: float = b.pos.distance_to(other.pos)
+				# Toroidaalinen etaisyys (x jaksollinen -> lyhin sauman yli).
+				var dd: float = PlanetGeom.torus_dist(b.pos, other.pos, float(SIM_W))
 				if dd <= radius:
 					res.append([other, dd])
 	return res
@@ -554,13 +558,14 @@ func _apply_separation(b: Bot, delta: float) -> void:
 			# EI randf: toistettavuus testeissa + NaN-suoja (ei nollajakoa).
 			push += Vector2.RIGHT.rotated(float(b.id) * 2.399963)
 		else:
-			# Suunta pois naapurista, paino kasvaa mita lahempana ollaan (1 kun paallekkain).
-			push += (b.pos - other.pos) / dd * (1.0 - dd / SEP_RADIUS)
+			# Suunta pois naapurista (x toroidaalinen: lyhin sauman yli), paino kasvaa lahella.
+			var to_b := Vector2(PlanetGeom.wrap_dx(other.pos.x, b.pos.x, float(SIM_W)), b.pos.y - other.pos.y)
+			push += to_b / dd * (1.0 - dd / SEP_RADIUS)
 	# WORK/DUMP vaimennetaan: jono saa tiivistya tyopisteessa (ei tyonna pois tyosta).
 	var mult := SEP_WORK_MULT if (b.state == Bot.BotState.WORK or b.state == Bot.BotState.DUMP) else 1.0
 	b.pos += push.limit_length(1.0) * b.move_speed() * SEP_FACTOR * mult * delta
-	# Klampaa sim-rajoihin (drone ei saa karata ruudukon ulkopuolelle).
-	b.pos.x = clampf(b.pos.x, 0.0, float(SIM_W - 1))
+	# x wrappaa (jaksollinen, EI clamp -> botti liikkuu sauman yli); y clampataan (ei wrappaa).
+	b.pos.x = fposmod(b.pos.x, float(SIM_W))
 	b.pos.y = clampf(b.pos.y, 0.0, float(SIM_H - 1))
 
 
