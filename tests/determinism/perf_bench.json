@@ -1,0 +1,11 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 700, "w": 1664, "h": 260, "mat": 3 },
+    { "cmd": "fill_rect", "x": 0, "y": 400, "w": 1664, "h": 260, "mat": 1 },
+    { "cmd": "run_frames", "n": 500 },
+    { "cmd": "gpu_bench", "iters": 300, "passes": 8 },
+    { "cmd": "gpu_bench", "iters": 300, "passes": 32 }
+  ]
+}

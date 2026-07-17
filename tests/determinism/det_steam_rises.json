@@ -1,0 +1,10 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 150, "y": 180, "w": 101, "h": 41, "mat": 2 },
+    { "cmd": "fill_rect", "x": 150, "y": 221, "w": 101, "h": 10, "mat": 5 },
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "hash_grid", "label": "steam_rises" }
+  ]
+}

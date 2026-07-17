@@ -34,6 +34,15 @@ const SIM_HEIGHT := 960
 const TOTAL := SIM_WIDTH * SIM_HEIGHT
 const W := SIM_WIDTH
 
+# ── P2: tile-aktiivisuuskartta ───────────────────────────────────────────────
+# Yksi tile = 16×16 px = yksi compute-workgroup. Asettuneet (nukkuvat) tilet ohitetaan
+# GPU:lla early-outilla. Taulu on (W/16)×(H/16) uintia; solu = viimeisin sim_frame jolloin
+# tileen kirjoitettiin. W ja H ovat 16:n monikertoja -> ei osittaisia tilejä.
+const TILE_SIZE := 16
+const TILES_X := SIM_WIDTH / TILE_SIZE     # 104
+const TILES_Y := SIM_HEIGHT / TILE_SIZE    # 60
+const TILE_COUNT := TILES_X * TILES_Y      # 6240
+
 # CPU-puolen grid (maalaamista varten)
 var grid: PackedByteArray
 var color_seed: PackedByteArray
@@ -45,6 +54,16 @@ var pipeline: RID
 var grid_buffer: RID
 var uniform_set: RID
 var gpu_ready := false
+
+# ── P2: tile-aktiivisuuskartta (GPU-buffer + CPU-peili) ──────────────────────
+var activity_buffer: RID                       # GPU storage buffer, TILE_COUNT × uint32
+var _sim_frame: int = 1                         # monotoninen sim-frame (kasvaa vain kun passeja ajetaan)
+var tile_activity_enabled: bool = true          # early-out päällä; determinismivertailu sammuttaa
+var _activity_cpu: PackedInt32Array = PackedInt32Array()  # async-luettu peili (P3-rajapinta + laskuri, ~1 frame vanha)
+var _activity_active_count: int = 0             # aktiivisten tilejen määrä (FPS-lokin act:N)
+var _wake_row: PackedByteArray = PackedByteArray()        # uudelleenkäytetty puskuri CPU-herätyksen buffer_updateille
+var _pending_activity: PackedByteArray = PackedByteArray()  # async-readbackin väliaikaispuskuri
+var _readback_got_activity: bool = false
 
 # Transfer shader (GPU-purkaus/pakkaus)
 var transfer_shader_rid: RID
@@ -556,7 +575,12 @@ func _ready() -> void:
 	for arg in args:
 		if arg.begins_with("--scenario="):
 			_load_scenario(arg.substr(len("--scenario=")))
-			break
+		# P2: determinismivertailu — --activity=0 sammuttaa early-outin (kaikki tilet aktiivisia).
+		elif arg == "--activity=0" or arg == "--no-activity":
+			tile_activity_enabled = false
+			print("P2: tile-aktiivisuus (early-out) POIS — determinismivertailun referenssiajo")
+		elif arg == "--activity=1":
+			tile_activity_enabled = true
 
 	# ── Julkaisukehys (T3.1): title-overlay-gate ──────────────────────────────
 	# Ikkunallisessa ei-scenario-sessiossa peli boottaa TITLE-tilaan: simulaatio
@@ -633,12 +657,23 @@ func _setup_compute() -> void:
 
 	grid_buffer = rd.storage_buffer_create(gpu_data.size(), gpu_data)
 
-	# Uniform set
+	# P2: aktiivisuustaulu (TILE_COUNT × uint32), alustetaan nolliksi ("ei koskaan kirjoitettu").
+	var activity_zeros := PackedByteArray()
+	activity_zeros.resize(TILE_COUNT * 4)
+	activity_zeros.fill(0)
+	activity_buffer = rd.storage_buffer_create(activity_zeros.size(), activity_zeros)
+	_activity_cpu.resize(TILE_COUNT)
+
+	# Uniform set: binding 0 = grid_buffer, binding 1 = activity_buffer (P2)
 	var uniform := RDUniform.new()
 	uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 	uniform.binding = 0
 	uniform.add_id(grid_buffer)
-	uniform_set = rd.uniform_set_create([uniform], shader_rid, 0)
+	var u_act := RDUniform.new()
+	u_act.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_act.binding = 1
+	u_act.add_id(activity_buffer)
+	uniform_set = rd.uniform_set_create([uniform, u_act], shader_rid, 0)
 
 	# Pipeline
 	pipeline = rd.compute_pipeline_create(shader_rid)
@@ -842,10 +877,10 @@ func _process(delta: float) -> void:
 	_perf_ring_pos = (_perf_ring_pos + 1) % _PERF_RING_SIZE
 
 	if fps_timer >= 1.0:
-		print("FPS:%d | gpu:%.1fms dl:%.1fms gl:%.1fms ul:%.1fms | passes:%d" % [
+		print("FPS:%d | gpu:%.1fms dl:%.1fms gl:%.1fms ul:%.1fms | passes:%d | act:%d/%d" % [
 			Engine.get_frames_per_second(),
 			_t_gpu, _t_download, _t_gamelogic, _t_upload_render,
-			gpu_passes
+			gpu_passes, _activity_active_count, TILE_COUNT
 		])
 		fps_timer = 0.0
 
@@ -2895,6 +2930,15 @@ func _simulate_gpu() -> void:
 			print("P1 WARN: paint_pending ilman dirty-merkintää -> täysi lataus")
 		_dirty_all = true
 
+	# P2: kasvata sim-frame-laskuria (vain kun passeja ajetaan -> pausella leimat eivät vanhene).
+	# uint32 riittää ~2,2 vuodeksi @ 60 fps ennen wrap-aroundia -> ei käytännön ongelmaa.
+	_sim_frame += 1
+
+	# P2: herätä CPU-kirjoitusten (botit/louhinta/koneet/maalaus) kattamat tilet. Ilman tätä
+	# nukkuvaan alueeseen tehty CPU-kirjoitus jäisi simuloimatta (esim. louhittu sora ei putoaisi).
+	# Leimaus _sim_framella on aina >= tilen aiempi (vanhemman framen) leima -> ei clobber-riskiä.
+	_wake_dirty_tiles()
+
 	# Non-transfer-fallback: ei packed-puskureita -> kirjoita koko grid_buffer suoraan.
 	if not transfer_ready:
 		if _dirty_all or _dirty_any:
@@ -2924,8 +2968,8 @@ func _simulate_gpu() -> void:
 		push.encode_u32(24, grav_gun_pos.y if grav_gun_mode > 0 else 0)
 		push.encode_u32(28, grav_gun_mode)
 		push.encode_u32(32, grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius)
-		push.encode_u32(36, 0)   # käyttämätön
-		push.encode_u32(40, 0)   # käyttämätön
+		push.encode_u32(36, _sim_frame)                              # P2: sim-frame (leima + early-out-vertailu)
+		push.encode_u32(40, 1 if tile_activity_enabled else 0)       # P2: early-out päällä/pois
 		push.encode_u32(44, 0)
 
 		rd.compute_list_bind_compute_pipeline(cl, pipeline)
@@ -2973,8 +3017,11 @@ func _simulate_gpu() -> void:
 		# Pyydä asynkroninen readback: callbackit laukeavat ensi framen rd.sync():ssä.
 		_readback_got_grid = false
 		_readback_got_seed = false
+		_readback_got_activity = false
 		rd.buffer_get_data_async(mat_packed_buffer, _on_grid_readback)
 		rd.buffer_get_data_async(seed_packed_buffer, _on_seed_readback)
+		# P2: aktiivisuustaulu (pieni, ~25 kt) samassa async-kierroksessa -> laskuri + P3-rajapinta.
+		rd.buffer_get_data_async(activity_buffer, _on_activity_readback)
 		rd.submit()
 		_gpu_submitted = true
 		_readback_pending = true
@@ -2984,6 +3031,8 @@ func _simulate_gpu() -> void:
 		rd.sync()
 		_gpu_submitted = false
 		_readback_pending = false
+		# P2: aktiivisuustaulu synkronisesti laskuria + P3-rajapintaa varten.
+		_adopt_activity(rd.buffer_get_data(activity_buffer))
 		if transfer_ready:
 			grid = rd.buffer_get_data(mat_packed_buffer)
 			color_seed = rd.buffer_get_data(seed_packed_buffer)
@@ -3020,6 +3069,12 @@ func _on_seed_readback(data: PackedByteArray) -> void:
 	_readback_got_seed = true
 
 
+# P2: aktiivisuustaulun async-callback. Talteen; adoptointi _apply_readback():ssa.
+func _on_activity_readback(data: PackedByteArray) -> void:
+	_pending_activity = data
+	_readback_got_activity = true
+
+
 # P1: framen alussa (ennen CPU-kirjoituksia): kuittaa edellisen framen GPU-työ ja
 # omaksu sen sim-tulos CPU-peiliin. rd.sync() blokkaa vain jos GPU ei ehtinyt valmiiksi;
 # tyypillisesti se on jo valmis (laski CPU-logiikan + Godot-renderin rinnalla) -> ~0 ms.
@@ -3037,8 +3092,81 @@ func _apply_readback() -> void:
 		grid = _pending_grid.slice(0, TOTAL) if _pending_grid.size() > TOTAL else _pending_grid
 	if _readback_got_seed and _pending_seed.size() >= TOTAL:
 		color_seed = _pending_seed.slice(0, TOTAL) if _pending_seed.size() > TOTAL else _pending_seed
+	if _readback_got_activity:
+		_adopt_activity(_pending_activity)
 	_readback_got_grid = false
 	_readback_got_seed = false
+	_readback_got_activity = false
+
+
+# ── P2: aktiivisuustaulun apurit ─────────────────────────────────────────────
+# Omaksu GPU:lta luettu aktiivisuustaulu (byte->int32) CPU-peiliin ja laske aktiivisten
+# tilejen määrä (leima >= sim_frame-1). Peili on async-luvun takia ~1 framen vanha.
+func _adopt_activity(data: PackedByteArray) -> void:
+	if data.size() < TILE_COUNT * 4:
+		return
+	_activity_cpu = data.to_int32_array()
+	if _activity_cpu.size() > TILE_COUNT:
+		_activity_cpu = _activity_cpu.slice(0, TILE_COUNT)
+	var thresh := _sim_frame - 1
+	var n := 0
+	for i in TILE_COUNT:
+		if _activity_cpu[i] >= thresh:
+			n += 1
+	_activity_active_count = n
+
+
+# P2: herätä CPU-dirty-rectin kattamat tilet leimaamalla ne _sim_framella. Kirjoittaa
+# suoraan GPU:n activity_bufferiin (buffer_update) ennen sim-passeja. _dirty_all -> koko taulu.
+func _wake_dirty_tiles() -> void:
+	if not gpu_ready or not activity_buffer.is_valid():
+		return
+	if _dirty_all:
+		# Koko taulu _sim_framelle (yksi buffer_update, 25 kt).
+		if _wake_row.size() != TILE_COUNT * 4:
+			_wake_row.resize(TILE_COUNT * 4)
+		for i in TILE_COUNT:
+			_wake_row.encode_u32(i * 4, _sim_frame)
+		rd.buffer_update(activity_buffer, 0, _wake_row.size(), _wake_row)
+		return
+	if not _dirty_any:
+		return
+	# Osittainen: leimaa dirty-rectin kattamat tilet. Tile-rivi kerrallaan yhtenäinen väli.
+	var tx0 := clampi(_dirty_min_x / TILE_SIZE, 0, TILES_X - 1)
+	var tx1 := clampi(_dirty_max_x / TILE_SIZE, 0, TILES_X - 1)
+	var ty0 := clampi(_dirty_min_y / TILE_SIZE, 0, TILES_Y - 1)
+	var ty1 := clampi(_dirty_max_y / TILE_SIZE, 0, TILES_Y - 1)
+	var row_tiles := tx1 - tx0 + 1
+	if _wake_row.size() < row_tiles * 4:
+		_wake_row.resize(row_tiles * 4)
+	for i in row_tiles:
+		_wake_row.encode_u32(i * 4, _sim_frame)
+	for ty in range(ty0, ty1 + 1):
+		var off := (ty * TILES_X + tx0) * 4
+		rd.buffer_update(activity_buffer, off, row_tiles * 4, _wake_row.slice(0, row_tiles * 4))
+
+
+# ── P2: CPU-rajapinta P3:lle (dirty-alueiden CPU-skannaus) ───────────────────
+# Palauttaa tile-aktiivisuustaulun (leima = viimeisin sim_frame jolloin tileen kirjoitettiin).
+# HUOM: async-readbackin takia taulu on ~1 framen vanha — P3 voi käyttää tätä karkeaan
+# "mihin kannattaa skannata" -päätökseen, ei framen tarkkaan synkronointiin.
+func get_tile_activity() -> PackedInt32Array:
+	return _activity_cpu
+
+
+# P2: oliko tile (tx,ty) aktiivinen viimeisen max_age framen aikana. Perustuu CPU-peiliin
+# (~1 frame vanha). Käytä P3:ssa: skannaa CPU-fysiikka/tuki vain aktiivisille alueille.
+func is_tile_active_recent(tx: int, ty: int, max_age: int) -> bool:
+	if tx < 0 or tx >= TILES_X or ty < 0 or ty >= TILES_Y:
+		return false
+	if _activity_cpu.size() < TILE_COUNT:
+		return true  # ei vielä dataa -> oletus aktiivinen (turvallinen)
+	return _activity_cpu[ty * TILES_X + tx] + max_age >= _sim_frame
+
+
+# P2: onko solun (x,y) tile aktiivinen viimeisen max_age framen aikana (P3-mukavuusmetodi).
+func is_cell_active_recent(x: int, y: int, max_age: int) -> bool:
+	return is_tile_active_recent(x / TILE_SIZE, y / TILE_SIZE, max_age)
 
 
 func _upload_render() -> void:
@@ -5267,6 +5395,18 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			var path: String = step.get("path", "")
 			_save_debug_image(path)
 			print("ScenarioRunner: export -> %s" % path)
+		"hash_grid":
+			# P2: determinismivertailu — tulosta materiaali-gridin hash + per-materiaali-laskurit.
+			# Aja skenaario --activity=1 ja --activity=0 ja vertaa: HASH pitää täsmätä bit-tarkasti.
+			var hlabel: String = step.get("label", "")
+			_scenario_hash_grid(hlabel)
+		"gpu_bench":
+			# P2: mittaa PUHDAS GPU-sim-aika synkronisesti (ohittaa P1:n async-pipelinen joka
+			# piilottaa GPU-ajan). Ajaa vain CA-passit submit+sync N kertaa nykyisellä (asettuneella)
+			# grid-tilalla ja raportoi ms/frame. Vertaa --activity=1 vs --activity=0.
+			var iters: int = step.get("iters", 200)
+			var bpasses: int = step.get("passes", 0)  # 0 = käytä nykyistä gpu_passes
+			_scenario_gpu_bench(iters, bpasses)
 		"assert_material":
 			var ax: int = step.get("x", 0)
 			var ay: int = step.get("y", 0)
@@ -5813,6 +5953,88 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 	_ca_expand_bounds(Rect2i(x, y, w, h))
 
 
+# P2: synkroninen GPU-sim-mikrobenchmark. Ajaa vain CA-passit (ei pack/extract/render/readback)
+# submit+sync iters kertaa nykyisellä grid_buffer-tilalla ja mittaa seinäkelloajan/frame. Koska
+# P1:n async-pipeline piilottaa GPU-ajan (gpu:ms = vain komentojen tallennus), tämä on ainoa tapa
+# nähdä early-outin todellinen GPU-säästö asettuneessa maailmassa. sim_frame pidetään vakiona ->
+# asettuneet tilet nukkuvat (realistinen steady-state-kustannus). Idempotentti: settled ei kirjoita.
+func _scenario_gpu_bench(iters: int, passes_override: int = 0) -> void:
+	if not gpu_ready:
+		print("gpu_bench: gpu_ready=false, ohitetaan")
+		return
+	var bench_passes: int = passes_override if passes_override > 0 else gpu_passes
+	var groups_x := ceili(float(W) / 16.0)
+	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
+	var push := PackedByteArray()
+	push.resize(48)
+	push.encode_u32(0, W)
+	push.encode_u32(4, SIM_HEIGHT)
+	push.encode_u32(16, 0)
+	push.encode_u32(20, 0)
+	push.encode_u32(24, 0)
+	push.encode_u32(28, 0)   # grav_gun_mode = 0
+	push.encode_u32(32, 0)
+	push.encode_u32(36, _sim_frame)
+	push.encode_u32(40, 1 if tile_activity_enabled else 0)
+	push.encode_u32(44, 0)
+	# Lämmittely jotta ajurin/pipelinen alustus ei vääristä mittausta
+	for warm in 2:
+		var wcl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(wcl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(wcl, pipeline)
+			rd.compute_list_bind_uniform_set(wcl, uniform_set, 0)
+			rd.compute_list_set_push_constant(wcl, push, push.size())
+			rd.compute_list_dispatch(wcl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var t0 := Time.get_ticks_usec()
+	for it in iters:
+		var cl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(cl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(cl, pipeline)
+			rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
+			rd.compute_list_set_push_constant(cl, push, push.size())
+			rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var ms := float(Time.get_ticks_usec() - t0) / 1000.0 / float(iters)
+	print("gpu_bench: activity=%d passes=%d act=%d/%d -> %.4f ms/frame (%d iters, synk. submit+sync)" % [
+		1 if tile_activity_enabled else 0, bench_passes, _activity_active_count, TILE_COUNT, ms, iters])
+
+
+# P2: hashaa materiaali-grid (FNV-1a) + per-materiaali-laskurit. Käytetään determinismi-
+# vertailussa: sama skenaario --activity=1 vs --activity=0 -> HASH pitää olla identtinen.
+# Hashataan vain materiaali-ID:t (grid[]), ei seediä (seed liikkuu solun mukana mutta on
+# renderöintikoriste — merkityksellinen käyttäytymisero näkyy materiaalijakaumassa).
+func _scenario_hash_grid(label: String) -> void:
+	var h: int = -3750763034362895579  # FNV-1a 64-bit offset basis (wrapping int64)
+	var prime: int = 1099511628211
+	var counts := {}
+	for i in TOTAL:
+		var m: int = grid[i]
+		h = (h ^ m) * prime
+		if m != MAT_EMPTY:
+			counts[m] = counts.get(m, 0) + 1
+	# Järjestä laskurit materiaali-ID:n mukaan vakaan tulosteen vuoksi
+	var keys := counts.keys()
+	keys.sort()
+	var parts := PackedStringArray()
+	for k in keys:
+		parts.append("%d:%d" % [k, counts[k]])
+	print("ScenarioRunner: HASH [%s] activity=%d hash=%d counts={%s}" % [
+		label, 1 if tile_activity_enabled else 0, h, ", ".join(parts)])
+
+
 func _scenario_place_body(x: int, y: int, w: int, h: int, mat: int) -> void:
 	_mark_grid_dirty_all()  # P1: skenaario-kappaleen sijoitus -> täysi lataus
 	# Kirjoita pikselit gridiin ja luo dynaaminen fysiikkakappale
@@ -6112,6 +6334,8 @@ func _notification(what: int) -> void:
 			rd.free_rid(pipeline)
 			rd.free_rid(uniform_set)
 			rd.free_rid(grid_buffer)
+			if activity_buffer.is_valid():
+				rd.free_rid(activity_buffer)  # P2: aktiivisuustaulu
 			rd.free_rid(shader_rid)
 			# Transfer-shaderin resurssit vuotivat aiemmin exitissa (1 Compute + 2
 			# StorageBuffer + 1 Shader -varoitukset) — vapautetaan samassa syklissa.
