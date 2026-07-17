@@ -939,12 +939,20 @@ func _process(delta: float) -> void:
 					has_active = true
 					break
 			if has_active and sim_speed > 0.0:
+				# P3: merkitse likaisiksi vain kappaleiden AABB:t (P1:n koko-maailma-latauksen
+				# sijaan). Kerää AABB:t ENNEN steppiä (vanha sijainti: erase kirjoittaa sinne)
+				# ja stepin JÄLKEEN (uusi sijainti + stepin heräyttämät nukkuvat kappaleet).
+				# Molemmat merkitään -> unioni kattaa erase- ja write-solut + nesteensyrjäytyksen.
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 				physics_world.step(grid, color_seed, W, SIM_HEIGHT)
 				grid_modified = true
-				# P1: fysiikka kirjoittaa hajautetusti (erase-vanha + write-uusi useille
-				# kappaleille) -> merkitse koko maailma likaiseksi. Bursti-polku (vain kun
-				# kappaleita putoaa); steady-state (kappaleet nukkuvat) ei tule tänne.
-				_mark_grid_dirty_all()
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 
 		# Vaihe 4: Puun tuki joka 120. frame — P3: portitettu aktiivisuudella.
 		# Aja täysi BFS VAIN jos jokin tile on ollut aktiivinen edellisen tarkistuksen
@@ -2852,6 +2860,22 @@ func _mark_grid_dirty(x0: int, y0: int, x1: int, y1: int) -> void:
 func _reset_grid_dirty() -> void:
 	_dirty_all = false
 	_dirty_any = false
+
+
+# P3: merkitse yhden rigid bodyn maailma-AABB likaiseksi. Käyttää RigidBodyData:n
+# rot-cachea (kierrettyjen offsettien AABB); maailma-AABB = offset + roundi(position).
+# Marginaali kattaa nesteensyrjäytyksen (kirjoittaa ±1 solun kappaleen ulkopuolelle)
+# sekä pienet nukahtamis-snap-siirtymät. filled-cachen aukontäyttö-pikselit mahtuvat
+# rot-AABB:n sisään (interpoloidut välipisteet), joten rot-AABB riittää.
+const BODY_DIRTY_PAD := 3
+func _mark_body_dirty(body: RigidBodyData) -> void:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	_mark_grid_dirty(
+		body.rot_min_x + px - BODY_DIRTY_PAD, body.rot_min_y + py - BODY_DIRTY_PAD,
+		body.rot_max_x + px + BODY_DIRTY_PAD, body.rot_max_y + py + BODY_DIRTY_PAD
+	)
 
 
 # Merkitse koneen jalanjälki likaiseksi: rakenne grid_pos..+(w,h) plus reilu marginaali
