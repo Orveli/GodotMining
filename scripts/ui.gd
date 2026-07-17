@@ -2317,6 +2317,9 @@ func _on_title_start_pressed() -> void:
 	_flow = Flow.PLAYING
 	_play_time = 0.0
 	pixel_world.sim_speed = 1.0
+	# M5: laskeutumisintro (visuaalinen). pixel_world gatettaa itse windowed/scenario.
+	if pixel_world.has_method("start_landing_intro"):
+		pixel_world.start_landing_intro()
 
 
 func _on_flow_restart_pressed() -> void:

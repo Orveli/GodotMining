@@ -69,6 +69,9 @@ func _process(_delta: float) -> void:
 func _draw() -> void:
 	if pixel_world == null or not is_instance_valid(pixel_world):
 		return
+	# M5: laskeutumisintron aikana botit ovat piilossa kapselissa -> ei tila-palkkeja.
+	if bool(pixel_world.get("_bots_hidden")):
+		return
 	var bm = pixel_world.get("bot_manager")
 	if bm == null or not bm.has_method("get_fleet_stats"):
 		return

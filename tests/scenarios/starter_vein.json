@@ -1,0 +1,9 @@
+{
+  "auto_exit": true,
+  "cpu_ca": false,
+  "_doc": "M5 (SPEC_seed_ship): world_gen._place_starter_iron_vein takaa nakyvan IRON_ORE-suonen alustan oikean reunan viereen matalaan syvyyteen. Boottaa oikean maailman (worldgen ajetaan _readyssa ennen skenaariota) ja todistaa 1) suonessa on IRON_ORE:a alustan viereisella matalalla alueella (x 982..1122, y 340..470), ja 2) alustan STONE-perustus on ehjana (suoni carvaa vain STONE-soluihin, ei riko alustaa). Deterministinen: suonen sijainti perustuu alustan reunaan + pinnan korkeuteen, joten se syntyy joka seedilla samaan kohtaan.",
+  "steps": [
+    { "cmd": "assert_rect", "x": 982, "y": 340, "w": 140, "h": 130, "mat": 12, "min_pct": 0.2, "label": "starter-rautasuoni nakyvissa alustan oikealla reunalla (IRON_ORE > 0 matalalla)" },
+    { "cmd": "assert_rect", "x": 700, "y": 384, "w": 60, "h": 6, "mat": 3, "min_pct": 90.0, "label": "alustan STONE-perustus ehjana (starter-suoni ei rikkonut alustaa)" }
+  ]
+}

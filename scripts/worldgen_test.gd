@@ -227,6 +227,22 @@ func _init() -> void:
 	print("  [%s] Tuntemattomia (magenta) pikseleitä: %d" %
 		["OK" if unknown_ok else "FAIL", unknown])
 
+	# 5. M5: starter-rautasuoni alustan oikean reunan viereen matalaan syvyyteen.
+	# Laske IRON_ORE alustan viereisella matalalla alueella (nakyva louhintakohde).
+	var sv_x0: int = plat.position.x + plat.size.x            # alustan oikea reuna
+	var sv_x1: int = mini(sv_x0 + 140, W)                     # + suonen alue
+	var sv_y0: int = maxi(plat.position.y - 40, 0)            # hieman pinnan ylapuolelta
+	var sv_y1: int = mini(plat.position.y + 90, H)            # matalaan syvyyteen
+	var starter_iron := 0
+	for sy_i in range(sv_y0, sv_y1):
+		for sx_i in range(sv_x0, sv_x1):
+			if grid[sy_i * W + sx_i] == 12:
+				starter_iron += 1
+	var starter_ok: bool = starter_iron > 0
+	all_pass = all_pass and starter_ok
+	print("  [%s] Starter-rautasuoni alustan vieressa (x=%d..%d y=%d..%d): %d px IRON_ORE" %
+		["OK" if starter_ok else "FAIL", sv_x0, sv_x1, sv_y0, sv_y1, starter_iron])
+
 	print("\nTULOS: %s" % ("KAIKKI OK" if all_pass else "VIRHEITÄ"))
 
 	# Renderöi PNG

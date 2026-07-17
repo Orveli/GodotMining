@@ -271,6 +271,28 @@ var bot_manager: BotManager           # bottien tilakone + tyonjako
 var bot_overlay: Node2D               # designaatio- + botti-piirto (building_layerin lapsi)
 var designation_mode: bool = false    # V-nappain: louhinta-alueen maalaus paalla/pois
 var _bot_logic_accum: float = 0.0     # kumuloitu delta bottien logiikkatikkia varten
+
+# === LASKEUTUMISINTRO (M5 — SPEC_seed_ship) ===
+# Puhtaasti visuaalinen kerros: title-klik -> kapseli putoaa taivaalta alustan
+# ylapuolelta, laskeutuu iskusti (ruutu-shake + pöly), "aukeaa" ja paljastaa 2
+# aloitusbottia. EI kosketa bottisim-alustusta (_init_bot_sim spawnaa botit yha
+# normaalisti; introssa ne vain piilotetaan ~2 s ja paljastetaan kapselin auettua).
+# Kapseli piirretaan pelkkana overlayna (_draw_bot_overlay) — EI grid-pikseleita —
+# joten se ei voi rikkoa alustan STONE-perustusta eika jataa roskaa building_pixels-
+# rekisteriin. Gate: intro ajetaan vain windowed (gpu_ready && !scenario); headless/
+# skenaariot ohittavat sen kokonaan (botit heti aktiivisia).
+var _intro_active: bool = false       # intro käynnissä (botit piilossa, kapseli putoaa)
+var _bots_hidden: bool = false        # botteja ei piirreta (intron aikana kapselissa)
+var _intro_time: float = 0.0          # kulunut aika intron alusta (varmuusraja)
+var _intro_landed: bool = false       # kapseli laskeutunut (iskun jalkeen)
+var _intro_open_timer: float = 0.0    # aika laskeutumisesta -> kapseli aukeaa, botit ulos
+var _intro_capsule_pos: Vector2 = Vector2.ZERO  # kapselin keskikohta (sim-px)
+var _intro_capsule_vel: float = 0.0   # kapselin pystynopeus (px/s)
+var _intro_land_y: float = 0.0        # y-taso johon kapseli laskeutuu (botti-spawn)
+const INTRO_MAX_TIME := 3.2           # varmuusraja: intro loppuu viimeistaan tassa
+const INTRO_GRAVITY := 620.0          # px/s^2 kapselin pudotuskiihtyvyys
+const INTRO_FALL_HEIGHT := 240.0      # px kuinka korkealta kapseli putoaa
+const INTRO_OPEN_DELAY := 0.55        # s laskeutumisiskusta kapselin aukeamiseen
 # === HAAMUMODUULIT (M4 — SPEC_seed_ship) ===
 # Moduuliketju: latausrivisto + jalostamo-liitanta. Haamu paljastuu toiminta-/resurssitriggerista,
 # tayttyy haulerien tuomana tai klikkaamalla, valmistuessa kirjautuu gridiin + avaa unlockin.
@@ -798,6 +820,11 @@ func _process(delta: float) -> void:
 
 	_handle_input(delta)
 
+	# M5: laskeutumisintro (visuaalinen). Pyorii joka frame sim_speedista riippumatta
+	# jotta kapseli putoaa sulavasti; asetetaan aktiiviseksi vain windowed-startissa.
+	if _intro_active:
+		_update_landing_intro(delta)
+
 	if gpu_ready:
 		# Vaihe 1: CA-simulaatio GPU:lla
 		# Maalaukset ladataan ennen simulaatiota jos paint_pending. Tämä pysyy AINA
@@ -885,7 +912,9 @@ func _process(delta: float) -> void:
 		# Vaihe 5.8: Bottisimulaatio — CPU-logiikka joka 4. frame (kumuloitu delta).
 		# Botit lukevat grid:ia (juuri ladattu GPU:lta) ja kirjoittavat mvp_write_pixelilla
 		# joka asettaa paint_pending -> muutokset menevat GPU:lle Vaihe 6:n latauksessa.
-		if bot_manager != null and base != null and is_instance_valid(base):
+		# M5: intron aikana botit pidetaan paikallaan (piilossa kapselissa) — ei tikkia
+		# ennen kuin kapseli on auennut ja botit paljastettu.
+		if bot_manager != null and base != null and is_instance_valid(base) and not _intro_active:
 			_bot_logic_accum += delta * sim_speed
 			_logic_frame_counter += 1
 			if _logic_frame_counter >= logic_frame_interval:
@@ -989,6 +1018,16 @@ func _handle_input(_delta: float) -> void:
 	var right_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
 	var left_just := left_pressed and not prev_left_pressed
 	var right_just := right_pressed and not prev_right_pressed
+
+	# M5: laskeutumisintro käynnissä -> klik (tai oikea) skippaa loppuun. Kulutetaan
+	# klik tähän (paivitetaan prev-tilat) ettei sama painallus vuoda maalaukseen/
+	# designaatioon heti intron jalkeen.
+	if _intro_active:
+		if left_just or right_just:
+			_finish_landing_intro()
+		prev_left_pressed = left_pressed
+		prev_right_pressed = right_pressed
+		return
 
 	# Vyohyke-sijoitustila: veto-suorakulmio pickup/dump-vyohykkeelle (oikea/Esc peruu).
 	if zone_placement_type >= 0:
@@ -1657,6 +1696,101 @@ func _init_bot_sim() -> void:
 	_logic_frame_counter = 0
 	if bot_overlay != null:
 		bot_overlay.queue_redraw()
+
+
+# ============================================================
+#  LASKEUTUMISINTRO (M5 — SPEC_seed_ship §M5)
+#  Visuaalinen laskeutumissekvenssi: kapseli putoaa alustan ylapuolelta,
+#  laskeutuu iskusti (ruutu-shake + pöly), aukeaa ja paljastaa aloitusbotit.
+#  ui.gd kutsuu start_landing_intro():n title->play-siirtymassa. Sekvenssi ei
+#  kosketa bottisim-alustusta: botit on jo spawnattu _init_bot_sim():ssa, intro
+#  vain piilottaa ne ja paljastaa kapselin auettua. Klik intron aikana skippaa.
+# ============================================================
+
+# Kaynnista laskeutumisintro. Gate: vain windowed (gpu_ready) eika skenaariossa —
+# headless/scenario boottaa suoraan botteihin (testit eivat saa hidastua/muuttua).
+# Asettaa myos designaatiotilan PÄÄLLE uuden pelin windowed-oletukseksi (M5).
+func start_landing_intro() -> void:
+	if not gpu_ready or _scenario_active:
+		return
+	# Designaatiotila PÄÄLLE uuden pelin alkaessa (yksi verbi: vedä = merkkaa kaivuu).
+	designation_mode = true
+	if base == null or not is_instance_valid(base):
+		return
+	# Kapseli laskeutuu botti-spawnpisteen kohdalle (siihen mihin botit paljastuvat).
+	var land := base.spawn_pos()
+	_intro_land_y = land.y
+	_intro_capsule_pos = Vector2(land.x, land.y - INTRO_FALL_HEIGHT)
+	_intro_capsule_vel = 0.0
+	_intro_active = true
+	_bots_hidden = true
+	_intro_landed = false
+	_intro_open_timer = 0.0
+	_intro_time = 0.0
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+
+
+# Paivita laskeutumissekvenssi (kutsutaan _process():sta joka frame kun _intro_active).
+func _update_landing_intro(delta: float) -> void:
+	_intro_time += delta
+	if not _intro_landed:
+		# Kapseli putoaa painovoiman alla kunnes osuu laskeutumistasoon.
+		_intro_capsule_vel += INTRO_GRAVITY * delta
+		_intro_capsule_pos.y += _intro_capsule_vel * delta
+		if _intro_capsule_pos.y >= _intro_land_y:
+			_intro_capsule_pos.y = _intro_land_y
+			_intro_landed = true
+			_intro_open_timer = 0.0
+			# Laskeutumisisku: ruutu-shake + pölyefekti granulaareilla.
+			add_trauma(0.7)
+			set_impact(Vector2(_intro_capsule_pos.x, _intro_land_y + 20.0), 0.8, 2)
+			_spawn_landing_dust()
+	else:
+		# Kapseli laskeutunut -> odota lyhyt "aukeamishetki" ja paljasta botit.
+		_intro_open_timer += delta
+		if _intro_open_timer >= INTRO_OPEN_DELAY:
+			_finish_landing_intro()
+			return
+	# Varmuusraja: intro ei saa jäädä koskaan roikkumaan.
+	if _intro_time >= INTRO_MAX_TIME:
+		_finish_landing_intro()
+		return
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+
+
+# Lopeta intro välittömästi (kutsutaan aukeamisen jalkeen TAI skip-klikkauksesta):
+# botit paljastuvat kapselin kohdalla, kapseli katoaa, normaali peli jatkuu.
+func _finish_landing_intro() -> void:
+	if not _intro_active:
+		return
+	# Jos skipattiin ennen laskeutumista, anna silti kevyt isku + pöly palautteeksi.
+	if not _intro_landed:
+		add_trauma(0.5)
+		_intro_capsule_pos.y = _intro_land_y
+		_spawn_landing_dust()
+	_intro_active = false
+	_intro_landed = true
+	_bots_hidden = false
+	if bot_overlay != null:
+		bot_overlay.queue_redraw()
+
+
+# Pölyefekti laskeutumisiskussa: viuhkamainen purske GRAVEL/SAND-granulaareja
+# kapselin kohdalta. Granulaarit ovat oikeita CA-pikseleita (putoavat + asettuvat);
+# mvp_write_pixel suojaa building_pixels/bedrockin. Ajetaan vain windowed-introssa,
+# joten headless-skenaariot eivat kosketa naihin.
+func _spawn_landing_dust() -> void:
+	var cx := int(round(_intro_capsule_pos.x))
+	var cy := int(round(_intro_land_y + 12.0))
+	for i in 44:
+		var ang := randf_range(-PI, 0.0)            # ylös/sivuille suuntautuva viuhka
+		var spd := randf_range(6.0, 18.0)
+		var px := cx + int(round(cos(ang) * spd))
+		var py := cy + int(round(sin(ang) * spd * 0.5))
+		var mat := MAT_GRAVEL if (i % 3 != 0) else MAT_SAND
+		mvp_write_pixel(px, py, mat)
 
 
 # Kirjoita yksi pikseli botti-/simulaatiologiikasta. Rajatarkistus + suojaukset.
@@ -4415,9 +4549,41 @@ func _draw_bot_overlay() -> void:
 				pcol = Color(0.3, 0.95, 0.5, 0.9) if zone_placement_type == 0 else Color(0.45, 0.7, 1.0, 0.9)
 			bot_overlay.draw_rect(Rect2(float(pr.position.x), float(pr.position.y), float(pr.size.x), float(pr.size.y)), pcol, false, 1.0)
 
-	# Botit
-	if bot_manager != null:
+	# Botit — M5: intron aikana botit ovat piilossa kapselissa (paljastuvat kun kapseli aukeaa).
+	if bot_manager != null and not _bots_hidden:
 		bot_manager.draw_bots(bot_overlay)
+
+	# M5: laskeutumiskapseli (pelkkä overlay-piirto — ei grid-pikseleita).
+	if _intro_active:
+		_draw_landing_capsule()
+
+
+# M5: piirrä laskeutumiskapseli sim-pikselikoordinaateissa (bot_overlay-kankaalle,
+# jonka building_layer skaalaa grid->screen). Puhtaasti visuaalinen — ei kirjoita
+# gridiin, joten alustan STONE-perustus ja building_pixels-rekisteri pysyvat ehjina.
+func _draw_landing_capsule() -> void:
+	if bot_overlay == null or not is_instance_valid(bot_overlay):
+		return
+	var c := _intro_capsule_pos
+	# Jet-liekki putoamisen aikana (ei enää laskeutumisen jälkeen).
+	if not _intro_landed:
+		var t := float(Time.get_ticks_msec()) / 1000.0
+		var flick := 5.0 + sin(t * 40.0) * 3.0
+		var fbase := c + Vector2(0.0, 9.0)
+		bot_overlay.draw_colored_polygon(PackedVector2Array([
+			fbase + Vector2(-3.0, 0.0), fbase + Vector2(3.0, 0.0),
+			fbase + Vector2(0.0, flick)]), Color(1.0, 0.55, 0.15, 0.85))
+		bot_overlay.draw_colored_polygon(PackedVector2Array([
+			fbase + Vector2(-1.5, 0.0), fbase + Vector2(1.5, 0.0),
+			fbase + Vector2(0.0, flick * 0.6)]), Color(1.0, 0.9, 0.5, 0.95))
+	# Runko: tumma reunus + teräskapseli + nokka + amber-jalasrivi + ikkunahehku.
+	bot_overlay.draw_rect(Rect2(c.x - 6.0, c.y - 9.0, 12.0, 18.0), Color(0.05, 0.05, 0.08, 0.95))
+	bot_overlay.draw_rect(Rect2(c.x - 5.0, c.y - 8.0, 10.0, 16.0), Color(0.22, 0.24, 0.30))
+	bot_overlay.draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-5.0, -8.0), c + Vector2(5.0, -8.0), c + Vector2(0.0, -13.0)]),
+		Color(0.30, 0.32, 0.38))
+	bot_overlay.draw_circle(c + Vector2(0.0, -2.0), 2.6, Color(0.95, 0.72, 0.28, 0.95))
+	bot_overlay.draw_rect(Rect2(c.x - 5.0, c.y + 6.0, 10.0, 2.0), Color(0.88, 0.66, 0.25))
 
 
 func _save_debug_image(path: String) -> void:

@@ -198,6 +198,10 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 	# kasvit alustan päältä ja varmistaa ehjän STONE-perustuksen)
 	_stamp_platform(grid, w, h)
 
+	# M5: takuu-rautasuoni alustan kylkeen pintaan — kokenut pelaaja näkee heti
+	# näkyvän louhintakohteen johon vetää kaivuualueen (SPEC_seed_ship M5).
+	_place_starter_iron_vein(grid, w, h, surface_y, perturb_data, rng)
+
 	var empty_count := 0
 	for i in grid.size():
 		if grid[i] == MAT_EMPTY:
@@ -790,6 +794,33 @@ static func _stamp_platform(grid: PackedByteArray, w: int, h: int) -> void:
 			var fidx := y * w + x
 			if grid[fidx] != MAT_BEDROCK:
 				grid[fidx] = MAT_STONE
+
+
+# ============================================================
+# M5: Takuu-rautasuoni alustan kylkeen pintaan.
+# Kokenut pelaaja saa heti näkyvän louhintakohteen: lyhyt IRON_ORE-suoni
+# alkaa juuri alustan oikean reunan ULKOPUOLELTA ja ulottuu pinnasta matalaan
+# syvyyteen (osittain pinnassa, näkyvissä alustan vierestä). Käyttää samaa
+# _walk_vein/_carve_vein_disc-koneistoa kuin muut suonet: carvaa VAIN
+# MAT_STONE-soluihin, joten se EI ylikirjoita alustan STONE-perustusta,
+# bedrockia eikä muita malmeja. Sijainti on deterministinen (perustuu alustan
+# reunaan + pinnan korkeuteen), joten suoni syntyy joka seedillä samaan kohtaan.
+# ============================================================
+static func _place_starter_iron_vein(grid: PackedByteArray, w: int, h: int,
+		surface_y: PackedFloat32Array, perturb_data: PackedByteArray,
+		rng: RandomNumberGenerator) -> void:
+	# Aloitus-x juuri alustan oikean reunan ulkopuolelta — näkyvä alustan vierestä.
+	var start_x := clampi(platform_x0 + platform_w + 40, EDGE_THICKNESS + 4,
+		w - EDGE_THICKNESS - 4)
+	# Aloita aivan pinnasta (suonen latva näkyy pinnassa) ja kävele alas matalaan
+	# syvyyteen. Suonen paksuus 3 px -> latva ulottuu pintakiveen asti.
+	var sy := surface_y[clampi(start_x, 0, w - 1)]
+	var start_y := clampf(sy + 3.0, sy + 2.0, float(h - EDGE_THICKNESS - 2))
+	# Lähes pystysuora (~90° alas) pieni satunnaisvaihtelu -> suoni pysyy alustan
+	# vieressä matalalla (surface + ~0…40 px).
+	var heading := PI * 0.5 + rng.randf_range(-0.25, 0.25)
+	_walk_vein(grid, w, h, float(start_x), start_y, heading, 34, 3.0,
+		MAT_IRON_ORE, perturb_data, rng, 0)
 
 
 # Tehdasalustan alue sim-pikseleinä; position.y = alustan pinnan y-taso.
