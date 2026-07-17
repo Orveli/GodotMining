@@ -7,6 +7,12 @@ layout(set = 0, binding = 0, std430) restrict buffer GridData {
     uint cells[];
 } grid;
 
+// P2: tile-aktiivisuuskartta. Yksi tile = 16×16 px = yksi workgroup. Solu sisältää
+// viimeisimmän sim_framen jolloin tileen KIRJOITETTIIN (atomicMax). Koko = (W/16)*(H/16).
+layout(set = 0, binding = 1, std430) restrict buffer ActivityData {
+    uint tiles[];
+} activity;
+
 layout(push_constant, std430) uniform Params {
     uint width;
     uint height;
@@ -17,10 +23,20 @@ layout(push_constant, std430) uniform Params {
     uint grav_gun_y;      // Gravity gun kohde Y
     uint grav_gun_mode;   // 0 = pois, 1 = normaali veto, 2 = vakuumi
     uint grav_gun_radius; // Vetovoiman säde pikseleinä
-    uint pad1;            // käyttämätön
-    uint pad2;            // käyttämätön
+    uint sim_frame;       // P2: monotoninen sim-frame-laskuri (kasvaa vain kun passeja ajetaan)
+    uint activity_enabled;// P2: 1 = early-out käytössä, 0 = kaikki tilet aktiivisia (determinismivertailu)
     uint pad3;            // padding
 } p;
+
+// P2: leimaa solun (cx,cy) tilen aktiiviseksi tälle sim_framelle. Kutsutaan jokaisen
+// onnistuneen grid-kirjoituksen kohdesolulle (molemmat swapin osapuolet) — "kirjoitus
+// soluun ⇒ leima solun tileen" on early-outin korrektiuden ydininvariantti.
+void stamp_idx(uint idx) {
+    uint tiles_x = (p.width + 15u) >> 4u;
+    uint cx = idx % p.width;
+    uint cy = idx / p.width;
+    atomicMax(activity.tiles[(cy >> 4u) * tiles_x + (cx >> 4u)], p.sim_frame);
+}
 
 const uint EMPTY = 0u;
 const uint SAND  = 1u;
@@ -83,7 +99,12 @@ bool try_atomic_move(uint src_idx, uint dst_idx, uint my_cell, uint expected_dst
 
     // 2. Kirjoita kohteeseen
     uint old_dst = atomicCompSwap(grid.cells[dst_idx], expected_dst, my_cell);
-    if (old_dst == expected_dst) return true;  // Onnistui
+    if (old_dst == expected_dst) {
+        // P2: molemmat solut muuttuivat -> leimaa molempien tilet aktiivisiksi
+        stamp_idx(src_idx);
+        stamp_idx(dst_idx);
+        return true;  // Onnistui
+    }
 
     // 3. Kohde varattu — palauta lähde
     atomicCompSwap(grid.cells[src_idx], expected_dst, my_cell);
@@ -97,6 +118,9 @@ bool try_atomic_swap(uint src_idx, uint dst_idx, uint src_cell, uint dst_cell) {
     if (old_dst == dst_cell) {
         // dst onnistui — kirjoita dst:n arvo src:hen
         atomicCompSwap(grid.cells[src_idx], src_cell, dst_cell);
+        // P2: molemmat solut vaihtuivat -> leimaa molempien tilet
+        stamp_idx(src_idx);
+        stamp_idx(dst_idx);
         return true;
     }
     return false;
@@ -163,7 +187,40 @@ bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
     return false;
 }
 
+// P2: workgroup-jaettu aktiivisuuslippu (thread 0 kirjoittaa, kaikki lukevat barrierin jälkeen)
+shared uint wg_active;
+
 void main() {
+    // ── P2: workgroup-tason early-out asettuneille alueille ──────────────────────
+    // Yksi tile = yksi 16×16-workgroup. Thread 0 lukee oman tilen JA 8 naapuritilen
+    // aktiivisuusleimat; jos yksikään on tuore (>= sim_frame-1) workgroup jatkaa, muuten
+    // kaikki 256 threadia palaavat heti -> asettunut alue ei maksa mitään. Naapuri-OR kattaa
+    // tilerajan yli valuvan materiaalin (1 framen herätysviive rajalla on hyväksyttävä).
+    // barrier() vaatii että KAIKKI threadit saavuttavat sen -> tehdään ENNEN bounds/phase-
+    // checkejä (W=1664 ja H=960 ovat 16:n monikertoja -> ei out-of-bounds-threadeja).
+    if (gl_LocalInvocationIndex == 0u) {
+        uint tiles_x = (p.width + 15u) >> 4u;
+        uint tiles_y = (p.height + 15u) >> 4u;
+        int tx = int(gl_WorkGroupID.x);
+        int ty = int(gl_WorkGroupID.y);
+        uint act = 0u;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                // PLANEETTA: x-tilet wrappaavat sauman yli (reunatile naapuroi vastakkaista
+                // laitaa) -> sauman yli valuva materiaali herää ilman ylimääräistä viivettä.
+                // y-tilet clampataan (y ei wrappaa).
+                int nx = (tx + dx + int(tiles_x)) % int(tiles_x);
+                int ny = clamp(ty + dy, 0, int(tiles_y) - 1);
+                uint stamp = activity.tiles[uint(ny) * tiles_x + uint(nx)];
+                // stamp + 1 >= sim_frame  <=>  stamp >= sim_frame-1  (uint-underflow-turvallinen)
+                if (stamp + 1u >= p.sim_frame) { act = 1u; }
+            }
+        }
+        wg_active = act;
+    }
+    barrier();
+    if (p.activity_enabled != 0u && wg_active == 0u) return;
+
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
 
@@ -185,6 +242,15 @@ void main() {
     if (mat == GLASS || mat == IRON || mat == GOLD) return;
     if (mat == HELD || mat == BEDROCK) return;  // BEDROCK = inert pohjakivi
     // GRAVEL, IRON_ORE, GOLD_ORE, COAL simuloidaan putoavina jauheina (is_powder()-haara)
+
+    // P2: pidä epälokaalit/todennäköisyyspohjaiset materiaalit AINA hereillä. Neste skannaa
+    // sivulle kauas (epälokaali) ja tuli/höyry voivat ohittaa kirjoituksen framen ajaksi mutta
+    // muuttua myöhemmin. Ilman tätä niiden tile voisi nukahtaa ennenaikaisesti -> divergenssi.
+    // Itseleima joka framella pitää minkä tahansa näitä sisältävän tilen aktiivisena (jokainen
+    // solu on aktiivilattian jäsen >= 2 passissa/frame kun gpu_passes on 8:n monikerta).
+    if (mat == WATER || mat == OIL || mat == FIRE || mat == STEAM) {
+        stamp_idx(idx);
+    }
 
     // Gravity gun -veto: GPU vetää irtonaiset pikselit kohti kursoria
     if (p.grav_gun_mode > 0u && falls(mat)) {
@@ -263,7 +329,9 @@ void main() {
         }
 
         // Ei voinut liikkua mihinkään → laskeutunut, palaudu puuksi
-        atomicCompSwap(grid.cells[idx], my_cell, (my_cell & 0xFFFFFF00u) | WOOD);
+        if (atomicCompSwap(grid.cells[idx], my_cell, (my_cell & 0xFFFFFF00u) | WOOD) == my_cell) {
+            stamp_idx(idx);  // P2: WOOD_FALLING→WOOD on tilamuutos -> leima
+        }
         return;
     }
 
@@ -366,15 +434,21 @@ void main() {
                     uint nmat = get_mat(ncell);
 
                     if ((nmat == WOOD || nmat == WOOD_FALLING) && (hash(rng3 + uint(dx + dy * 3)) % 50u) == 0u) {
-                        atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE);
+                        if (atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE) == ncell) {
+                            stamp_idx(nidx);  // P2: naapuri syttyi -> herätä sen tile
+                        }
                     }
                     if (nmat == OIL && (hash(rng3 + uint(dx + dy * 3) + 100u) % 12u) == 0u) {
-                        atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE);
+                        if (atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE) == ncell) {
+                            stamp_idx(nidx);  // P2: öljy syttyi -> herätä sen tile
+                        }
                     }
                     if (nmat == WATER && (hash(rng3 + uint(dx + dy * 3) + 200u) % 8u) == 0u) {
                         // Vesi → höyry, tuli kuolee
                         atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | STEAM);
                         atomicCompSwap(grid.cells[idx], my_cell, 0u);
+                        stamp_idx(nidx);  // P2: uusi höyry -> herätä sen tile
+                        stamp_idx(idx);   // P2: tuli kuoli
                         return;
                     }
                 }

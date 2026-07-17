@@ -36,6 +36,15 @@ const SIM_HEIGHT := 448
 const TOTAL := SIM_WIDTH * SIM_HEIGHT
 const W := SIM_WIDTH
 
+# ── P2: tile-aktiivisuuskartta ───────────────────────────────────────────────
+# Yksi tile = 16×16 px = yksi compute-workgroup. Asettuneet (nukkuvat) tilet ohitetaan
+# GPU:lla early-outilla. Taulu on (W/16)×(H/16) uintia; solu = viimeisin sim_frame jolloin
+# tileen kirjoitettiin. W ja H ovat 16:n monikertoja -> ei osittaisia tilejä.
+const TILE_SIZE := 16
+const TILES_X := SIM_WIDTH / TILE_SIZE     # 104
+const TILES_Y := SIM_HEIGHT / TILE_SIZE    # 60
+const TILE_COUNT := TILES_X * TILES_Y      # 6240
+
 # CPU-puolen grid (maalaamista varten)
 var grid: PackedByteArray
 var color_seed: PackedByteArray
@@ -47,6 +56,16 @@ var pipeline: RID
 var grid_buffer: RID
 var uniform_set: RID
 var gpu_ready := false
+
+# ── P2: tile-aktiivisuuskartta (GPU-buffer + CPU-peili) ──────────────────────
+var activity_buffer: RID                       # GPU storage buffer, TILE_COUNT × uint32
+var _sim_frame: int = 1                         # monotoninen sim-frame (kasvaa vain kun passeja ajetaan)
+var tile_activity_enabled: bool = true          # early-out päällä; determinismivertailu sammuttaa
+var _activity_cpu: PackedInt32Array = PackedInt32Array()  # async-luettu peili (P3-rajapinta + laskuri, ~1 frame vanha)
+var _activity_active_count: int = 0             # aktiivisten tilejen määrä (FPS-lokin act:N)
+var _wake_row: PackedByteArray = PackedByteArray()        # uudelleenkäytetty puskuri CPU-herätyksen buffer_updateille
+var _pending_activity: PackedByteArray = PackedByteArray()  # async-readbackin väliaikaispuskuri
+var _readback_got_activity: bool = false
 
 # Transfer shader (GPU-purkaus/pakkaus)
 var transfer_shader_rid: RID
@@ -159,6 +178,32 @@ var _toast_timer: float = 0.0 # Kuinka kauan ilmoitus on näkyvissä
 var gpu_time_ms: float = 0.0  # Edellisen framen GPU-aika
 var paint_pending := false
 
+# ── P1: Dirty-rect-osittainen GPU-upload + asynkroninen readback ──────────────
+# Dirty-alueseuranta: framen aikana CPU:lla muutetut gridin alueet kerätään
+# yhdistettyyn bounding boxiin, jotta _simulate_gpu():n dirty-upload lataa GPU:lle vain
+# muuttuneet rivit (yksi buffer_update per puskuri) eikä koko 1.6M-solun puskuria.
+# TURVAINVARIANTTI: downloadin/adoptoinnin ja seuraavan uploadin välissä ei aja
+# yhtään sim-passia, joten GPU:n packed-bufferit dirty-alueen ULKOPUOLELLA ovat
+# identtiset CPU-peilin kanssa -> osittainen lataus ei voi jättää eroa GPU:lle.
+var _dirty_all: bool = true          # true = koko maailma likainen (init/worldgen/reset/burstipolut)
+var _dirty_any: bool = false         # onko yhtään dirty-aluetta kerätty
+var _dirty_min_x: int = 0
+var _dirty_min_y: int = 0
+var _dirty_max_x: int = 0
+var _dirty_max_y: int = 0
+var _warned_dirty_fallback: bool = false  # loki kerran jos paint_pending ilman dirty-merkintää
+
+# Asynkroninen GPU→CPU readback (P1 osa B/C): sim-tulos luetaan takaisin viiveellä
+# (1 frame) buffer_get_data_async():lla, jolloin rd.sync() ei blokkaa kriittistä
+# polkua. Callbackit kirjoittavat _pending_*; framen alussa data omaksutaan peiliin.
+var _async_readback_supported: bool = false  # rd.has_method("buffer_get_data_async")
+var _gpu_submitted: bool = false     # onko GPU-työ submitattu ilman synciä (odottaa sync)
+var _readback_pending: bool = false  # onko async-readback pyydetty (odottaa sync + adopt)
+var _pending_grid: PackedByteArray = PackedByteArray()
+var _pending_seed: PackedByteArray = PackedByteArray()
+var _readback_got_grid: bool = false
+var _readback_got_seed: bool = false
+
 # Kaivaustyökalut
 enum Tool { HAND, SHOVEL, PICKAXE, DRILL, MEGA_DRILL }
 var current_tool: Tool = Tool.HAND
@@ -221,6 +266,9 @@ var grav_held_written: Array[int] = []
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
 var physics_initialized := false  # Onko kivi-kappaleet skannattu
+# P3: viimeisin sim_frame jolloin puun tuki-BFS ajettiin. Portitus: aja täysi BFS vain
+# jos jokin tile on ollut aktiivinen tämän jälkeen (muuten skip — mikään ei muuttunut).
+var _last_wood_check_sim_frame: int = 0
 var is_painting_stone := false  # Maalataan kiveä parhaillaan — fysiikka tauolla
 var stroke_stone_pixels: Dictionary = {}  # Tämän vedon kivipikselit (deduplikoitu)
 var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
@@ -592,7 +640,12 @@ func _ready() -> void:
 	for arg in args:
 		if arg.begins_with("--scenario="):
 			_load_scenario(arg.substr(len("--scenario=")))
-			break
+		# P2: determinismivertailu — --activity=0 sammuttaa early-outin (kaikki tilet aktiivisia).
+		elif arg == "--activity=0" or arg == "--no-activity":
+			tile_activity_enabled = false
+			print("P2: tile-aktiivisuus (early-out) POIS — determinismivertailun referenssiajo")
+		elif arg == "--activity=1":
+			tile_activity_enabled = true
 
 	# ── Julkaisukehys (T3.1): title-overlay-gate ──────────────────────────────
 	# Ikkunallisessa ei-scenario-sessiossa peli boottaa TITLE-tilaan: simulaatio
@@ -715,18 +768,34 @@ func _setup_compute() -> void:
 
 	grid_buffer = rd.storage_buffer_create(gpu_data.size(), gpu_data)
 
-	# Uniform set
+	# P2: aktiivisuustaulu (TILE_COUNT × uint32), alustetaan nolliksi ("ei koskaan kirjoitettu").
+	var activity_zeros := PackedByteArray()
+	activity_zeros.resize(TILE_COUNT * 4)
+	activity_zeros.fill(0)
+	activity_buffer = rd.storage_buffer_create(activity_zeros.size(), activity_zeros)
+	_activity_cpu.resize(TILE_COUNT)
+
+	# Uniform set: binding 0 = grid_buffer, binding 1 = activity_buffer (P2)
 	var uniform := RDUniform.new()
 	uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 	uniform.binding = 0
 	uniform.add_id(grid_buffer)
-	uniform_set = rd.uniform_set_create([uniform], shader_rid, 0)
+	var u_act := RDUniform.new()
+	u_act.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_act.binding = 1
+	u_act.add_id(activity_buffer)
+	uniform_set = rd.uniform_set_create([uniform, u_act], shader_rid, 0)
 
 	# Pipeline
 	pipeline = rd.compute_pipeline_create(shader_rid)
 
 	gpu_ready = true
 	print("GPU compute shader valmis!")
+
+	# P1: onko asynkroninen readback käytettävissä (Godot 4.4+). Jos ei, käytetään
+	# synkronista fallbackia (_simulate_gpu hoitaa molemmat polut).
+	_async_readback_supported = rd.has_method("buffer_get_data_async")
+	print("P1: async readback ", "käytettävissä" if _async_readback_supported else "EI käytettävissä (synkroninen fallback)")
 
 	# Transfer shader setup
 	_setup_transfer()
@@ -919,12 +988,21 @@ func _process(delta: float) -> void:
 	_perf_ring_pos = (_perf_ring_pos + 1) % _PERF_RING_SIZE
 
 	if fps_timer >= 1.0:
-		print("FPS:%d | gpu:%.1fms dl:%.1fms gl:%.1fms ul:%.1fms | passes:%d" % [
+		print("FPS:%d | gpu:%.1fms dl:%.1fms gl:%.1fms ul:%.1fms | passes:%d | act:%d/%d" % [
 			Engine.get_frames_per_second(),
 			_t_gpu, _t_download, _t_gamelogic, _t_upload_render,
-			gpu_passes
+			gpu_passes, _activity_active_count, TILE_COUNT
 		])
 		fps_timer = 0.0
+
+	# ── P1: omaksu edellisen framen asynkroninen GPU-tulos CPU-peiliin ENNEN mitään
+	# CPU-kirjoituksia (pommit/input/intro/botit). Näin tuoreet kirjoitukset menevät
+	# peilin päälle eivätkä katoa, ja seuraava upload+sim sisältää ne. rd.sync() blokkaa
+	# vain jos GPU ei ehtinyt valmiiksi — tyypillisesti ~0 ms (laski framen rinnalla).
+	if gpu_ready:
+		var _t0_dl := Time.get_ticks_usec()
+		_apply_readback()
+		_t_download = float(Time.get_ticks_usec() - _t0_dl) / 1000.0
 
 	# Kaivaustyökalun cooldown
 	if pickaxe_cooldown > 0.0:
@@ -947,35 +1025,14 @@ func _process(delta: float) -> void:
 		_update_landing_intro(delta)
 
 	if gpu_ready:
-		# Vaihe 1: CA-simulaatio GPU:lla
-		# Maalaukset ladataan ennen simulaatiota jos paint_pending. Tämä pysyy AINA
-		# ehdottomana (ei sim_speed-riippuvainen): _download_from_gpu() alla ajetaan
-		# joka frame myös pausen aikana, joten pausella tehty maalaus katoaisi heti
-		# saman framen downloadissa jos sitä ei ladattaisi GPU:lle ensin.
-		if paint_pending:
-			_upload_paint_to_gpu()
-			paint_pending = false
-
+		# ── P1: uusi framerakenne ────────────────────────────────────────────────
+		# CPU-pelilogiikka (fysiikka/koneet/botit) ajetaan ENSIN: se lukee framen alussa
+		# adoptoitua peiliä (edellisen framen sim-tulos) ja kirjoittaa muutokset dirtyn
+		# kautta. GPU-submit (upload + CA-sim + extract + async readback) tehdään VASTA
+		# _process():n LOPUSSA (kaikkien CPU-kirjoitusten jälkeen), jolloin GPU laskee
+		# seuraavan framen CPU-työn rinnalla.
 		var _t0 := Time.get_ticks_usec()
-		# Ajan nopeus: pause (sim_speed = 0) ohittaa koko CA-kutsun -> ei yhtään Margolus-
-		# passia. Muuten passimäärä johdetaan kiinteästä perusarvosta simulaationopeuden
-		# mukaan: 1x=8, 2x=16, 3x=24, 4x=32 — aina >= 4 ja neljän monikerta, joten täydet
-		# Margolus-syklit pysyvät ehjinä. Skaalaus tehdään framejen VÄLISSÄ (ei kesken
-		# _simulate_gpu()-silmukan), joten offset-sykli ei katkea kesken framen.
-		if sim_speed > 0.0:
-			# maxi(1, roundi(...)): murtoluku-sim_speed (esim. skenaarion 0.5) ei saa
-			# tiputtaa passeja nollaan kun sim ei ole pausella (int() typisti).
-			gpu_passes = GPU_PASSES_BASE * maxi(1, roundi(sim_speed))
-			_simulate_gpu()
-		_t_gpu = float(Time.get_ticks_usec() - _t0) / 1000.0
-
-		# Lataa tulos takaisin CPU:lle
-		_t0 = Time.get_ticks_usec()
-		_download_from_gpu()
-		_t_download = float(Time.get_ticks_usec() - _t0) / 1000.0
-
 		# Vaihe 2b: Skannaa kivi-kappaleet ensimmäisellä framella (tai resetin jälkeen)
-		_t0 = Time.get_ticks_usec()
 		if not physics_initialized:
 			physics_world.scan_stone_bodies(grid, color_seed, W, SIM_HEIGHT)
 			physics_initialized = true
@@ -990,23 +1047,44 @@ func _process(delta: float) -> void:
 					has_active = true
 					break
 			if has_active and sim_speed > 0.0:
+				# P3: merkitse likaisiksi vain kappaleiden AABB:t (P1:n koko-maailma-latauksen
+				# sijaan). Kerää AABB:t ENNEN steppiä (vanha sijainti: erase kirjoittaa sinne)
+				# ja stepin JÄLKEEN (uusi sijainti + stepin heräyttämät nukkuvat kappaleet).
+				# Molemmat merkitään -> unioni kattaa erase- ja write-solut + nesteensyrjäytyksen.
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 				physics_world.step(grid, color_seed, W, SIM_HEIGHT)
 				grid_modified = true
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 
-		# Vaihe 4: Puun tuki joka 10. frame
+		# Vaihe 4: Puun tuki joka 120. frame — P3: portitettu aktiivisuudella.
+		# Aja täysi BFS VAIN jos jokin tile on ollut aktiivinen edellisen tarkistuksen
+		# jälkeen; muuten skip (mikään ei ole muuttunut → tuki ei ole voinut kadota).
+		# Checkpoint päivitetään aina, myös skipatessa. Portitus koskee vain gpu_ready-
+		# polkua: headlessissa (cpu_ca) aktiivisuustaulua ei päivitetä lainkaan.
 		if frame_count > 60 and frame_count % 120 == 0 and sim_speed > 0.0:
-			if WoodSupport.check_support(grid, W, SIM_HEIGHT):
-				grid_modified = true
+			if _wood_check_needed():
+				if WoodSupport.check_support(grid, W, SIM_HEIGHT):
+					grid_modified = true
+					_mark_grid_dirty_all()  # P1: BFS-tuki muuttaa puuta hajautetusti
+			_last_wood_check_sim_frame = _sim_frame
 
 		# Vaihe 5: Vauriotarkistus (vain räjähdyksen jälkeen)
 		if physics_world.force_damage_check and not physics_world.bodies.is_empty():
 			physics_world.check_damage(grid, color_seed, W, SIM_HEIGHT)
 			physics_world.force_damage_check = false
 			grid_modified = true
+			_mark_grid_dirty_all()  # P1: räjähdyksen jälkeinen halkeamistarkistus
 
 		# Vaihe 5b: Jatka jonotettuja splittauksia myös seuraavilla frameilla
 		if physics_world.process_damage_queue(grid, color_seed, W, SIM_HEIGHT):
 			grid_modified = true
+			_mark_grid_dirty_all()  # P1: jonotetut splitit
 
 		# Vaihe 5.5: Liukuhihnat (skaalautuu ajan nopeuden mukaan)
 		if _update_conveyors(delta * sim_speed):
@@ -1026,8 +1104,15 @@ func _process(delta: float) -> void:
 
 		# Vaihe 5.7: Hissilinkot + lentävät pikselit
 		if not launchers.is_empty() or not flying_pixels.is_empty():
+			# P3: launcherit kirjoittavat hajautetusti (intake/shaft/jalusta launcher.gd:n
+			# sisällä) — jos yksikin on läsnä, pysytään turvallisessa täydessä latauksessa.
+			# Pelkät lentävät pikselit sen sijaan merkitsevät oman tarkan rectinsä
+			# (_flying_land + rakettitrail alla; explode/_bullet_impact merkkaavat itse).
+			var had_launchers := not launchers.is_empty()
 			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
+				if had_launchers:
+					_mark_grid_dirty_all()  # P1: launcherien hajautetut kirjoitukset -> täysi lataus
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
 		# Vaihe 5.8: Bottisimulaatio — CPU-logiikka joka 4. frame (kumuloitu delta).
@@ -1052,13 +1137,12 @@ func _process(delta: float) -> void:
 			if bot_overlay != null:
 				bot_overlay.queue_redraw()
 
-		# Vaihe 6: Lataa CPU:n muutokset GPU:lle — yhdistetty lataus
-		# paint_pending voi asettua uudelleen logiikan aikana (esim. explode())
-		# grid_modified = fysiikka/logiikka muutti gridiä
-		# → ladataan kerran kattaen molemmat, ei koskaan kahdesti per frame
-		if grid_modified or paint_pending:
-			_upload_paint_to_gpu()
-			paint_pending = false
+		# HUOM: GPU-submit (_simulate_gpu) EI ole enää tässä — se ajetaan _process():n LOPUSSA
+		# kaikkien CPU-kirjoitusten (input/logiikka/skenaario) JÄLKEEN, jotta framen kaikki
+		# muutokset ehtivät dirty-lataukseen ennen simua eivätkä katoa seuraavan framen
+		# _apply_readback-adoptoinnissa. grid_modified pidetään yllä luettavuussyistä.
+		if grid_modified:
+			pass
 	else:
 		# Headless / GPU-eton polku (esim. --headless-testiajo): CA ei paivity, joten grid
 		# pysyy worldgenin + bottikirjoitusten mukaisena CPU:lla. Aja pelkka bottisimulaatio
@@ -1120,6 +1204,24 @@ func _process(delta: float) -> void:
 	# grid→screen-skaalausta. Polaarimuunnos tehdään komposiitille PlanetView'ssa.
 	if building_layer and building_layer.scale != Vector2.ONE:
 		building_layer.scale = Vector2.ONE
+
+	# ── P1: GPU-submit VIIMEISENÄ ────────────────────────────────────────────────
+	# Ajetaan vasta kun KAIKKI framen CPU-kirjoitukset (input, pelilogiikka, skenaario-
+	# fill_rect/place_body, jne.) on tehty — muuten niiden dirty ehtisi mennä simun ohi ja
+	# seuraavan framen _apply_readback ylikirjoittaisi ne peilistä (= katoaisivat). Nyt kaikki
+	# framen muutokset ladataan GPU:lle, simuloidaan, ja tulos omaksutaan ensi framessa.
+	# Pause (sim_speed=0) ohittaa simun: dirty kertyy ja ladataan vasta kun sim jatkuu; näkyvä
+	# kuva päivittyy silti heti _upload_render():stä (CPU-peili) — pause ei tarvitse GPU-kierrosta.
+	if gpu_ready:
+		var _t0_gpu := Time.get_ticks_usec()
+		if sim_speed > 0.0:
+			# maxi(1, roundi(...)): murtoluku-sim_speed (esim. skenaarion 0.5) ei saa tiputtaa
+			# passeja nollaan kun sim ei ole pausella. Passimäärä asetetaan framejen VÄLISSÄ
+			# (ei kesken _simulate_gpu()-silmukan) -> Margolus-offset-sykli pysyy ehjänä.
+			gpu_passes = GPU_PASSES_BASE * maxi(1, roundi(sim_speed))
+			_simulate_gpu()
+			paint_pending = false
+		_t_gpu = float(Time.get_ticks_usec() - _t0_gpu) / 1000.0
 
 
 func _handle_input(_delta: float) -> void:
@@ -1355,7 +1457,7 @@ const MAT_DISPLAY_NAMES := {
 
 # Kursorin alla olevan materiaalin näyttönimi hover-inspektointiin. Palauttaa tyhjän
 # merkkijonon jos kursori on ruudun ulkopuolella tai tyhjän (EMPTY) päällä. Lukee
-# CPU-peilikuvan gridistä, joka ladataan GPU:lta joka frame (_download_from_gpu),
+# CPU-peilikuvan gridistä, joka omaksutaan GPU:lta joka frame (_apply_readback),
 # joten myös irtopikselit (putoava hiekka/sora ym.) näkyvät oikein.
 func hovered_material_name() -> String:
 	var gp := _mouse_to_grid()
@@ -1644,6 +1746,8 @@ func explode(cx: int, cy: int, radius: int) -> void:
 	flash_timer = FLASH_DURATION
 
 	paint_pending = true
+	# P1: räjähdys + _detect_detached_stone + body_map-muutokset hajautuvat -> täysi lataus
+	_mark_grid_dirty_all()
 
 
 # === POMMIT ===
@@ -1676,6 +1780,7 @@ func _update_bombs(delta: float) -> void:
 			if pos.x >= 0 and pos.x < W and pos.y >= 0 and pos.y < SIM_HEIGHT:
 				grid[pos.y * W + pos.x] = mat
 				paint_pending = true
+				_mark_grid_dirty_point(pos.x, pos.y)  # P1: pommin vilkkupiste
 		i -= 1
 
 
@@ -1687,6 +1792,7 @@ func _player_adjacent_dig_pos(target_grid: Vector2i, _reach: int) -> Vector2i:
 
 
 func _bullet_impact(cx: int, cy: int) -> void:
+	_mark_grid_dirty_all()  # P1: harvinainen kirjoituspolku -> täysi lataus
 	# Pieni tuhoalue — 2px säde
 	const IMPACT_R := 2
 	for dy in range(-IMPACT_R, IMPACT_R + 1):
@@ -1756,6 +1862,7 @@ func regenerate_world() -> void:
 		color_seed[i] = randi() % 256
 	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
 	paint_pending = true
+	_mark_grid_dirty_all()  # P1: koko maailma uusittu -> täysi lataus
 	physics_world = PhysicsWorld.new()
 	physics_initialized = false
 	_clear_conveyors()
@@ -1781,6 +1888,7 @@ func _boot_world() -> void:
 		color_seed[i] = randi() % 256
 	WorldGen.generate(grid, color_seed, W, SIM_HEIGHT)
 	paint_pending = true
+	_mark_grid_dirty_all()  # P1: koko maailma generoitu -> täysi lataus
 	physics_initialized = false
 	_init_bot_sim()
 	# Kamera alustan kohdalle
@@ -1794,6 +1902,7 @@ func _boot_world() -> void:
 # Luo tehdasbase alustan keskelle, rakenna nav-gridi ja spawnaa botit.
 # Turvallinen kutsua uudelleen (regenerate/reset) — vapauttaa vanhan basen jos jai roikkumaan.
 func _init_bot_sim() -> void:
+	_mark_grid_dirty_all()  # P1: base-rakenteen kirjoitus + reset -> täysi lataus
 	if nav == null or desig == null or bot_manager == null:
 		return
 	# Nollaa designaatiot uuteen maailmaan
@@ -2012,6 +2121,7 @@ func mvp_write_pixel(x: int, y: int, mat: int) -> void:
 	if mat != MAT_EMPTY:
 		color_seed[idx] = randi() % 256
 	paint_pending = true
+	_mark_grid_dirty_point(x, y)  # P1: botit/louhinta — kuuma polku, tarkka piste
 
 
 # ============================================================
@@ -2330,6 +2440,7 @@ func _update_base_modules() -> void:
 # Rakenna valmis haamumoduuli: kirjoita rakenne gridiin (nakyva kasvu), rekisteroi
 # building_pixels-suojaukseen ja aja unlock-hook (charger-lisays tai jalostamo-nakyvyys).
 func _complete_module(m: BaseModules.Module) -> void:
+	_mark_grid_dirty_all()  # P1: harvinainen kirjoituspolku -> täysi lataus
 	if m == null or m.built:
 		return
 	base_modules.mark_built(m)
@@ -2793,6 +2904,7 @@ func _paint(cx: int, cy: int, mat: int) -> void:
 					if mat == MAT_STONE and is_painting_stone:
 						stroke_stone_pixels[Vector2i(nx, ny)] = true
 	paint_pending = true
+	_mark_grid_dirty(cx - brush_size, cy - brush_size, cx + brush_size, cy + brush_size)
 
 
 # Leikkaa materiaalia ohuella viivalla (1px leveys)
@@ -2840,45 +2952,146 @@ func _cut(cx: int, cy: int) -> void:
 						changed = true
 	if changed:
 		paint_pending = true
+		_mark_grid_dirty(cx - cut_size, cy - cut_size, cx + cut_size, cy + cut_size)
 		# check_damage hoitaa kappaleiden halkeamisen automaattisesti
 
 
-func _upload_paint_to_gpu() -> void:
-	if transfer_ready:
-		# GPU-pakkaus: lataa packed-bufferit ja aja pack-shader
+# ── P1: dirty-alueen merkitsijät ─────────────────────────────────────────────
+# Kaikki CPU-kirjoitukset grid/color_seed-taulukoihin kulkevat näiden kautta niin,
+# että _simulate_gpu():n dirty-upload osaa ladata GPU:lle vain muuttuneet rivit. Burstit ja
+# epävarmat polut (fysiikka, räjähdykset, worldgen) merkitsevät koko maailman likaiseksi
+# — korrektius ennen optimaalisuutta; steady-state (botit + koneet) pysyy osittaisena.
+func _mark_grid_dirty_all() -> void:
+	_dirty_all = true
+
+
+func _mark_grid_dirty_point(x: int, y: int) -> void:
+	if x < 0 or x >= W or y < 0 or y >= SIM_HEIGHT:
+		return
+	if not _dirty_any:
+		_dirty_any = true
+		_dirty_min_x = x
+		_dirty_min_y = y
+		_dirty_max_x = x
+		_dirty_max_y = y
+	else:
+		_dirty_min_x = mini(_dirty_min_x, x)
+		_dirty_min_y = mini(_dirty_min_y, y)
+		_dirty_max_x = maxi(_dirty_max_x, x)
+		_dirty_max_y = maxi(_dirty_max_y, y)
+
+
+func _mark_grid_dirty(x0: int, y0: int, x1: int, y1: int) -> void:
+	if x1 < x0:
+		var tx := x0
+		x0 = x1
+		x1 = tx
+	if y1 < y0:
+		var ty := y0
+		y0 = y1
+		y1 = ty
+	x0 = clampi(x0, 0, W - 1)
+	x1 = clampi(x1, 0, W - 1)
+	y0 = clampi(y0, 0, SIM_HEIGHT - 1)
+	y1 = clampi(y1, 0, SIM_HEIGHT - 1)
+	if not _dirty_any:
+		_dirty_any = true
+		_dirty_min_x = x0
+		_dirty_min_y = y0
+		_dirty_max_x = x1
+		_dirty_max_y = y1
+	else:
+		_dirty_min_x = mini(_dirty_min_x, x0)
+		_dirty_min_y = mini(_dirty_min_y, y0)
+		_dirty_max_x = maxi(_dirty_max_x, x1)
+		_dirty_max_y = maxi(_dirty_max_y, y1)
+
+
+func _reset_grid_dirty() -> void:
+	_dirty_all = false
+	_dirty_any = false
+
+
+# P3: merkitse yhden rigid bodyn maailma-AABB likaiseksi. Käyttää RigidBodyData:n
+# rot-cachea (kierrettyjen offsettien AABB); maailma-AABB = offset + roundi(position).
+# Marginaali kattaa nesteensyrjäytyksen (kirjoittaa ±1 solun kappaleen ulkopuolelle)
+# sekä pienet nukahtamis-snap-siirtymät. filled-cachen aukontäyttö-pikselit mahtuvat
+# rot-AABB:n sisään (interpoloidut välipisteet), joten rot-AABB riittää.
+const BODY_DIRTY_PAD := 3
+func _mark_body_dirty(body: RigidBodyData) -> void:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	_mark_grid_dirty(
+		body.rot_min_x + px - BODY_DIRTY_PAD, body.rot_min_y + py - BODY_DIRTY_PAD,
+		body.rot_max_x + px + BODY_DIRTY_PAD, body.rot_max_y + py + BODY_DIRTY_PAD
+	)
+
+
+# Merkitse koneen jalanjälki likaiseksi: rakenne grid_pos..+(w,h) plus reilu marginaali
+# joka kattaa intake-purkualueen yläpuolella ja tuotoksen putoamisen alapuolella.
+const MACHINE_DIRTY_PAD := 16
+func _mark_machine_dirty(gx: int, gy: int, w: int, h: int) -> void:
+	_mark_grid_dirty(
+		gx - MACHINE_DIRTY_PAD, gy - MACHINE_DIRTY_PAD,
+		gx + w + MACHINE_DIRTY_PAD, gy + h + MACHINE_DIRTY_PAD
+	)
+
+
+# Lataa CPU-peilin muutokset packed-buffereihin: koko puskuri (_dirty_all) tai vain
+# likaisten rivien yhtenäinen väli [min_y..max_y]. EI submitia/synciä — kutsuja hoitaa.
+func _buffer_update_packed_dirty() -> void:
+	if _dirty_all or not _dirty_any:
 		rd.buffer_update(mat_packed_buffer, 0, grid.size(), grid)
 		rd.buffer_update(seed_packed_buffer, 0, color_seed.size(), color_seed)
-		var total_quads := ceili(float(TOTAL) / 4.0)
-		var pack_push := PackedByteArray()
-		pack_push.resize(16)
-		pack_push.encode_u32(0, total_quads)
-		pack_push.encode_u32(4, TOTAL)
-		pack_push.encode_u32(8, 1)  # mode 1 = pack
-		pack_push.encode_u32(12, 0)  # padding
-		var cl := rd.compute_list_begin()
-		rd.compute_list_bind_compute_pipeline(cl, transfer_pipeline)
-		rd.compute_list_bind_uniform_set(cl, transfer_uniform_set, 0)
-		rd.compute_list_set_push_constant(cl, pack_push, pack_push.size())
-		rd.compute_list_dispatch(cl, ceili(float(total_quads) / 64.0), 1, 1)
-		rd.compute_list_end()
-		rd.submit()
-		rd.sync()
-	else:
-		# Fallback: GDScript-looppi
-		if _gpu_upload_buf.size() != TOTAL * 4:
-			_gpu_upload_buf.resize(TOTAL * 4)
-			_gpu_upload_buf.fill(0)
-		var i := 0
-		var off := 0
-		while i < TOTAL:
-			_gpu_upload_buf[off] = grid[i]
-			_gpu_upload_buf[off + 1] = color_seed[i]
-			i += 1
-			off += 4
-		rd.buffer_update(grid_buffer, 0, _gpu_upload_buf.size(), _gpu_upload_buf)
+		return
+	# Osittainen lataus: yhtenäinen riviväli. Packed = 1 tavu/solu, offset = y*W.
+	var off := _dirty_min_y * W
+	var sz := (_dirty_max_y - _dirty_min_y + 1) * W
+	rd.buffer_update(mat_packed_buffer, off, sz, grid.slice(off, off + sz))
+	rd.buffer_update(seed_packed_buffer, off, sz, color_seed.slice(off, off + sz))
+
+
+# Lisää pack-passin (packed → grid_buffer) annettuun compute-listaan. Pakkaus ajetaan
+# koko puskurille (GPU-työ on halpaa; kallis osa oli CPU→GPU-siirto jonka dirty leikkaa).
+func _add_pack_pass(cl: int) -> void:
+	var total_quads := ceili(float(TOTAL) / 4.0)
+	var pack_push := PackedByteArray()
+	pack_push.resize(16)
+	pack_push.encode_u32(0, total_quads)
+	pack_push.encode_u32(4, TOTAL)
+	pack_push.encode_u32(8, 1)  # mode 1 = pack
+	pack_push.encode_u32(12, 0)  # padding
+	rd.compute_list_bind_compute_pipeline(cl, transfer_pipeline)
+	rd.compute_list_bind_uniform_set(cl, transfer_uniform_set, 0)
+	rd.compute_list_set_push_constant(cl, pack_push, pack_push.size())
+	rd.compute_list_dispatch(cl, ceili(float(total_quads) / 64.0), 1, 1)
+
+
+# Non-transfer-fallback (transfer_ready == false): kirjoita koko CPU-peili suoraan
+# grid_bufferiin interleaved-muodossa (mat + seed / solu). Käytetään vain jos transfer-
+# shaderi ei kääntynyt; normaalipeli käyttää packed-puskureita + pack-passia.
+func _upload_grid_buffer_full() -> void:
+	if _gpu_upload_buf.size() != TOTAL * 4:
+		_gpu_upload_buf.resize(TOTAL * 4)
+		_gpu_upload_buf.fill(0)
+	var i := 0
+	var off := 0
+	while i < TOTAL:
+		_gpu_upload_buf[off] = grid[i]
+		_gpu_upload_buf[off + 1] = color_seed[i]
+		i += 1
+		off += 4
+	rd.buffer_update(grid_buffer, 0, _gpu_upload_buf.size(), _gpu_upload_buf)
 
 
 func _simulate_gpu() -> void:
+	# ── P1: aktiivisen framen GPU-työ yhtenä submitina (ei synkronista stallia) ──
+	# 1) Lataa CPU-peilin dirty-rivit packed-buffereihin ja aja pack (packed→grid_buffer)
+	# 2) Aja CA-sim-passit + extract (grid_buffer→packed)
+	# 3) Pyydä asynkroninen readback packed-buffereista (adoptoidaan ENSI framessa)
+	# 4) submit ILMAN synciä — sync tehdään ensi framen alussa (_apply_readback), jolloin
+	#    GPU ehtii laskea koko framen ajan CPU-logiikan ja Godotin renderöinnin rinnalla.
 	# Per-pikseli dispatch: jokainen pikseli = yksi thread
 	var groups_x := ceili(float(W) / 16.0)
 	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
@@ -2891,7 +3104,41 @@ func _simulate_gpu() -> void:
 
 	var t0 := Time.get_ticks_usec()
 
+	# Turvaverkko: jos joku kirjoituspolku asetti paint_pending mutta ei merkinnyt dirtyä,
+	# tehdään täysi lataus ettei GPU jää jälkeen (desync). Kaikki polut on instrumentoitu —
+	# tämä on halpa varmistus. (paint_pending nollataan _process():ssa _simulate_gpu jälkeen.)
+	if paint_pending and not _dirty_all and not _dirty_any:
+		if not _warned_dirty_fallback:
+			_warned_dirty_fallback = true
+			print("P1 WARN: paint_pending ilman dirty-merkintää -> täysi lataus")
+		_dirty_all = true
+
+	# P2: kasvata sim-frame-laskuria (vain kun passeja ajetaan -> pausella leimat eivät vanhene).
+	# uint32 riittää ~2,2 vuodeksi @ 60 fps ennen wrap-aroundia -> ei käytännön ongelmaa.
+	_sim_frame += 1
+
+	# P2: herätä CPU-kirjoitusten (botit/louhinta/koneet/maalaus) kattamat tilet. Ilman tätä
+	# nukkuvaan alueeseen tehty CPU-kirjoitus jäisi simuloimatta (esim. louhittu sora ei putoaisi).
+	# Leimaus _sim_framella on aina >= tilen aiempi (vanhemman framen) leima -> ei clobber-riskiä.
+	_wake_dirty_tiles()
+
+	# Non-transfer-fallback: ei packed-puskureita -> kirjoita koko grid_buffer suoraan.
+	if not transfer_ready:
+		if _dirty_all or _dirty_any:
+			_upload_grid_buffer_full()
+
+	# Dirty-upload (transfer-polku): siirrä CPU:n muutokset packed-buffereihin ennen pack-passia.
+	var did_upload := transfer_ready and (_dirty_all or _dirty_any)
+	if did_upload:
+		_buffer_update_packed_dirty()
+
 	var cl := rd.compute_list_begin()
+
+	# Pack-passi (packed→grid_buffer) vain jos CPU kirjoitti tällä framella. Ajetaan koko
+	# puskurille (halpaa GPU-työtä); kallis osa oli CPU→GPU-siirto jonka dirty leikkaa.
+	if did_upload:
+		_add_pack_pass(cl)
+		rd.compute_list_add_barrier(cl)
 
 	for pass_i in gpu_passes:
 		if pass_i > 0:
@@ -2904,8 +3151,8 @@ func _simulate_gpu() -> void:
 		push.encode_u32(24, grav_gun_pos.y if grav_gun_mode > 0 else 0)
 		push.encode_u32(28, grav_gun_mode)
 		push.encode_u32(32, grav_gun_vacuum_radius if grav_gun_mode == 2 else grav_gun_radius)
-		push.encode_u32(36, 0)   # käyttämätön
-		push.encode_u32(40, 0)   # käyttämätön
+		push.encode_u32(36, _sim_frame)                              # P2: sim-frame (leima + early-out-vertailu)
+		push.encode_u32(40, 1 if tile_activity_enabled else 0)       # P2: early-out päällä/pois
 		push.encode_u32(44, 0)
 
 		rd.compute_list_bind_compute_pipeline(cl, pipeline)
@@ -2945,35 +3192,181 @@ func _simulate_gpu() -> void:
 		rd.compute_list_dispatch(cl, groups_x_r, groups_y_r, 1)
 
 	rd.compute_list_end()
-	rd.submit()
-	rd.sync()
 
-	# Mittaa GPU-aika (F4-debugvalikko lukee gpu_time_ms). Passimäärää EI enää säädetä
-	# adaptiivisesti: passit ovat kiinteät (GPU_PASSES_BASE * sim_speed) determinismin
-	# vuoksi, ja _process() asettaa gpu_passesin framejen välissä.
+	# Dirty nollataan heti — sim on submitattu ja packed sisältää tulevan tuloksen.
+	_reset_grid_dirty()
+
+	if transfer_ready and _async_readback_supported:
+		# Pyydä asynkroninen readback: callbackit laukeavat ensi framen rd.sync():ssä.
+		_readback_got_grid = false
+		_readback_got_seed = false
+		_readback_got_activity = false
+		rd.buffer_get_data_async(mat_packed_buffer, _on_grid_readback)
+		rd.buffer_get_data_async(seed_packed_buffer, _on_seed_readback)
+		# P2: aktiivisuustaulu (pieni, ~25 kt) samassa async-kierroksessa -> laskuri + P3-rajapinta.
+		rd.buffer_get_data_async(activity_buffer, _on_activity_readback)
+		rd.submit()
+		_gpu_submitted = true
+		_readback_pending = true
+	else:
+		# Fallback (vanha Godot ilman async-readbackia): synkroninen submit + sync + luku.
+		rd.submit()
+		rd.sync()
+		_gpu_submitted = false
+		_readback_pending = false
+		# P2: aktiivisuustaulu synkronisesti laskuria + P3-rajapintaa varten.
+		_adopt_activity(rd.buffer_get_data(activity_buffer))
+		if transfer_ready:
+			grid = rd.buffer_get_data(mat_packed_buffer)
+			color_seed = rd.buffer_get_data(seed_packed_buffer)
+			if grid.size() > TOTAL:
+				grid = grid.slice(0, TOTAL)
+			if color_seed.size() > TOTAL:
+				color_seed = color_seed.slice(0, TOTAL)
+		else:
+			var out_buf := rd.buffer_get_data(grid_buffer)
+			var j := 0
+			var o := 0
+			while j < TOTAL:
+				grid[j] = out_buf[o]
+				color_seed[j] = out_buf[o + 1]
+				j += 1
+				o += 4
+
+	# Mittaa GPU-aika (F4-debugvalikko lukee gpu_time_ms). Async-tilassa tämä on lähinnä
+	# compute-listan rakennus + submit (ei GPU-odotusta) — todellinen odotus näkyy
+	# _t_download-mittarissa (_apply_readback:n rd.sync()).
 	gpu_time_ms = float(Time.get_ticks_usec() - t0) / 1000.0
 
 
-func _download_from_gpu() -> void:
-	if transfer_ready:
-		# GPU-purettu data: suora lataus ilman GDScript-looppia
-		grid = rd.buffer_get_data(mat_packed_buffer)
-		color_seed = rd.buffer_get_data(seed_packed_buffer)
-		# Trimmaa jos bufferi on isompi kuin TOTAL
-		if grid.size() > TOTAL:
-			grid = grid.slice(0, TOTAL)
-		if color_seed.size() > TOTAL:
-			color_seed = color_seed.slice(0, TOTAL)
-	else:
-		# Fallback: GDScript-looppi
-		var output := rd.buffer_get_data(grid_buffer)
-		var i := 0
-		var off := 0
-		while i < TOTAL:
-			grid[i] = output[off]
-			color_seed[i] = output[off + 1]
-			i += 1
-			off += 4
+# P1: async-readback-callbackit. Godot kutsuu näitä rd.sync():n aikana ja antaa
+# packed-datan (1 tavu/solu). Ei omaksuta tässä — vain talteen; adoptointi tehdään
+# _apply_readback():ssa framen alussa hallitussa järjestyksessä.
+func _on_grid_readback(data: PackedByteArray) -> void:
+	_pending_grid = data
+	_readback_got_grid = true
+
+
+func _on_seed_readback(data: PackedByteArray) -> void:
+	_pending_seed = data
+	_readback_got_seed = true
+
+
+# P2: aktiivisuustaulun async-callback. Talteen; adoptointi _apply_readback():ssa.
+func _on_activity_readback(data: PackedByteArray) -> void:
+	_pending_activity = data
+	_readback_got_activity = true
+
+
+# P1: framen alussa (ennen CPU-kirjoituksia): kuittaa edellisen framen GPU-työ ja
+# omaksu sen sim-tulos CPU-peiliin. rd.sync() blokkaa vain jos GPU ei ehtinyt valmiiksi;
+# tyypillisesti se on jo valmis (laski CPU-logiikan + Godot-renderin rinnalla) -> ~0 ms.
+# CPU-peili on siis 1 framen vanha sim-tila. Renderöinti kulkee peilin kautta (_upload_render),
+# joten näkyvä kuva on 1 framen jäljessä simulaatiosta — 60 fps:llä ~16 ms, ei havaittava.
+# Tuoreet CPU-kirjoitukset (maalaus/botit) tehdään adoptoinnin JÄLKEEN, joten ne näkyvät heti
+# eivätkä katoa; ja koska ne ladataan GPU:lle ennen simua, seuraava readback sisältää ne.
+func _apply_readback() -> void:
+	if not (_gpu_submitted and _readback_pending):
+		return
+	rd.sync()
+	_gpu_submitted = false
+	_readback_pending = false
+	if _readback_got_grid and _pending_grid.size() >= TOTAL:
+		grid = _pending_grid.slice(0, TOTAL) if _pending_grid.size() > TOTAL else _pending_grid
+	if _readback_got_seed and _pending_seed.size() >= TOTAL:
+		color_seed = _pending_seed.slice(0, TOTAL) if _pending_seed.size() > TOTAL else _pending_seed
+	if _readback_got_activity:
+		_adopt_activity(_pending_activity)
+	_readback_got_grid = false
+	_readback_got_seed = false
+	_readback_got_activity = false
+
+
+# ── P2: aktiivisuustaulun apurit ─────────────────────────────────────────────
+# Omaksu GPU:lta luettu aktiivisuustaulu (byte->int32) CPU-peiliin ja laske aktiivisten
+# tilejen määrä (leima >= sim_frame-1). Peili on async-luvun takia ~1 framen vanha.
+func _adopt_activity(data: PackedByteArray) -> void:
+	if data.size() < TILE_COUNT * 4:
+		return
+	_activity_cpu = data.to_int32_array()
+	if _activity_cpu.size() > TILE_COUNT:
+		_activity_cpu = _activity_cpu.slice(0, TILE_COUNT)
+	var thresh := _sim_frame - 1
+	var n := 0
+	for i in TILE_COUNT:
+		if _activity_cpu[i] >= thresh:
+			n += 1
+	_activity_active_count = n
+
+
+# P2: herätä CPU-dirty-rectin kattamat tilet leimaamalla ne _sim_framella. Kirjoittaa
+# suoraan GPU:n activity_bufferiin (buffer_update) ennen sim-passeja. _dirty_all -> koko taulu.
+func _wake_dirty_tiles() -> void:
+	if not gpu_ready or not activity_buffer.is_valid():
+		return
+	if _dirty_all:
+		# Koko taulu _sim_framelle (yksi buffer_update, 25 kt).
+		if _wake_row.size() != TILE_COUNT * 4:
+			_wake_row.resize(TILE_COUNT * 4)
+		for i in TILE_COUNT:
+			_wake_row.encode_u32(i * 4, _sim_frame)
+		rd.buffer_update(activity_buffer, 0, _wake_row.size(), _wake_row)
+		return
+	if not _dirty_any:
+		return
+	# Osittainen: leimaa dirty-rectin kattamat tilet. Tile-rivi kerrallaan yhtenäinen väli.
+	var tx0 := clampi(_dirty_min_x / TILE_SIZE, 0, TILES_X - 1)
+	var tx1 := clampi(_dirty_max_x / TILE_SIZE, 0, TILES_X - 1)
+	var ty0 := clampi(_dirty_min_y / TILE_SIZE, 0, TILES_Y - 1)
+	var ty1 := clampi(_dirty_max_y / TILE_SIZE, 0, TILES_Y - 1)
+	var row_tiles := tx1 - tx0 + 1
+	if _wake_row.size() < row_tiles * 4:
+		_wake_row.resize(row_tiles * 4)
+	for i in row_tiles:
+		_wake_row.encode_u32(i * 4, _sim_frame)
+	for ty in range(ty0, ty1 + 1):
+		var off := (ty * TILES_X + tx0) * 4
+		rd.buffer_update(activity_buffer, off, row_tiles * 4, _wake_row.slice(0, row_tiles * 4))
+
+
+# ── P2: CPU-rajapinta P3:lle (dirty-alueiden CPU-skannaus) ───────────────────
+# Palauttaa tile-aktiivisuustaulun (leima = viimeisin sim_frame jolloin tileen kirjoitettiin).
+# HUOM: async-readbackin takia taulu on ~1 framen vanha — P3 voi käyttää tätä karkeaan
+# "mihin kannattaa skannata" -päätökseen, ei framen tarkkaan synkronointiin.
+func get_tile_activity() -> PackedInt32Array:
+	return _activity_cpu
+
+
+# P2: oliko tile (tx,ty) aktiivinen viimeisen max_age framen aikana. Perustuu CPU-peiliin
+# (~1 frame vanha). Käytä P3:ssa: skannaa CPU-fysiikka/tuki vain aktiivisille alueille.
+func is_tile_active_recent(tx: int, ty: int, max_age: int) -> bool:
+	if tx < 0 or tx >= TILES_X or ty < 0 or ty >= TILES_Y:
+		return false
+	if _activity_cpu.size() < TILE_COUNT:
+		return true  # ei vielä dataa -> oletus aktiivinen (turvallinen)
+	return _activity_cpu[ty * TILES_X + tx] + max_age >= _sim_frame
+
+
+# P2: onko solun (x,y) tile aktiivinen viimeisen max_age framen aikana (P3-mukavuusmetodi).
+func is_cell_active_recent(x: int, y: int, max_age: int) -> bool:
+	return is_tile_active_recent(x / TILE_SIZE, y / TILE_SIZE, max_age)
+
+
+# P3: pitääkö puun tuki-BFS ajaa? Palauttaa true jos jokin tile on ollut aktiivinen
+# viimeisimmän tarkistuksen (checkpoint) jälkeen — mikä tahansa materiaalin liike tai
+# CPU-kirjoitus leimaa tilen. 6240 int-vertailua = halpa. Turvallisuusmarginaali kattaa
+# aktiivisuustaulun ~1 framen async-viiveen: vertaa checkpoint - WOOD_CHECK_ACTIVITY_MARGIN
+# jotta viiveen takia myöhästynyt leima ei jää huomaamatta (ylimääräinen BFS on halpaa,
+# huomaamatta jäänyt tuen katoaminen olisi bugi).
+const WOOD_CHECK_ACTIVITY_MARGIN := 2
+func _wood_check_needed() -> bool:
+	if _activity_cpu.size() < TILE_COUNT:
+		return true  # ei vielä dataa -> aja turvallisesti
+	var thresh := _last_wood_check_sim_frame - WOOD_CHECK_ACTIVITY_MARGIN
+	for i in TILE_COUNT:
+		if _activity_cpu[i] > thresh:
+			return true
+	return false
 
 
 func _upload_render() -> void:
@@ -3010,6 +3403,7 @@ func _upload_render() -> void:
 
 # Vedä irtonaiset pikselit kohti pistettä (CPU, ei duplikaatiota)
 func _pull_pixels(cx: int, cy: int, radius: int) -> void:
+	_mark_grid_dirty_all()  # P1: grav gun -debugpolku -> täysi lataus
 	var r2 := radius * radius
 	# Kerää irtonaiset pikselit ja järjestä lähimmät ensin (ne siirtyvät ensin)
 	var pixels: Array[Vector3i] = []  # (idx, dx, dy)
@@ -3081,6 +3475,7 @@ func _pull_pixels(cx: int, cy: int, radius: int) -> void:
 
 # Tyhjentää edellisellä framella kirjoitetut held-pikselit gridistä
 func _grav_erase_held() -> void:
+	_mark_grid_dirty_all()  # P1: grav gun -debugpolku -> täysi lataus
 	for idx in grav_held_written:
 		if idx >= 0 and idx < TOTAL and grid[idx] == MAT_HELD:
 			grid[idx] = MAT_EMPTY
@@ -3123,6 +3518,7 @@ func _grav_has_los(x0: int, y0: int, x1: int, y1: int) -> bool:
 # Skannaa r+2 säteellä mutta tallentaa offsetin max r:n pinnalle —
 # näin palloa vasten pysähtyneeet pikselit pääsevät mukaan eivätkä jää juuttumaan
 func _grav_capture() -> void:
+	_mark_grid_dirty_all()  # P1: grav gun -debugpolku -> täysi lataus
 	if grav_held.size() >= GRAV_MAX_HELD:
 		return
 	var cx := grav_gun_pos.x
@@ -3166,6 +3562,7 @@ func _grav_capture() -> void:
 # Kirjoittaa held-pikselit palloksi kursoorin ympärille, sisältä ulospäin.
 # Alkuperäinen muoto unohdetaan — pikselit tiivistetään kompaktiksi palloksi.
 func _grav_write_held() -> void:
+	_mark_grid_dirty_all()  # P1: grav gun -debugpolku -> täysi lataus
 	grav_held_written.clear()  # Tyhjennä aina ensin — muuten vapautus käyttää vanhoja positioita
 	var cx := grav_gun_pos.x
 	var cy := grav_gun_pos.y
@@ -3206,6 +3603,7 @@ func _grav_write_held() -> void:
 # Vapauttaa kaikki held-pikselit gridiin (hiiren vapautus)
 # Skannaa gridin suoraan MAT_HELD-solujen löytämiseksi — ei riipu grav_held_written-synkasta
 func _grav_release() -> void:
+	_mark_grid_dirty_all()  # P1: grav gun -debugpolku -> täysi lataus
 	# Kerää HELD-positiot suoraan gridistä (varma tapa löytää pallon nykyiset solut)
 	var held_positions: Array[int] = []
 	for i in TOTAL:
@@ -3223,6 +3621,7 @@ func _grav_release() -> void:
 
 # Heitä irtonaiset pikselit suuntaan (CPU, ei duplikaatiota)
 func _throw_pixels(center: Vector2i, radius: int, velocity: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: heitetyt pikselit hajautuvat -> täysi lataus
 	var r2 := radius * radius
 	# Kerää ensin kaikki siirrettävät pikselit
 	var moves: Array[Vector3i] = []  # (src_idx, dst_x, dst_y)
@@ -3276,6 +3675,7 @@ func _throw_pixels(center: Vector2i, radius: int, velocity: Vector2) -> void:
 # Kutsutaan näppäimellä P
 
 func run_explosion_benchmark() -> void:
+	_mark_grid_dirty_all()  # P1: benchmark-debugpolku -> täysi lataus
 	var cx: int = W / 2
 	var cy: int = SIM_HEIGHT / 2
 	var block_size: int = 40
@@ -3321,6 +3721,7 @@ func run_explosion_benchmark() -> void:
 
 # Etsi räjähdyksen jälkeen irtonaiset kivipalat ja luo niistä rigid bodyt
 func _detect_detached_stone(cx: int, cy: int, radius: int) -> void:
+	_mark_grid_dirty_all()  # P1: irtokivien tunnistus muuttaa gridiä hajautetusti
 	var scan_r := radius + 5  # Skannausalue hieman isompi kuin räjähdys
 	var min_x := maxi(0, cx - scan_r)
 	var max_x := mini(W - 1, cx + scan_r)
@@ -3431,6 +3832,11 @@ func _update_conveyors(delta: float) -> bool:
 	for belt in conveyors:
 		if belt.update_belt(grid, color_seed, W, SIM_HEIGHT, delta):
 			modified = true
+			# P1: hihnan koko pituus + marginaali (materiaali liikkuu lattian päällä)
+			_mark_grid_dirty(
+				mini(belt.start_pos.x, belt.end_pos.x) - 4, mini(belt.start_pos.y, belt.end_pos.y) - 6,
+				maxi(belt.start_pos.x, belt.end_pos.x) + 4, maxi(belt.start_pos.y, belt.end_pos.y) + 4
+			)
 		if belt.broken:
 			_unregister_building_pixels(belt.floor_pixels)
 			belt.queue_free()
@@ -3441,6 +3847,7 @@ func _update_conveyors(delta: float) -> bool:
 
 
 func _create_conveyor(start: Vector2, end: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen sijoitus kirjoittaa rakennepikselit -> täysi lataus
 	var BeltScene := preload("res://scripts/conveyor_belt.gd")
 	var belt = BeltScene.new()
 	belt.setup(Vector2i(start), Vector2i(end))
@@ -3485,6 +3892,7 @@ func _wall_pixels(start: Vector2, end: Vector2) -> Array[Vector2i]:
 
 # Piirtää STONE-seinän start→end, 3px paksuus normaalin suuntaan
 func _create_wall(start: Vector2, end: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: seinän rakennus (harvinainen) -> täysi lataus
 	var pixels := _wall_pixels(start, end)
 	for p in pixels:
 		var idx := p.y * W + p.x
@@ -3894,6 +4302,7 @@ func _machine_zone_ids() -> Dictionary:
 
 
 func _place_furnace(pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen sijoitus kirjoittaa rakennepikselit -> täysi lataus
 	var FurnaceScript := preload("res://scripts/furnace.gd")
 	var furnace = FurnaceScript.new()
 	furnace.sprite_atlas = sprite_atlas
@@ -3914,6 +4323,7 @@ func _update_furnaces(delta: float) -> bool:
 	for f in furnaces:
 		if f.update_furnace(grid, color_seed, W, SIM_HEIGHT, delta):
 			modified = true
+			_mark_machine_dirty(f.grid_pos.x, f.grid_pos.y, f.FURNACE_W, f.FURNACE_H)
 		# Luo tuotos-rigid body kun uuni on valmis
 		if f.glass_ready:
 			f.glass_ready = false
@@ -3954,9 +4364,13 @@ func _spawn_smelted_body(drop_pos: Vector2i, mat: int) -> void:
 			color_seed[p.y * W + p.x] = seeds[i]
 			physics_world.body_map[p.y * W + p.x] = body.body_id
 	paint_pending = true
+	# P1: uunin harkon 2×2-alue. Putoaminen tämän jälkeen kulkee fysiikan kautta
+	# (physics step -> _mark_grid_dirty_all), joten pieni marginaali riittää tähän.
+	_mark_grid_dirty(drop_pos.x - 1, drop_pos.y - 1, drop_pos.x + 2, drop_pos.y + 2)
 
 
 func _place_money_exit(pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen sijoitus kirjoittaa rakennepikselit -> täysi lataus
 	var me = MoneyExit.new()
 	me.sprite_atlas = sprite_atlas
 	me.setup(Vector2i(pos))
@@ -3978,6 +4392,8 @@ func _update_money_exits(delta: float) -> bool:
 		if not consumed.is_empty():
 			deposit_cargo(consumed)
 			modified = true
+			# P1: base/money-exit rakenne + intake-purkualue yläpuolella (DROP_HEIGHT)
+			_mark_machine_dirty(me.grid_pos.x, me.grid_pos.y, me.EXIT_W, me.EXIT_H)
 		if me.broken:
 			_unregister_building_pixels(me.structure_pixels)
 			me.queue_free()
@@ -3988,6 +4404,7 @@ func _update_money_exits(delta: float) -> bool:
 
 
 func _place_crusher(pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen sijoitus kirjoittaa rakennepikselit -> täysi lataus
 	var c = Crusher.new()
 	c.sprite_atlas = sprite_atlas
 	c.setup(Vector2i(pos))
@@ -4003,6 +4420,7 @@ func _place_crusher(pos: Vector2) -> void:
 
 
 func _place_drill(pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen sijoitus kirjoittaa rakennepikselit -> täysi lataus
 	var d = DrillScript.new()
 	d.sprite_atlas = sprite_atlas
 	d.setup(Vector2i(pos))
@@ -4023,6 +4441,8 @@ func _update_drills(delta: float) -> bool:
 		if d.update_drill(grid, color_seed, W, SIM_HEIGHT, delta, MAT_BEDROCK):
 			modified = true
 			paint_pending = true
+			# P1: poran rakenne + kaivualue alapuolella (pad kattaa putoamisen/kaivun)
+			_mark_machine_dirty(d.grid_pos.x, d.grid_pos.y, d.DRILL_W, d.DRILL_H)
 		# Rekisteröi uudelleen (rakenne voi olla siirtynyt putoamisen myötä)
 		_register_building_pixels(d.structure_pixels)
 		if d.broken:
@@ -4030,6 +4450,7 @@ func _update_drills(delta: float) -> bool:
 			# Poista poran pikselit gridistä ennen vapautusta
 			d._erase_from_grid(grid, color_seed, W, SIM_HEIGHT)
 			paint_pending = true
+			_mark_machine_dirty(d.grid_pos.x, d.grid_pos.y, d.DRILL_W, d.DRILL_H)
 			d.queue_free()
 		else:
 			alive.append(d)
@@ -4098,6 +4519,7 @@ func _update_crushers(delta: float) -> bool:
 	for c in crushers:
 		if c.update_crusher(grid, color_seed, W, SIM_HEIGHT, delta):
 			modified = true
+			_mark_machine_dirty(c.grid_pos.x, c.grid_pos.y, c.CRUSHER_W, c.CRUSHER_H)
 		if c.output_ready:
 			c.output_ready = false
 			_spawn_crusher_output(c.output_drop_pos, c.output_material, c.output_amount)
@@ -4121,6 +4543,8 @@ func _spawn_crusher_output(drop_pos: Vector2i, mat: int, amount: int) -> void:
 				grid[py * W + px] = mat
 				color_seed[py * W + px] = randi() % 256
 	paint_pending = true
+	# P1: murskaustuotoksen alue (4 px leveä, ceil(amount/4) korkea)
+	_mark_grid_dirty(drop_pos.x, drop_pos.y, drop_pos.x + 3, drop_pos.y + (amount / 4) + 1)
 
 
 func _clear_buildings() -> void:
@@ -4175,6 +4599,7 @@ func _handle_launcher_click(world_pos: Vector2) -> void:
 			_register_building_pixels(launcher.structure_pixels)
 			_register_building_pixels(launcher._jalusta_pixels)
 			paint_pending = true
+			_mark_grid_dirty_all()  # P1: hissilingon rakenne kirjoitettu -> täysi lataus
 			launcher_phase = 1  # Takaisin vaiheeseen 1 — voidaan sijoittaa lisää
 			print("Launcher: rakennettu kohtaan %s→%s, suunta %.1f" % [launcher_start, launcher_end, dir])
 
@@ -4253,6 +4678,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx] == MAT_EMPTY:
 					grid[tidx] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx, ty)  # P3: rakettitrail-pikseli -> tarkka piste
 			# Toinen trail-pikseli hieman lähempänä
 			var trail_pos2 := old_pos - vel_norm * 1.0
 			var tx2 := int(trail_pos2.x)
@@ -4262,6 +4688,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx2] == MAT_EMPTY:
 					grid[tidx2] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx2, ty2)  # P3: rakettitrail-pikseli -> tarkka piste
 
 		# Bresenham törmäystarkistus
 		var landed := false
@@ -4355,6 +4782,8 @@ func _flying_land(fp: Dictionary, x: int, y: int) -> void:
 		grid[idx] = fp["mat"]
 		color_seed[idx] = fp["seed"]
 		paint_pending = true
+		# P3: yksittäisen laskeutuvan pikselin kirjoitus -> tarkka piste (pad 1)
+		_mark_grid_dirty(x - 1, y - 1, x + 1, y + 1)
 
 
 func _bresenham(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
@@ -4381,6 +4810,7 @@ func _bresenham(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
 
 
 func _sell_nearest_building(sell_pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen myynti/poisto (harvinainen) -> täysi lataus
 	var best_dist := 20.0
 	var best_obj = null
 	var best_list: Array = []
@@ -4520,6 +4950,7 @@ func _find_nearest_building(grid_pos: Vector2) -> Variant:
 
 # Myy rakennuksen grid-koordinaatin läheltä, palauttaa 50% ostohinnasta
 func _sell_building_at(grid_pos: Vector2) -> void:
+	_mark_grid_dirty_all()  # P1: rakennuksen myynti/poisto (harvinainen) -> täysi lataus
 	var obj: Variant = _find_nearest_building(grid_pos)
 	if obj == null:
 		_show_toast("Ei rakennusta lähellä!")
@@ -4988,6 +5419,7 @@ func load_world() -> void:
 	if not FileAccess.file_exists("user://save.dat"):
 		print("Tallennusta ei löydy")
 		return
+	_mark_grid_dirty_all()  # P1: tallennuksen lataus kirjoittaa koko maailman -> täysi lataus
 	var file := FileAccess.open("user://save.dat", FileAccess.READ)
 	if not file:
 		push_error("Lataus epäonnistui")
@@ -5170,6 +5602,18 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			var path: String = step.get("path", "")
 			_save_debug_image(path)
 			print("ScenarioRunner: export -> %s" % path)
+		"hash_grid":
+			# P2: determinismivertailu — tulosta materiaali-gridin hash + per-materiaali-laskurit.
+			# Aja skenaario --activity=1 ja --activity=0 ja vertaa: HASH pitää täsmätä bit-tarkasti.
+			var hlabel: String = step.get("label", "")
+			_scenario_hash_grid(hlabel)
+		"gpu_bench":
+			# P2: mittaa PUHDAS GPU-sim-aika synkronisesti (ohittaa P1:n async-pipelinen joka
+			# piilottaa GPU-ajan). Ajaa vain CA-passit submit+sync N kertaa nykyisellä (asettuneella)
+			# grid-tilalla ja raportoi ms/frame. Vertaa --activity=1 vs --activity=0.
+			var iters: int = step.get("iters", 200)
+			var bpasses: int = step.get("passes", 0)  # 0 = käytä nykyistä gpu_passes
+			_scenario_gpu_bench(iters, bpasses)
 		"assert_material":
 			var ax: int = step.get("x", 0)
 			var ay: int = step.get("y", 0)
@@ -5710,6 +6154,7 @@ func _ca_expand_bounds(r: Rect2i) -> void:
 
 
 func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
+	_mark_grid_dirty_all()  # P1: skenaario-täyttö -> täysi lataus
 	for dy in h:
 		var gy := y + dy
 		if gy < 0 or gy >= SIM_HEIGHT:
@@ -5725,7 +6170,90 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 	_ca_expand_bounds(Rect2i(x, y, w, h))
 
 
+# P2: synkroninen GPU-sim-mikrobenchmark. Ajaa vain CA-passit (ei pack/extract/render/readback)
+# submit+sync iters kertaa nykyisellä grid_buffer-tilalla ja mittaa seinäkelloajan/frame. Koska
+# P1:n async-pipeline piilottaa GPU-ajan (gpu:ms = vain komentojen tallennus), tämä on ainoa tapa
+# nähdä early-outin todellinen GPU-säästö asettuneessa maailmassa. sim_frame pidetään vakiona ->
+# asettuneet tilet nukkuvat (realistinen steady-state-kustannus). Idempotentti: settled ei kirjoita.
+func _scenario_gpu_bench(iters: int, passes_override: int = 0) -> void:
+	if not gpu_ready:
+		print("gpu_bench: gpu_ready=false, ohitetaan")
+		return
+	var bench_passes: int = passes_override if passes_override > 0 else gpu_passes
+	var groups_x := ceili(float(W) / 16.0)
+	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
+	var push := PackedByteArray()
+	push.resize(48)
+	push.encode_u32(0, W)
+	push.encode_u32(4, SIM_HEIGHT)
+	push.encode_u32(16, 0)
+	push.encode_u32(20, 0)
+	push.encode_u32(24, 0)
+	push.encode_u32(28, 0)   # grav_gun_mode = 0
+	push.encode_u32(32, 0)
+	push.encode_u32(36, _sim_frame)
+	push.encode_u32(40, 1 if tile_activity_enabled else 0)
+	push.encode_u32(44, 0)
+	# Lämmittely jotta ajurin/pipelinen alustus ei vääristä mittausta
+	for warm in 2:
+		var wcl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(wcl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(wcl, pipeline)
+			rd.compute_list_bind_uniform_set(wcl, uniform_set, 0)
+			rd.compute_list_set_push_constant(wcl, push, push.size())
+			rd.compute_list_dispatch(wcl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var t0 := Time.get_ticks_usec()
+	for it in iters:
+		var cl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(cl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(cl, pipeline)
+			rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
+			rd.compute_list_set_push_constant(cl, push, push.size())
+			rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var ms := float(Time.get_ticks_usec() - t0) / 1000.0 / float(iters)
+	print("gpu_bench: activity=%d passes=%d act=%d/%d -> %.4f ms/frame (%d iters, synk. submit+sync)" % [
+		1 if tile_activity_enabled else 0, bench_passes, _activity_active_count, TILE_COUNT, ms, iters])
+
+
+# P2: hashaa materiaali-grid (FNV-1a) + per-materiaali-laskurit. Käytetään determinismi-
+# vertailussa: sama skenaario --activity=1 vs --activity=0 -> HASH pitää olla identtinen.
+# Hashataan vain materiaali-ID:t (grid[]), ei seediä (seed liikkuu solun mukana mutta on
+# renderöintikoriste — merkityksellinen käyttäytymisero näkyy materiaalijakaumassa).
+func _scenario_hash_grid(label: String) -> void:
+	var h: int = -3750763034362895579  # FNV-1a 64-bit offset basis (wrapping int64)
+	var prime: int = 1099511628211
+	var counts := {}
+	for i in TOTAL:
+		var m: int = grid[i]
+		h = (h ^ m) * prime
+		if m != MAT_EMPTY:
+			counts[m] = counts.get(m, 0) + 1
+	# Järjestä laskurit materiaali-ID:n mukaan vakaan tulosteen vuoksi
+	var keys := counts.keys()
+	keys.sort()
+	var parts := PackedStringArray()
+	for k in keys:
+		parts.append("%d:%d" % [k, counts[k]])
+	print("ScenarioRunner: HASH [%s] activity=%d hash=%d counts={%s}" % [
+		label, 1 if tile_activity_enabled else 0, h, ", ".join(parts)])
+
+
 func _scenario_place_body(x: int, y: int, w: int, h: int, mat: int) -> void:
+	_mark_grid_dirty_all()  # P1: skenaario-kappaleen sijoitus -> täysi lataus
 	# Kirjoita pikselit gridiin ja luo dynaaminen fysiikkakappale
 	var pixels: Array[Vector2i] = []
 	for dy in h:
@@ -5999,6 +6527,7 @@ func _scenario_mvp_render(path: String, label: String) -> void:
 
 
 func _autofill_test() -> void:
+	_mark_grid_dirty_all()  # P1: debug-täyttötesti -> täysi lataus
 	# Täytä 25% maailmasta hiekalla mittausta varten
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 12345
@@ -6013,9 +6542,17 @@ func _autofill_test() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		if gpu_ready and rd != null:
+			# P1: kuittaa mahdollinen kesken oleva asynkroninen submit ennen RID-vapautusta,
+			# ettei GPU ole työn kesken / async-callback laukea vapautetun tilan päälle.
+			if _gpu_submitted:
+				rd.sync()
+				_gpu_submitted = false
+				_readback_pending = false
 			rd.free_rid(pipeline)
 			rd.free_rid(uniform_set)
 			rd.free_rid(grid_buffer)
+			if activity_buffer.is_valid():
+				rd.free_rid(activity_buffer)  # P2: aktiivisuustaulu
 			rd.free_rid(shader_rid)
 			# Transfer-shaderin resurssit vuotivat aiemmin exitissa (1 Compute + 2
 			# StorageBuffer + 1 Shader -varoitukset) — vapautetaan samassa syklissa.
