@@ -1,0 +1,530 @@
+#[compute]
+#version 450
+
+// Kiekkoplaneetan simulaatio: fork simulation.glsl:sta sektorigravitaatiolla.
+// EI wrappia (kiekko ei wrappaa) -> KAIKKI naapurihaut bounds-checkataan molemmilla
+// akseleilla. "Alas" on sektorikohtainen (down_of) kohti gridin keskipistetta.
+// down_of-matikka pidettava IDENTTISENA disc_geom.gd:n kanssa (docs/SPEC_disc_planet.md).
+// 4-faasi-checkerboard, atomiikka ja P2-aktiivisuuslogiikka sailyvat ennallaan.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer GridData {
+    uint cells[];
+} grid;
+
+// P2: tile-aktiivisuuskartta. Yksi tile = 16×16 px = yksi workgroup. Solu sisältää
+// viimeisimmän sim_framen jolloin tileen KIRJOITETTIIN (atomicMax). Koko = (W/16)*(H/16).
+layout(set = 0, binding = 1, std430) restrict buffer ActivityData {
+    uint tiles[];
+} activity;
+
+layout(push_constant, std430) uniform Params {
+    uint width;
+    uint height;
+    uint frame;
+    uint pass_id;         // eri passi per dispatch
+    uint pad0;
+    uint grav_gun_x;      // Gravity gun kohde X (grid-koordinaatti)
+    uint grav_gun_y;      // Gravity gun kohde Y
+    uint grav_gun_mode;   // 0 = pois, 1 = normaali veto, 2 = vakuumi
+    uint grav_gun_radius; // Vetovoiman säde pikseleinä
+    uint sim_frame;       // P2: monotoninen sim-frame-laskuri (kasvaa vain kun passeja ajetaan)
+    uint activity_enabled;// P2: 1 = early-out käytössä, 0 = kaikki tilet aktiivisia (determinismivertailu)
+    uint pad3;            // padding
+} p;
+
+// P2: leimaa solun (cx,cy) tilen aktiiviseksi tälle sim_framelle. Kutsutaan jokaisen
+// onnistuneen grid-kirjoituksen kohdesolulle (molemmat swapin osapuolet) — "kirjoitus
+// soluun ⇒ leima solun tileen" on early-outin korrektiuden ydininvariantti.
+void stamp_idx(uint idx) {
+    uint tiles_x = (p.width + 15u) >> 4u;
+    uint cx = idx % p.width;
+    uint cy = idx / p.width;
+    atomicMax(activity.tiles[(cy >> 4u) * tiles_x + (cx >> 4u)], p.sim_frame);
+}
+
+const uint EMPTY = 0u;
+const uint SAND  = 1u;
+const uint WATER = 2u;
+const uint STONE = 3u;
+const uint WOOD  = 4u;
+const uint FIRE  = 5u;
+const uint OIL   = 6u;
+const uint STEAM = 7u;
+const uint ASH   = 8u;
+const uint WOOD_FALLING = 9u;
+const uint GLASS     = 10u;
+const uint DIRT      = 11u;
+const uint IRON_ORE  = 12u;
+const uint GOLD_ORE  = 13u;
+const uint IRON      = 14u;
+const uint GOLD      = 15u;
+const uint COAL      = 16u;
+const uint HELD      = 17u;  // Gravity gun -kiinnitetty — GPU ohittaa täysin
+const uint GRAVEL    = 18u;  // Sora — kiven murskautuessa syntyvä raskas jauhe
+const uint BEDROCK   = 19u;  // Pohjakivi — tuhoamaton, ei osallistu fysiikkaan
+const uint COPPER      = 20u;  // Kupari-malmi — putoava jauhe, pysyy kivessä paikallaan
+const uint RARE_EARTH  = 21u;  // Rare earth -malmi — putoava jauhe, pysyy kivessä paikallaan
+
+uint get_mat(uint cell) { return cell & 0xFFu; }
+
+// Kiekko EI wrappaa: kaikki naapurit bounds-checkataan molemmilla akseleilla.
+bool in_bounds(ivec2 pos) {
+    return pos.x >= 0 && pos.x < int(p.width) && pos.y >= 0 && pos.y < int(p.height);
+}
+
+uint idx_of(ivec2 pos) {
+    return uint(pos.y) * p.width + uint(pos.x);
+}
+
+// Sektorikohtainen "alas" kohti keskipistetta. PIDETTAVA IDENTTISENA disc_geom.gd:n kanssa.
+// dxc/dyc ovat 2x-skaalattuja deltoja keskipisteesta; parillisella N ne ovat aina parittomia
+// -> ei koskaan 0, sign aina ±1, ei erikoistapauksia keskilinjoilla. |dxc|>|dyc| -> vaakasektori,
+// muuten pysty (tasapeli 45°-diagonaalilla -> pysty).
+ivec2 down_of(uint x, uint y) {
+    int dxc = 2 * int(x) - (int(p.width) - 1);
+    int dyc = 2 * int(y) - (int(p.height) - 1);
+    if (abs(dxc) > abs(dyc)) return ivec2(dxc > 0 ? -1 : 1, 0);
+    return ivec2(0, dyc > 0 ? -1 : 1);
+}
+
+uint hash(uint x) {
+    x ^= x >> 17u;
+    x *= 0xbf58476du;
+    x ^= x >> 13u;
+    x *= 0x94d049bbu;
+    x ^= x >> 16u;
+    return x;
+}
+
+bool falls(uint mat) {
+    return mat == SAND || mat == WATER || mat == OIL || mat == ASH || mat == WOOD_FALLING || mat == DIRT || mat == GRAVEL
+        || mat == IRON_ORE || mat == GOLD_ORE || mat == COAL || mat == COPPER || mat == RARE_EARTH;
+}
+
+bool is_liquid(uint mat) {
+    return mat == WATER || mat == OIL;
+}
+
+bool is_powder(uint mat) {
+    return mat == SAND || mat == ASH || mat == DIRT || mat == GRAVEL
+        || mat == IRON_ORE || mat == GOLD_ORE || mat == COAL || mat == COPPER || mat == RARE_EARTH;
+}
+
+// Yritä siirtää solu src_idx -> dst_idx atomisesti
+// Pyyhitään lähde ENSIN → estää duplikaation (vain yksi thread voi "poimia" solun)
+bool try_atomic_move(uint src_idx, uint dst_idx, uint my_cell, uint expected_dst) {
+    // 1. Poista lähteestä (varaa omistajuus)
+    uint old_src = atomicCompSwap(grid.cells[src_idx], my_cell, expected_dst);
+    if (old_src != my_cell) return false;  // Joku muu otti sen jo
+
+    // 2. Kirjoita kohteeseen
+    uint old_dst = atomicCompSwap(grid.cells[dst_idx], expected_dst, my_cell);
+    if (old_dst == expected_dst) {
+        // P2: molemmat solut muuttuivat -> leimaa molempien tilet aktiivisiksi
+        stamp_idx(src_idx);
+        stamp_idx(dst_idx);
+        return true;  // Onnistui
+    }
+
+    // 3. Kohde varattu — palauta lähde
+    atomicCompSwap(grid.cells[src_idx], expected_dst, my_cell);
+    return false;
+}
+
+// Yritä vaihtaa kaksi solua (esim. hiekka uppoaa veden läpi)
+bool try_atomic_swap(uint src_idx, uint dst_idx, uint src_cell, uint dst_cell) {
+    // Yritä ensin kirjoittaa src:n arvo dst:hen
+    uint old_dst = atomicCompSwap(grid.cells[dst_idx], dst_cell, src_cell);
+    if (old_dst == dst_cell) {
+        // dst onnistui — kirjoita dst:n arvo src:hen
+        atomicCompSwap(grid.cells[src_idx], src_cell, dst_cell);
+        // P2: molemmat solut vaihtuivat -> leimaa molempien tilet
+        stamp_idx(src_idx);
+        stamp_idx(dst_idx);
+        return true;
+    }
+    return false;
+}
+
+// Gravity gun: vetää pikselin kohti kursoria (toimii jo absoluuttisilla suunnilla).
+// Etäisyyspohjainen todennäköisyys: lähellä nopea, kaukana hidas
+bool try_gravity_gun(uint idx, uint x, uint y, uint my_cell) {
+    int gx = int(p.grav_gun_x);
+    int gy = int(p.grav_gun_y);
+    int dx = gx - int(x);
+    int dy = gy - int(y);
+    int dist2 = dx * dx + dy * dy;
+    int r = int(p.grav_gun_radius);
+
+    if (dist2 > r * r || dist2 == 0) return false;
+
+    // Etäisyyspohjainen todennäköisyys: lähellä ~95%, kaukana ~5%
+    float t = clamp(sqrt(float(dist2)) / float(r), 0.0, 1.0);
+    float prob = mix(0.95, 0.05, t * t);
+    uint rng_local = hash(x * 1234567u ^ y * 7654321u ^ p.frame * 48271u ^ p.pass_id * 16807u);
+    if (float(rng_local & 255u) / 255.0 > prob) return false;
+
+    uint my_mat = get_mat(my_cell);
+
+    int sx = (dx > 0) ? 1 : (dx < 0) ? -1 : 0;
+    int sy = (dy > 0) ? 1 : (dy < 0) ? -1 : 0;
+
+    // Yritys 1: pääakseli
+    {
+        int mx = (abs(dx) >= abs(dy)) ? sx : 0;
+        int my_ = (abs(dx) >= abs(dy)) ? 0 : sy;
+        int nx = int(x) + mx; int ny = int(y) + my_;
+        if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+            uint di = uint(ny) * p.width + uint(nx);
+            uint dc = grid.cells[di]; uint dm = get_mat(dc);
+            if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
+        }
+    }
+    // Yritys 2: diagonaali
+    if (sx != 0 && sy != 0) {
+        int nx = int(x) + sx; int ny = int(y) + sy;
+        if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+            uint di = uint(ny) * p.width + uint(nx);
+            uint dc = grid.cells[di]; uint dm = get_mat(dc);
+            if (dm == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            if (is_powder(my_mat) && is_liquid(dm)) return try_atomic_swap(idx, di, my_cell, dc);
+        }
+    }
+    // Yritys 3: sivuakseli
+    {
+        int ax = (abs(dx) >= abs(dy)) ? 0 : sx;
+        int ay = (abs(dx) >= abs(dy)) ? sy : 0;
+        if (ax != 0 || ay != 0) {
+            int nx = int(x) + ax; int ny = int(y) + ay;
+            if (nx >= 0 && uint(nx) < p.width && ny >= 0 && uint(ny) < p.height) {
+                uint di = uint(ny) * p.width + uint(nx);
+                uint dc = grid.cells[di];
+                if (get_mat(dc) == EMPTY) return try_atomic_move(idx, di, my_cell, dc);
+            }
+        }
+    }
+    return false;
+}
+
+// P2: workgroup-jaettu aktiivisuuslippu (thread 0 kirjoittaa, kaikki lukevat barrierin jälkeen)
+shared uint wg_active;
+
+void main() {
+    // ── P2: workgroup-tason early-out asettuneille alueille ──────────────────────
+    // Yksi tile = yksi 16×16-workgroup. Thread 0 lukee oman tilen JA 8 naapuritilen
+    // aktiivisuusleimat; jos yksikään on tuore (>= sim_frame-1) workgroup jatkaa, muuten
+    // kaikki 256 threadia palaavat heti -> asettunut alue ei maksa mitään. Naapuri-OR kattaa
+    // tilerajan yli valuvan materiaalin (1 framen herätysviive rajalla on hyväksyttävä).
+    // barrier() vaatii että KAIKKI threadit saavuttavat sen -> tehdään ENNEN bounds/phase-
+    // checkejä (N=1408 on 16:n monikerta -> ei out-of-bounds-threadeja).
+    if (gl_LocalInvocationIndex == 0u) {
+        uint tiles_x = (p.width + 15u) >> 4u;
+        uint tiles_y = (p.height + 15u) >> 4u;
+        int tx = int(gl_WorkGroupID.x);
+        int ty = int(gl_WorkGroupID.y);
+        uint act = 0u;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                // KIEKKO: EI wrappia -> tilet clampataan molemmilla akseleilla (reunatile
+                // ei naapuroi vastakkaista laitaa).
+                int nx = clamp(tx + dx, 0, int(tiles_x) - 1);
+                int ny = clamp(ty + dy, 0, int(tiles_y) - 1);
+                uint stamp = activity.tiles[uint(ny) * tiles_x + uint(nx)];
+                // stamp + 1 >= sim_frame  <=>  stamp >= sim_frame-1  (uint-underflow-turvallinen)
+                if (stamp + 1u >= p.sim_frame) { act = 1u; }
+            }
+        }
+        wg_active = act;
+    }
+    barrier();
+    if (p.activity_enabled != 0u && wg_active == 0u) return;
+
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+
+    if (x >= p.width || y >= p.height) return;
+
+    // Margolus-faasi: käsittele vain solut jotka kuuluvat tähän passiin
+    // Neljä faasia vuorotellen (pass_id % 4): TL, TR, BL, BR
+    uint marg_phase = p.pass_id % 4u;
+    uint ox = marg_phase & 1u;
+    uint oy = (marg_phase >> 1u) & 1u;
+    if ((x & 1u) != ox || (y & 1u) != oy) return;
+
+    uint idx = y * p.width + x;
+    uint my_cell = grid.cells[idx];
+    uint mat = get_mat(my_cell);
+
+    // Staattiset ja tyhjät skipataan
+    if (mat == EMPTY || mat == STONE || mat == WOOD) return;
+    if (mat == GLASS || mat == IRON || mat == GOLD) return;
+    if (mat == HELD || mat == BEDROCK) return;  // BEDROCK = inert pohjakivi
+    // GRAVEL, IRON_ORE, GOLD_ORE, COAL simuloidaan putoavina jauheina (is_powder()-haara)
+
+    // P2: pidä epälokaalit/todennäköisyyspohjaiset materiaalit AINA hereillä. Neste skannaa
+    // sivulle kauas (epälokaali) ja tuli/höyry voivat ohittaa kirjoituksen framen ajaksi mutta
+    // muuttua myöhemmin. Ilman tätä niiden tile voisi nukahtaa ennenaikaisesti -> divergenssi.
+    if (mat == WATER || mat == OIL || mat == FIRE || mat == STEAM) {
+        stamp_idx(idx);
+    }
+
+    // Gravity gun -veto: GPU vetää irtonaiset pikselit kohti kursoria
+    if (p.grav_gun_mode > 0u && falls(mat)) {
+        if (try_gravity_gun(idx, x, y, my_cell)) return;
+    }
+
+    uint rng = hash(x * 374761393u + y * 668265263u + p.frame * 48271u + p.pass_id * 16807u);
+    bool coin = (rng & 1u) != 0u;
+    int dir = coin ? 1 : -1;
+
+    // Sektorikohtainen kanta: "alas" kohti keskipistetta + kohtisuora sivusuunta.
+    ivec2 pos = ivec2(int(x), int(y));
+    ivec2 down = down_of(x, y);
+    ivec2 perp = ivec2(-down.y, down.x);
+
+    // ========== JAUHE (hiekka, tuhka) ==========
+    if (is_powder(mat)) {
+        // Suoraan alas (kohti keskipistetta)
+        {
+            ivec2 bpos = pos + down;
+            if (in_bounds(bpos)) {
+                uint below_idx = idx_of(bpos);
+                uint below_cell = grid.cells[below_idx];
+                uint below_mat = get_mat(below_cell);
+
+                if (below_mat == EMPTY) {
+                    if (try_atomic_move(idx, below_idx, my_cell, below_cell)) return;
+                }
+                // Uppoa nesteen läpi
+                if (below_mat == WATER || below_mat == OIL) {
+                    if (try_atomic_swap(idx, below_idx, my_cell, below_cell)) return;
+                }
+            }
+        }
+
+        // Diagonaali alas (down + sivusuunta)
+        for (int attempt = 0; attempt < 2; attempt++) {
+            int s = (attempt == 0) ? dir : -dir;
+            ivec2 dpos = pos + down + s * perp;
+            if (in_bounds(dpos)) {
+                uint diag_idx = idx_of(dpos);
+                uint diag_cell = grid.cells[diag_idx];
+                uint diag_mat = get_mat(diag_cell);
+                if (diag_mat == EMPTY) {
+                    if (try_atomic_move(idx, diag_idx, my_cell, diag_cell)) return;
+                }
+                if (diag_mat == WATER || diag_mat == OIL) {
+                    if (try_atomic_swap(idx, diag_idx, my_cell, diag_cell)) return;
+                }
+            }
+        }
+        return;
+    }
+
+    // ========== PUTOAVA PUU ==========
+    if (mat == WOOD_FALLING) {
+        // Suoraan alas (vain tyhjään — ei uppoa nesteiden läpi)
+        {
+            ivec2 bpos = pos + down;
+            if (in_bounds(bpos)) {
+                uint below_idx = idx_of(bpos);
+                uint below_cell = grid.cells[below_idx];
+                if (get_mat(below_cell) == EMPTY) {
+                    if (try_atomic_move(idx, below_idx, my_cell, below_cell)) return;
+                }
+            }
+        }
+
+        // Diagonaali alas (vain tyhjään)
+        for (int attempt = 0; attempt < 2; attempt++) {
+            int s = (attempt == 0) ? dir : -dir;
+            ivec2 dpos = pos + down + s * perp;
+            if (in_bounds(dpos)) {
+                uint diag_idx = idx_of(dpos);
+                uint diag_cell = grid.cells[diag_idx];
+                if (get_mat(diag_cell) == EMPTY) {
+                    if (try_atomic_move(idx, diag_idx, my_cell, diag_cell)) return;
+                }
+            }
+        }
+
+        // Ei voinut liikkua mihinkään → laskeutunut, palaudu puuksi
+        if (atomicCompSwap(grid.cells[idx], my_cell, (my_cell & 0xFFFFFF00u) | WOOD) == my_cell) {
+            stamp_idx(idx);  // P2: WOOD_FALLING→WOOD on tilamuutos -> leima
+        }
+        return;
+    }
+
+    // ========== NESTE (vesi, öljy) ==========
+    if (is_liquid(mat)) {
+        // Alas
+        {
+            ivec2 bpos = pos + down;
+            if (in_bounds(bpos)) {
+                uint below_idx = idx_of(bpos);
+                uint below_cell = grid.cells[below_idx];
+                uint below_mat = get_mat(below_cell);
+                if (below_mat == EMPTY) {
+                    if (try_atomic_move(idx, below_idx, my_cell, below_cell)) return;
+                }
+                // Öljy laskeutuu veden läpi (öljy kevyempää -> vesi vaihtuu alle)
+                if (mat == OIL && below_mat == WATER) {
+                    if (try_atomic_swap(idx, below_idx, my_cell, below_cell)) return;
+                }
+            }
+        }
+
+        // Öljy nousee ylöspäin (poispäin keskipisteestä) veden läpi
+        if (mat == OIL) {
+            ivec2 apos = pos - down;
+            if (in_bounds(apos)) {
+                uint above_idx = idx_of(apos);
+                uint above_cell = grid.cells[above_idx];
+                if (get_mat(above_cell) == WATER) {
+                    if (try_atomic_swap(idx, above_idx, my_cell, above_cell)) return;
+                }
+            }
+        }
+
+        // Diag alas
+        for (int attempt = 0; attempt < 2; attempt++) {
+            int s = (attempt == 0) ? dir : -dir;
+            ivec2 dpos = pos + down + s * perp;
+            if (in_bounds(dpos)) {
+                uint diag_idx = idx_of(dpos);
+                uint diag_cell = grid.cells[diag_idx];
+                if (get_mat(diag_cell) == EMPTY) {
+                    if (try_atomic_move(idx, diag_idx, my_cell, diag_cell)) return;
+                }
+            }
+        }
+
+        // Sivulle (nesteet leviävät perp-suunnassa) — skannaa oman nestetyyppinsä läpi
+        // reunaan asti. Spread-cap: kiekko EI wrappaa, ei koko kehää. Break vieraaseen
+        // materiaaliin (tai bounds) pysäyttää skannauksen esteeseen.
+        uint spread = (mat == WATER) ? 64u : (mat == OIL) ? 32u : 2u;
+        for (uint i = 1u; i <= spread; i++) {
+            ivec2 sp = pos + int(i) * dir * perp;
+            if (!in_bounds(sp)) break;
+            uint side_idx = idx_of(sp);
+            uint side_cell = grid.cells[side_idx];
+            uint side_mat = get_mat(side_cell);
+            if (side_mat == EMPTY) {
+                if (try_atomic_move(idx, side_idx, my_cell, side_cell)) return;
+            } else if (side_mat != mat) {
+                break; // eri aine tai kiinteä este, lopeta
+            }
+            // sama nestelaji: jatka skannausta
+        }
+        for (uint i = 1u; i <= spread; i++) {
+            ivec2 sp = pos - int(i) * dir * perp;
+            if (!in_bounds(sp)) break;
+            uint side_idx = idx_of(sp);
+            uint side_cell = grid.cells[side_idx];
+            uint side_mat = get_mat(side_cell);
+            if (side_mat == EMPTY) {
+                if (try_atomic_move(idx, side_idx, my_cell, side_cell)) return;
+            } else if (side_mat != mat) {
+                break; // eri aine tai kiinteä este, lopeta
+            }
+            // sama nestelaji: jatka skannausta
+        }
+        return;
+    }
+
+    // ========== TULI ==========
+    if (mat == FIRE) {
+        // Kuolema
+        if ((rng % 25u) == 0u) {
+            atomicCompSwap(grid.cells[idx], my_cell, 0u);
+            return;
+        }
+
+        // Nousee poispäin keskipisteestä satunnaisella sivujitterilla: -down + j*perp
+        {
+            ivec2 up = pos - down + (int(rng % 3u) - 1) * perp;
+            if (in_bounds(up)) {
+                uint up_idx = idx_of(up);
+                uint up_cell = grid.cells[up_idx];
+                if (get_mat(up_cell) == EMPTY) {
+                    try_atomic_move(idx, up_idx, my_cell, up_cell);
+                }
+            }
+        }
+
+        // Sytytä naapurit — pysyy absoluuttisena 3×3:na (suunnaton), vain bounds-check
+        uint rng3 = hash(rng + 300u);
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ivec2 np = pos + ivec2(dx, dy);
+                if (in_bounds(np)) {
+                    uint nidx = idx_of(np);
+                    uint ncell = grid.cells[nidx];
+                    uint nmat = get_mat(ncell);
+
+                    if ((nmat == WOOD || nmat == WOOD_FALLING) && (hash(rng3 + uint(dx + dy * 3)) % 50u) == 0u) {
+                        if (atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE) == ncell) {
+                            stamp_idx(nidx);  // P2: naapuri syttyi -> herätä sen tile
+                        }
+                    }
+                    if (nmat == OIL && (hash(rng3 + uint(dx + dy * 3) + 100u) % 12u) == 0u) {
+                        if (atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | FIRE) == ncell) {
+                            stamp_idx(nidx);  // P2: öljy syttyi -> herätä sen tile
+                        }
+                    }
+                    if (nmat == WATER && (hash(rng3 + uint(dx + dy * 3) + 200u) % 8u) == 0u) {
+                        // Vesi → höyry, tuli kuolee
+                        atomicCompSwap(grid.cells[nidx], ncell, (ncell & 0xFFFFFF00u) | STEAM);
+                        atomicCompSwap(grid.cells[idx], my_cell, 0u);
+                        stamp_idx(nidx);  // P2: uusi höyry -> herätä sen tile
+                        stamp_idx(idx);   // P2: tuli kuoli
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Tuli → tuhka
+        if ((hash(rng + 600u) % 100u) == 0u) {
+            atomicCompSwap(grid.cells[idx], my_cell, (my_cell & 0xFFFFFF00u) | ASH);
+        }
+        return;
+    }
+
+    // ========== HÖYRY ==========
+    if (mat == STEAM) {
+        // Katoaa
+        if ((rng & 127u) == 0u) {
+            atomicCompSwap(grid.cells[idx], my_cell, 0u);
+            return;
+        }
+
+        // Nousee poispäin keskipisteestä satunnaisella sivujitterilla: -down + j*perp
+        {
+            ivec2 up = pos - down + (int(rng % 3u) - 1) * perp;
+            if (in_bounds(up)) {
+                uint up_idx = idx_of(up);
+                uint up_cell = grid.cells[up_idx];
+                if (get_mat(up_cell) == EMPTY) {
+                    if (try_atomic_move(idx, up_idx, my_cell, up_cell)) return;
+                }
+            }
+        }
+
+        // Sivulle (perp-suunta)
+        {
+            ivec2 sp = pos + dir * perp;
+            if (in_bounds(sp)) {
+                uint side_idx = idx_of(sp);
+                uint side_cell = grid.cells[side_idx];
+                if (get_mat(side_cell) == EMPTY) {
+                    try_atomic_move(idx, side_idx, my_cell, side_cell);
+                }
+            }
+        }
+        return;
+    }
+}
