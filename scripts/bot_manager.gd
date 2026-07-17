@@ -229,6 +229,7 @@ func add_bot(role: int, p: Vector2) -> Bot:
 	# Pieni deterministinen hajautusoffset IDLE-leijuntaan (ettei botit ole paallekkain)
 	var i := bots.size()
 	b.hover_offset = Vector2(float((i % 4) * 6 - 9), float((i / 4) * 6))
+	b.anim_phase = float(i) * 1.7   # desynkkaa kasien/antennin idle-bob eri botilla
 	bots.append(b)
 	return b
 
@@ -1651,6 +1652,17 @@ const LOAD_GRAVITY := 60.0     # roikuttaa alas; lepoetaisyys = LOAD_GRAVITY / s
 const LOAD_DAMP := 0.10        # vaimennuksen pow-kanta/s (alivaimennettu = mehukas swing)
 const FX_SPEED := 6.0          # imuvirtapartikkelin t-nopeus (1/s) -> lento ~0.17 s
 
+# --- Kädet + antenni (proseduraalinen sekundaarianimaatio) ---
+const HAND_REST := Vector2(4.5, 2.5)   # käden lepopoikkeama podin keskeltä (x peilataan vasemmalle)
+const HAND_SPRING := 26.0              # jousi kohti lepopistettä (pienempi = laahaa enemmän)
+const HAND_DAMP := 0.0009              # nopeuden vaimennus per s (pow-kanta): alivaimennettu -> pehmeä laahaus
+const HAND_IDLE_AMP := 1.1             # idle-bob amplitudi px
+const ANT_BASE := Vector2(0.0, -5.0)   # antennin juuri podin keskeltä (ylös)
+const ANT_LEN := 4.0                   # antennin pituus px
+const ANT_MAX_LEAN := 0.55             # max taipuma rad
+const ANT_SPRING := 55.0               # kohti tavoitekulmaa
+const ANT_DAMP := 0.004                # alivaimennettu -> wobble pysähtyessä
+
 
 func update_visuals(delta: float) -> void:
 	var dt := clampf(delta, 0.0, 0.05)   # kattaa spike-framet
@@ -1659,6 +1671,12 @@ func update_visuals(delta: float) -> void:
 			b.render_pos = b.pos
 			b.load_pos = b.pos + Vector2(0.0, BELLY_OFFSET + LOAD_GRAVITY / LOAD_SPRING)
 			b.load_vel = Vector2.ZERO
+			b.hand_l_pos = b.pos + Vector2(-HAND_REST.x, HAND_REST.y)
+			b.hand_r_pos = b.pos + Vector2(HAND_REST.x, HAND_REST.y)
+			b.hand_l_vel = Vector2.ZERO
+			b.hand_r_vel = Vector2.ZERO
+			b.ant_angle = 0.0
+			b.ant_vel = 0.0
 			b.visuals_init = true
 		# 1) Silota logiikkatikin nykays (render_pos seuraa bot.pos:ia pehmeasti)
 		var a := 1.0 - pow(RENDER_LERP, dt)
@@ -1674,6 +1692,34 @@ func update_visuals(delta: float) -> void:
 		b.load_vel += Vector2(0.0, LOAD_GRAVITY) * dt
 		b.load_vel *= pow(LOAD_DAMP, dt)   # alivaimennettu -> 1-2 nakyvaa swingia
 		b.load_pos += b.load_vel * dt
+		# 2b) Kadet: jousi kohti lepopistetta (render_pos + offset + idle-bob). Koska render_pos
+		#     liikkuu, jousi saa kadet LAAHAAMAAN kiihdytyksessa. Idle-bob desynkattu per botti/kasi.
+		var tt := float(Time.get_ticks_msec()) / 1000.0
+		var working := b.state == Bot.BotState.WORK
+		var bob_l := sin(tt * 1.9 + b.anim_phase) * HAND_IDLE_AMP
+		var bob_r := sin(tt * 2.2 + b.anim_phase + 1.3) * HAND_IDLE_AMP
+		var rest_l := b.render_pos + Vector2(-HAND_REST.x, HAND_REST.y + bob_l)
+		var rest_r := b.render_pos + Vector2(HAND_REST.x, HAND_REST.y + bob_r)
+		# TYO-visualisointi: WORK-tilassa kadet kurottavat kohti tyokohdetta + pieni varina.
+		if working:
+			var wp := _bot_work_point(b)
+			var vib := sin(tt * 22.0 + b.anim_phase) * 0.8   # nopea poraus/kurotusvarina
+			rest_l = rest_l.lerp(wp, 0.45) + Vector2(vib, 0.0)
+			rest_r = rest_r.lerp(wp, 0.45) - Vector2(vib, 0.0)
+		# Jousi + alivaimennus (kuten load_pos)
+		b.hand_l_vel += (rest_l - b.hand_l_pos) * HAND_SPRING * dt
+		b.hand_l_vel *= pow(HAND_DAMP, dt)
+		b.hand_l_pos += b.hand_l_vel * dt
+		b.hand_r_vel += (rest_r - b.hand_r_pos) * HAND_SPRING * dt
+		b.hand_r_vel *= pow(HAND_DAMP, dt)
+		b.hand_r_pos += b.hand_r_vel * dt
+		# 2c) Antenni: taipuu liikesuuntaa vastaan (render_pos laahaa pos:ia -> (pos-render_pos) ~ nopeus)
+		var vel_x := b.pos.x - b.render_pos.x
+		var target_ang := clampf(-vel_x * 0.10, -ANT_MAX_LEAN, ANT_MAX_LEAN)
+		target_ang += sin(tt * 1.3 + b.anim_phase) * 0.06   # pieni idle-sway
+		b.ant_vel += (target_ang - b.ant_angle) * ANT_SPRING * dt
+		b.ant_vel *= pow(ANT_DAMP, dt)
+		b.ant_angle += b.ant_vel * dt
 		# 3) Imuvirtapartikkelit: etene t 0->1, poista perilla olleet
 		if not b.intake_fx.is_empty():
 			var keep: Array = []
@@ -1682,6 +1728,20 @@ func update_visuals(delta: float) -> void:
 				if float(fx["t"]) < 1.0:
 					keep.append(fx)
 			b.intake_fx = keep
+
+
+# Botin nykyinen "tyokohde" sim-pikselikoordinaateissa — kadet kurottavat tata kohti WORK-tilassa.
+# Miner: kesken oleva louhintapikseli (mine_targets[mine_cursor]); hauler: kannettavan kuorman
+# poimintapiste (load_pos, sama jonka _work_vacuum imuroi). Fallback render_pos jos kohdetta ei ole.
+func _bot_work_point(b: Bot) -> Vector2:
+	if b.role == Bot.Role.MINER:
+		if b.mine_cursor < b.mine_targets.size():
+			var p: Vector2i = b.mine_targets[b.mine_cursor]
+			return Vector2(p.x, p.y)
+		return b.render_pos
+	elif b.role == Bot.Role.HAULER:
+		return b.load_pos
+	return b.render_pos + Vector2(0.0, 4.0)
 
 
 # ============================================================
@@ -1710,42 +1770,34 @@ func draw_bots(canvas: CanvasItem) -> void:
 		var offset_y := sin(t * 2.5 + float(i) * 1.7) * 2.0
 		centers[i] = Vector2(base_pos.x, base_pos.y + offset_y)
 
-	# Passi 1: louhintalaserit (piirretaan ensin, jaavat rungon/reunuksen alle)
+	# (Louhintalaser poistettu — kayttajapalaute: animoitu sade ei sopinut botteihin.
+	#  Miner louhii nyt ilman visuaalista palkkia.)
+
+	# Passi 2+3 yhdistetty: botti-sprite (12x12, keskitetty, anchor=center) korvaa entisen
+	# tumman reunuksen + varillisen rungon kaksoispiirron. atlas tulee worldista (pixel_world
+	# lataa sen _ready():ssä); jos se puuttuu tai tex() palauttaa null (esim. headless-ajo
+	# ilman PNG:ta), fallback vanhaan primitiiviparipiirtoon ettei botti jaa nakymattomaksi.
+	var atlas: SpriteAtlas = world.sprite_atlas if world != null else null
 	for i in bots.size():
 		var b := bots[i]
-		if b.role == Bot.Role.MINER and b.state == Bot.BotState.WORK \
-				and not b.mine_targets.is_empty() and b.mine_cursor < b.mine_targets.size():
-			var cx := centers[i].x
-			var cy := centers[i].y
-			var tp: Vector2i = b.mine_targets[b.mine_cursor]
-			# Pieni vareily jotta sade elaa (ei staattinen viiva)
-			var jit := Vector2(sin(t * 40.0 + i) * 1.0, cos(t * 37.0 + i) * 1.0)
-			var target := Vector2(float(tp.x), float(tp.y)) + jit
-			# Ulompi hehku
-			canvas.draw_line(Vector2(cx, cy), target, Color(1.0, 0.35, 0.1, 0.5), 2.5)
-			# Kirkas ydin
-			canvas.draw_line(Vector2(cx, cy), target, Color(1.0, 0.8, 0.45, 0.95), 1.0)
-			# Osumapiste
-			canvas.draw_circle(target, 2.0, Color(1.0, 0.9, 0.55, 0.9))
-
-	# Passi 2: kaikkien bottien tummat reunukset (12x12, keskitetty)
-	for i in bots.size():
 		var cx := centers[i].x
 		var cy := centers[i].y
-		canvas.draw_rect(Rect2(cx - 6.0, cy - 6.0, 12.0, 12.0), Color(0.05, 0.05, 0.08, 0.92))
-
-	# Passi 3: kaikkien bottien varilliset rungot (10x10, keskitetty) — piirtyvat AINA
-	# kaikkien reunusten paalle, koska koko passi 2 on jo suoritettu loppuun.
-	for i in bots.size():
-		var b := bots[i]
-		var col: Color
-		if b.role == Bot.Role.MINER:
-			col = Color(0.88, 0.66, 0.25)   # amber/kulta
+		var nm := "bot_miner" if b.role == Bot.Role.MINER else "bot_hauler"
+		# Hienovarainen hidas hehkusykahdys: kirkkaampi frame 1 vilahtaa vain lyhyesti (~6 s jakso),
+		# muuten rauhallinen frame 0. Per-botti-vaihe (i*2) -> lauma ei sykahda synkassa.
+		# Ei enaa 4 Hz vaketta (kayttajapalaute: "pallo vilkkuu liian hektisesti").
+		var fr := 1 if sin(t * 1.0 + float(i) * 2.0) > 0.5 else 0
+		var tx: Texture2D = atlas.tex(nm, fr) if atlas != null else null
+		if tx:
+			canvas.draw_texture(tx, Vector2(cx - 6.0, cy - 6.0))
 		else:
-			col = Color(0.35, 0.62, 0.95)   # kirkas sininen
-		var cx := centers[i].x
-		var cy := centers[i].y
-		canvas.draw_rect(Rect2(cx - 5.0, cy - 5.0, 10.0, 10.0), col)
+			var col: Color
+			if b.role == Bot.Role.MINER:
+				col = Color(0.88, 0.66, 0.25)   # amber/kulta
+			else:
+				col = Color(0.35, 0.62, 0.95)   # kirkas sininen
+			canvas.draw_rect(Rect2(cx - 6.0, cy - 6.0, 12.0, 12.0), Color(0.05, 0.05, 0.08, 0.92))
+			canvas.draw_rect(Rect2(cx - 5.0, cy - 5.0, 10.0, 10.0), col)
 
 	# Passi 4: haulerien kannettu kuorma — nakyva fysikaalinen klontti (ei enaa abstrakti palkki).
 	# Klontti roikkuu load_pos:n ymparilla (jousifysiikka paivittaa sen update_visualsissa),

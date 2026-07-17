@@ -34,8 +34,14 @@ var glass_ready: bool = false  # pixel_world luo rigid bodyn kun tosi
 var glass_drop_pos: Vector2i = Vector2i.ZERO
 var output_material: int = 10  # Mikä materiaali pudotetaan seuraavaksi
 
+# Sprite — pixel_world antaa viitteen instansoinnin yhteydessä. null = fallback (ei spriteä,
+# vain progress-bar/flash-overlay kuten ennen).
+var sprite_atlas: SpriteAtlas
+var _last_anim_frame: int = -1  # viimeksi piirretty hehku-frame; redraw vain kun tama muuttuu
+
 
 func setup(center: Vector2i) -> void:
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # sprite teravana, ei sumea skaalaus
 	grid_pos = Vector2i(center.x - FURNACE_W / 2, center.y - FURNACE_H / 2)
 	structure_pixels.clear()
 	intake_x.clear()
@@ -134,6 +140,18 @@ func update_furnace(grid: PackedByteArray, color_seed: PackedByteArray, w: int, 
 		_flash_timer -= delta
 		queue_redraw()
 
+	# Sprite-hehkuanimaatio: redraw VAIN kun frame vaihtuu (6 Hz), ja vain kun uunissa on
+	# materiaalia (busy). Idle: frame pysyy 0:ssa -> ei redrawia. _draw() paivittaa _last_anim_framen.
+	if sprite_atlas != null:
+		var busy := false
+		for input_mat: int in RECIPES.keys():
+			if collected.get(input_mat, 0) > 0:
+				busy = true
+				break
+		var glow := (int(Time.get_ticks_msec() / 1000.0 * 6.0) % 3) if busy else 0
+		if glow != _last_anim_frame:
+			queue_redraw()
+
 	return modified
 
 
@@ -168,6 +186,20 @@ func get_input_dump() -> Dictionary:
 func _draw() -> void:
 	if structure_pixels.is_empty():
 		return
+	# Sprite ENSIN (progress-bar/flash piirtyvät sen päälle). idle=frame0; kun jotain on
+	# keräytynyt (sulatus käynnissä tai juuri valmistui), sykli 0->1->2 (hehkuva pesä).
+	if sprite_atlas != null:
+		var busy := _flash_timer > 0.0
+		if not busy:
+			for input_mat: int in RECIPES.keys():
+				if collected.get(input_mat, 0) > 0:
+					busy = true
+					break
+		var frame := (int(Time.get_ticks_msec() / 1000.0 * 6.0) % 3) if busy else 0
+		_last_anim_frame = frame
+		var tex := sprite_atlas.tex("furnace", frame)
+		if tex:
+			draw_texture(tex, Vector2(grid_pos))
 	# Progress-palkit kaikille resepteille joissa on materiaalia
 	var bar_y_offset := 0
 	for input_mat: int in RECIPES.keys():

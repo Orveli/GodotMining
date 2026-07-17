@@ -19,8 +19,12 @@ var fall_progress: float = 0.0  # Kertymä putoamiseen
 var drill_timer: float = 0.0
 var broken: bool = false  # Asettuu true kun pora poistuu käytöstä (bedrock/reunaputoaminen)
 
+# Sprite — pixel_world antaa viitteen instansoinnin yhteydessä. null = fallback (vanha outline-rect).
+var sprite_atlas: SpriteAtlas
+
 
 func setup(center: Vector2i) -> void:
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # sprite teravana, ei sumea skaalaus
 	grid_pos = Vector2i(center.x - DRILL_W / 2, center.y - DRILL_H / 2)
 	_rebuild_structure()
 	position = Vector2.ZERO
@@ -53,6 +57,10 @@ func update_drill(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h:
 			modified = _update_falling(grid, color_seed, w, h, delta)
 		State.DRILLING:
 			modified = _update_drilling(grid, color_seed, w, h, delta, mat_bedrock)
+	# Sprite-pyörimisanimaatio (frame syklaa Time.get_ticks_msec()-pohjaisesti _draw():ssa)
+	# vaatii jatkuvan redrawn niin kauan kuin terä on aktiivinen (poraa) — muuten kuva jäätyy.
+	if state == State.DRILLING:
+		queue_redraw()
 	return modified
 
 
@@ -146,6 +154,13 @@ func _erase_from_grid(grid: PackedByteArray, color_seed: PackedByteArray, w: int
 func _draw() -> void:
 	if structure_pixels.is_empty():
 		return
+	# Sprite: terä pyörii (frame 0..2) kun aktiivisesti poraa; putoamisen aikana pysyy frame 0:ssa.
+	if sprite_atlas != null:
+		var frame := (int(Time.get_ticks_msec() / 1000.0 * 10.0) % 3) if state == State.DRILLING else 0
+		var tex := sprite_atlas.tex("drill", frame)
+		if tex:
+			draw_texture(tex, Vector2(grid_pos))
+			return
 	var color := Color(0.5, 0.5, 0.6, 0.8)
 	match state:
 		State.FALLING:

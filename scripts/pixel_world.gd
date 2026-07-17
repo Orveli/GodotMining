@@ -226,6 +226,11 @@ var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
 # Rakennukset — lapsisolmut
 var building_layer: Node2D
 
+# Pikselispritet (botit/koneet/base) — ladataan _ready():ssa, annetaan koneille/bot_managerille
+# suorana kenttana. null jos manifest/PNG:t puuttuvat -> kaikki piirtokohdat fallbackaavat
+# vanhoihin primitiiveihin (draw_rect), peli ei kaadu.
+var sprite_atlas: SpriteAtlas
+
 # Rakentaminen
 const BUILD_NONE := 0
 const BUILD_SPAWNER := 1
@@ -479,6 +484,13 @@ func _ready() -> void:
 	build_preview.z_index = 10
 	building_layer.add_child(build_preview)
 
+	# Pikselispritet — ajonaikainen lataus (ei .import-riippuvuutta, ks. sprite_atlas.gd).
+	# Ladataan ennen bottien/koneiden luontia (_boot_world) jotta niiden setup() voi
+	# saada viitteen. null-turvallinen: jos manifest/PNG:t puuttuvat, atlas jaa vajaaksi
+	# ja jokainen piirtokohta fallbackaa vanhaan primitiiviin.
+	sprite_atlas = SpriteAtlas.new()
+	sprite_atlas.load_dir("res://assets/sprites")
+
 	# GPU compute setup
 	_setup_compute()
 
@@ -489,6 +501,7 @@ func _ready() -> void:
 	bot_overlay = Node2D.new()
 	bot_overlay.name = "BotOverlay"
 	bot_overlay.z_index = 15
+	bot_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # botti-spritet teravina
 	building_layer.add_child(bot_overlay)
 	bot_overlay.draw.connect(Callable(self, "_draw_bot_overlay"))
 
@@ -1676,7 +1689,8 @@ func _init_bot_sim() -> void:
 	# Basen keskikohta niin etta rakenne istuu alustan pinnan paalla
 	var center_y := prect.position.y - MoneyExit.EXIT_H / 2 - 2
 	var me: MoneyExit = MoneyExit.new()
-	me.setup(Vector2i(center_x, center_y))
+	me.sprite_atlas = sprite_atlas
+	me.setup(Vector2i(center_x, center_y), true)  # is_base=true -> "base"-sprite eika "money_exit"
 	me.build_structure(grid, color_seed, W, SIM_HEIGHT)
 	building_layer.add_child(me)
 	money_exits.append(me)
@@ -1710,6 +1724,7 @@ func _init_bot_sim() -> void:
 	if base_modules != null and is_instance_valid(base_modules):
 		base_modules.queue_free()
 	base_modules = BaseModules.new()
+	base_modules.sprite_atlas = sprite_atlas
 	base_modules.setup(base.grid_pos, MoneyExit.EXIT_W, MoneyExit.EXIT_H, W, SIM_HEIGHT)
 	building_layer.add_child(base_modules)
 	_peak_iron_ore = 0
@@ -3737,6 +3752,7 @@ func _machine_zone_ids() -> Dictionary:
 func _place_furnace(pos: Vector2) -> void:
 	var FurnaceScript := preload("res://scripts/furnace.gd")
 	var furnace = FurnaceScript.new()
+	furnace.sprite_atlas = sprite_atlas
 	furnace.setup(Vector2i(pos))
 	furnace.build_structure(grid, color_seed, W, SIM_HEIGHT)
 	building_layer.add_child(furnace)
@@ -3798,6 +3814,7 @@ func _spawn_smelted_body(drop_pos: Vector2i, mat: int) -> void:
 
 func _place_money_exit(pos: Vector2) -> void:
 	var me = MoneyExit.new()
+	me.sprite_atlas = sprite_atlas
 	me.setup(Vector2i(pos))
 	me.build_structure(grid, color_seed, W, SIM_HEIGHT)
 	building_layer.add_child(me)
@@ -3828,6 +3845,7 @@ func _update_money_exits(delta: float) -> bool:
 
 func _place_crusher(pos: Vector2) -> void:
 	var c = Crusher.new()
+	c.sprite_atlas = sprite_atlas
 	c.setup(Vector2i(pos))
 	c.build_structure(grid, color_seed, W, SIM_HEIGHT)
 	building_layer.add_child(c)
@@ -3842,6 +3860,7 @@ func _place_crusher(pos: Vector2) -> void:
 
 func _place_drill(pos: Vector2) -> void:
 	var d = DrillScript.new()
+	d.sprite_atlas = sprite_atlas
 	d.setup(Vector2i(pos))
 	d.build_structure(grid, color_seed, W, SIM_HEIGHT)
 	building_layer.add_child(d)
@@ -4869,6 +4888,7 @@ func load_world() -> void:
 		var cy := int(file.get_32())
 		var FurnaceScript := preload("res://scripts/furnace.gd")
 		var f = FurnaceScript.new()
+		f.sprite_atlas = sprite_atlas
 		f.setup(Vector2i(cx, cy))
 		building_layer.add_child(f)
 		furnaces.append(f)
@@ -4889,6 +4909,7 @@ func load_world() -> void:
 		var cx := int(file.get_32())
 		var cy := int(file.get_32())
 		var me = MoneyExit.new()
+		me.sprite_atlas = sprite_atlas
 		me.setup(Vector2i(cx, cy))
 		me.build_structure(grid, color_seed, W, SIM_HEIGHT)
 		building_layer.add_child(me)
@@ -4899,6 +4920,7 @@ func load_world() -> void:
 		var cx := int(file.get_32())
 		var cy := int(file.get_32())
 		var c = Crusher.new()
+		c.sprite_atlas = sprite_atlas
 		c.setup(Vector2i(cx, cy))
 		c.build_structure(grid, color_seed, W, SIM_HEIGHT)
 		building_layer.add_child(c)
@@ -4912,6 +4934,7 @@ func load_world() -> void:
 			var cx := int(file.get_32())
 			var cy := int(file.get_32())
 			var d = DrillScript.new()
+			d.sprite_atlas = sprite_atlas
 			d.setup(Vector2i(cx, cy))
 			d.build_structure(grid, color_seed, W, SIM_HEIGHT)
 			building_layer.add_child(d)

@@ -110,30 +110,54 @@ def base_module_frame() -> "P.Image.Image":
 # charger_pad — botin latauspaikka, 7x7, anchor center, 3 frames (latauspulssi)
 # ---------------------------------------------------------------------------
 def charger_pad_frame(level: int) -> "P.Image.Image":
-    """Teraslaituri + pylvas + hehkuva amber-latausnoodi. level 0..2 = hehkun kirkkaus."""
-    img = P.new_img(7, 7)
-    d = ImageDraw.Draw(img)
+    """Teraslaituri + pylvas + hehkuva amber-latausnoodi. level 0..2 = hehkun kirkkaus.
 
-    # Laituri (pohja)
-    d.rectangle([0, 5, 6, 6], fill=P.STEEL_MID, outline=P.OUTLINE)
-    d.line([(1, 5), (5, 5)], fill=P.STEEL_HI)
+    7x7 on liian pieni PIL:n rectangle(fill+outline)/ellipse-avustimille (aariviiva
+    syo koko taytteen alle 3px laatikoissa, pieni ellipsi jaa harvaksi pistekuvioksi)
+    -> koko sprite pikseli kerrallaan taman kokoluokan tarkkuuden takaamiseksi.
+    """
+    img = P.new_img(7, 7)
+
+    # Laituri (pohja): kiiltorivi + varjorivi, aariviiva vain paatypaissa
+    for x in range(1, 6):
+        P.px(img, (x, 5), P.STEEL_HI)
+        P.px(img, (x, 6), P.STEEL_LO)
+    for x in (0, 6):
+        P.px(img, (x, 5), P.OUTLINE)
+        P.px(img, (x, 6), P.OUTLINE)
 
     # Pylvas laiturin ja noodin valissa
-    d.rectangle([2, 3, 4, 5], fill=P.STEEL_LO, outline=P.OUTLINE)
+    for y in (3, 4):
+        P.px(img, (2, y), P.OUTLINE)
+        P.px(img, (3, y), P.STEEL_LO)
+        P.px(img, (4, y), P.OUTLINE)
 
-    # Latausnoodi (orbi) ylhaalla — kirkastuu levelin mukaan
+    # Noodin kaula
+    P.px(img, (2, 2), P.OUTLINE)
+    P.px(img, (4, 2), P.OUTLINE)
+
+    # Latausnoodi (orbi) ylhaalla — kirkastuu ja levenee levelin mukaan
     if level == 0:
-        d.ellipse([2, 0, 4, 2], fill=P.AMBER_LO, outline=P.OUTLINE)
+        P.px(img, (3, 2), P.AMBER_LO)
+        P.px(img, (3, 1), P.AMBER_LO)
+        P.px(img, (2, 1), P.OUTLINE)
+        P.px(img, (4, 1), P.OUTLINE)
     elif level == 1:
-        d.ellipse([2, 0, 4, 2], fill=P.AMBER, outline=P.OUTLINE)
+        P.px(img, (3, 2), P.AMBER)
+        P.px(img, (2, 1), P.OUTLINE)
         P.px(img, (3, 1), P.AMBER_HI)
+        P.px(img, (4, 1), P.OUTLINE)
+        P.px(img, (3, 0), P.AMBER)
     else:
-        d.ellipse([2, 0, 4, 2], fill=P.AMBER, outline=P.OUTLINE)
-        P.px(img, (3, 1), P.AMBER_HI)
-        P.px(img, (3, 0), P.AMBER_HI)
-        # Hehkun vuoto sivuille
+        P.px(img, (3, 2), P.AMBER)
         P.px(img, (1, 1), P.AMBER_LO)
+        P.px(img, (2, 1), P.OUTLINE)
+        P.px(img, (3, 1), P.AMBER_HI)
+        P.px(img, (4, 1), P.OUTLINE)
         P.px(img, (5, 1), P.AMBER_LO)
+        P.px(img, (2, 0), P.AMBER_LO)
+        P.px(img, (3, 0), P.AMBER_HI)
+        P.px(img, (4, 0), P.AMBER_LO)
 
     return img
 

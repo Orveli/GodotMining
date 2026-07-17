@@ -75,6 +75,15 @@ var load_vel: Vector2 = Vector2.ZERO
 var intake_fx: Array = []                # imuvirtapartikkelit: {"from":Vector2,"mat":int,"t":float}
 var visuals_init: bool = false           # false -> ensimmaisella framella snapataan pos:iin
 
+# --- Kädet + antenni (proseduraalinen sekundaarianimaatio, update_visuals päivittää) ---
+var hand_l_pos: Vector2 = Vector2.ZERO
+var hand_l_vel: Vector2 = Vector2.ZERO
+var hand_r_pos: Vector2 = Vector2.ZERO
+var hand_r_vel: Vector2 = Vector2.ZERO
+var ant_angle: float = 0.0      # antennin kulma (rad, 0 = suoraan ylos); + = taipuu oikealle
+var ant_vel: float = 0.0        # kulmanopeus (jousiwobble)
+var anim_phase: float = 0.0     # per-botti satunnaisvaihe idle-desynkkaukseen (asetetaan add_botissa)
+
 # Hauler: valittu dumppikohde nykyiselle kuormalle (Logistics.choose_dump palauttaa taman).
 # { "kind": "dump", "pos": Vector2, "rect": Rect2i, "id": int, "accepted": int,
 #   "is_base_dropoff": bool }. Tyhja {} = mikaan dump-vyohyke (myos base-dropoff) ei

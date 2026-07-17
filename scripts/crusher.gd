@@ -30,8 +30,13 @@ var output_drop_pos: Vector2i = Vector2i.ZERO
 var output_material: int = 1   # MAT_SAND
 var output_amount: int = 0
 
+# Sprite — pixel_world antaa viitteen instansoinnin yhteydessä. null = fallback (ei spriteä).
+var sprite_atlas: SpriteAtlas
+var _last_anim_frame: int = -1  # viimeksi piirretty leuka-frame; redraw vain kun tama muuttuu
+
 
 func setup(center: Vector2i) -> void:
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # sprite teravana, ei sumea skaalaus
 	grid_pos = Vector2i(center.x - CRUSHER_W / 2, center.y - CRUSHER_H / 2)
 	structure_pixels.clear()
 	intake_x.clear()
@@ -134,6 +139,18 @@ func update_crusher(grid: PackedByteArray, color_seed: PackedByteArray, w: int, 
 		_flash_timer -= delta
 		queue_redraw()
 
+	# Sprite-leukanimaatio: redraw VAIN kun frame vaihtuu (4 Hz), ja vain kun murskaimessa on
+	# materiaalia (busy). Idle: frame pysyy 0:ssa -> ei redrawia. _draw() paivittaa _last_anim_framen.
+	if sprite_atlas != null:
+		var busy := false
+		for input_mat: int in RECIPES.keys():
+			if collected.get(input_mat, 0) > 0:
+				busy = true
+				break
+		var jaw := (int(Time.get_ticks_msec() / 1000.0 * 4.0) % 2) if busy else 0
+		if jaw != _last_anim_frame:
+			queue_redraw()
+
 	return modified
 
 
@@ -167,6 +184,19 @@ func get_input_dump() -> Dictionary:
 func _draw() -> void:
 	if structure_pixels.is_empty():
 		return
+	# Sprite ENSIN (progress-bar/flash piirtyvät sen päälle). 0=leuat auki (idle), 1=kiinni/pure
+	# (vaihtelee kun murskataan — leuat naksuvat).
+	if sprite_atlas != null:
+		var busy := false
+		for input_mat: int in RECIPES.keys():
+			if collected.get(input_mat, 0) > 0:
+				busy = true
+				break
+		var frame := (int(Time.get_ticks_msec() / 1000.0 * 4.0) % 2) if busy else 0
+		_last_anim_frame = frame
+		var tex := sprite_atlas.tex("crusher", frame)
+		if tex:
+			draw_texture(tex, Vector2(grid_pos))
 	# Edistymispalkit kaikille resepteille
 	var bar_y_offset := 0
 	for input_mat: int in RECIPES.keys():

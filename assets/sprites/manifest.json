@@ -36,7 +36,7 @@
         "bot_hauler_1.png"
       ],
       "role": "hauler",
-      "note": "blue drone + cargo container"
+      "note": "blue pod (kadet proseduraalisia)"
     },
     {
       "name": "bot_miner",
@@ -49,7 +49,7 @@
         "bot_miner_1.png"
       ],
       "role": "miner",
-      "note": "amber drone + drill"
+      "note": "amber pod (kadet proseduraalisia)"
     },
     {
       "name": "charger_pad",
@@ -64,6 +64,47 @@
       ],
       "role": "anim_pulse",
       "note": "bot charging dock, brightens per frame"
+    },
+    {
+      "name": "crusher",
+      "w": 16,
+      "h": 10,
+      "frames": 2,
+      "anchor": "topleft",
+      "files": [
+        "crusher_0.png",
+        "crusher_1.png"
+      ],
+      "role": "anim_jaws",
+      "note": "0=jaws open, 1=jaws closed/bite"
+    },
+    {
+      "name": "drill",
+      "w": 4,
+      "h": 6,
+      "frames": 3,
+      "anchor": "topleft",
+      "files": [
+        "drill_0.png",
+        "drill_1.png",
+        "drill_2.png"
+      ],
+      "role": "anim_spin",
+      "note": "bit shimmer/rotation cycle 0..2"
+    },
+    {
+      "name": "furnace",
+      "w": 12,
+      "h": 10,
+      "frames": 3,
+      "anchor": "topleft",
+      "files": [
+        "furnace_0.png",
+        "furnace_1.png",
+        "furnace_2.png"
+      ],
+      "role": "anim_glow",
+      "note": "idle=frame0, smelting cycles 0..2"
     },
     {
       "name": "money_exit",

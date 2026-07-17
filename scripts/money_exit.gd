@@ -51,8 +51,17 @@ var broken: bool = false
 var _flash_timer: float = 0.0
 var _label: Label
 
+# Sprite — pixel_world antaa viitteen instansoinnin yhteydessä. null = fallback (vain flash).
+var sprite_atlas: SpriteAtlas
+# Tosi kun tämä instanssi on tehdasbase (world.base) — valitsee "base"-spriten "money_exit":n
+# sijaan. Molemmat jakavat saman luokan (ks. tiedoston alun kaksoisrooli-kommentti).
+var is_base: bool = false
+var _last_anim_frame: int = -1  # viimeksi piirretty pulssi-frame; redraw vain kun tama muuttuu
 
-func setup(center: Vector2i) -> void:
+
+func setup(center: Vector2i, base_role: bool = false) -> void:
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # sprite teravana, ei sumea skaalaus
+	is_base = base_role
 	grid_pos = Vector2i(center.x - EXIT_W / 2, center.y - EXIT_H / 2)
 	structure_pixels.clear()
 	intake_x.clear()
@@ -126,6 +135,13 @@ func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 		_flash_timer -= delta
 		queue_redraw()
 
+	# Hidas pulssianimaatio: redraw VAIN kun frame vaihtuu (2 Hz), ei joka frame (60 Hz).
+	# _draw() paivittaa _last_anim_framen -> pulssi animoituu mutta ei nakuta redrawia turhaan.
+	if sprite_atlas != null:
+		var pulse := int(Time.get_ticks_msec() / 1000.0 * 2.0) % 2
+		if pulse != _last_anim_frame:
+			queue_redraw()
+
 	# Label ei enaa naytettavaa rahalukua — inventaario/talous elaa pixel_world.gd:ssa.
 	_label.text = ""
 	return consumed
@@ -177,6 +193,15 @@ func drop_start_y() -> int:
 func _draw() -> void:
 	if structure_pixels.is_empty():
 		return
+	# Sprite ENSIN (flash-hehku piirtyy sen päälle). Kaksoisrooli: base-instanssi käyttää
+	# "base"-spriteä, tavallinen myyntipiste "money_exit"-spriteä. Molemmilla hidas pulssi.
+	if sprite_atlas != null:
+		var sprite_name := "base" if is_base else "money_exit"
+		var frame := int(Time.get_ticks_msec() / 1000.0 * 2.0) % 2
+		_last_anim_frame = frame
+		var tex := sprite_atlas.tex(sprite_name, frame)
+		if tex:
+			draw_texture(tex, Vector2(grid_pos))
 	# Hehku kun raha tulee sisään
 	if _flash_timer > 0.0:
 		draw_rect(

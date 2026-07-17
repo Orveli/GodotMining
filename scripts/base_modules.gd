@@ -73,10 +73,15 @@ class Module extends RefCounted:
 var modules: Array[Module] = []
 var _peak_iron: int = 0             # inventory piti joskus >= tama (moduuli 2 -trigger)
 
+# Sprite — pixel_world antaa viitteen instansoinnin yhteydessä. null = fallback (ei spriteä,
+# valmiit moduulit nakyvat vain gridin kivipikseleina kuten ennen).
+var sprite_atlas: SpriteAtlas
+
 
 # Alusta moduuliketju basen sijainnin ja koon mukaan. base_pos = basen grid_pos (vasen ala),
 # base_w/base_h = MoneyExit.EXIT_W/EXIT_H. Moduuli 1 basen vasemmalle, moduuli 2 oikealle.
 func setup(base_pos: Vector2i, base_w: int, base_h: int, sim_w: int, sim_h: int) -> void:
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # sprite teravana, ei sumea skaalaus
 	modules.clear()
 	_peak_iron = 0
 
@@ -195,26 +200,40 @@ func is_module_built(n: int) -> bool:
 	return m != null and m.built
 
 
-# Haamun aariviiva + tayttomittari aktiiviselle moduulille. Piirretaan grid-px-koordinaateissa
-# (building_layer skaalaa). Valmiit moduulit nakyvat gridissa (kirjoitettu structure_pixels),
-# joten niita ei piirreta tassa.
+# Bounding box structure_pixeleista grid-px-koordinaateissa (Rect2: position=topleft, size=w/h).
+func _module_bbox(m: Module) -> Rect2:
+	var minx := 100000
+	var miny := 100000
+	var maxx := -100000
+	var maxy := -100000
+	for p in m.structure_pixels:
+		minx = mini(minx, p.x)
+		miny = mini(miny, p.y)
+		maxx = maxi(maxx, p.x)
+		maxy = maxi(maxy, p.y)
+	return Rect2(float(minx), float(miny), float(maxx - minx + 1), float(maxy - miny + 1))
+
+
+# Haamun aariviiva + tayttomittari aktiiviselle moduulille + sprite valmiille moduulille.
+# Piirretaan grid-px-koordinaateissa (building_layer skaalaa).
 func _draw() -> void:
+	# Valmiit moduulit: sprite overlay kivipikselien päälle (sama malli kuin furnace/crusher/
+	# drill — build_structure/_complete_module bakettaa MAT_STONE-pohjan, sprite piirtyy sen
+	# päälle). base_module on staattinen (1 frame), ei animaatiota.
+	if sprite_atlas != null:
+		var tex := sprite_atlas.tex("base_module", 0)
+		if tex:
+			for m in modules:
+				if not m.built or m.structure_pixels.is_empty():
+					continue
+				draw_texture(tex, _module_bbox(m).position)
 	for m in modules:
 		if m.built or not m.revealed or m.structure_pixels.is_empty():
 			continue
-		# Bounding box structure_pixeleista
-		var minx := 100000
-		var miny := 100000
-		var maxx := -100000
-		var maxy := -100000
-		for p in m.structure_pixels:
-			minx = mini(minx, p.x)
-			miny = mini(miny, p.y)
-			maxx = maxi(maxx, p.x)
-			maxy = maxi(maxy, p.y)
-		var w := float(maxx - minx + 1)
-		var h := float(maxy - miny + 1)
-		var origin := Vector2(float(minx), float(miny))
+		var bbox := _module_bbox(m)
+		var w := bbox.size.x
+		var h := bbox.size.y
+		var origin := bbox.position
 		# Haamun tayttoaste (0..1)
 		var total := m.req_total()
 		var ratio := 0.0

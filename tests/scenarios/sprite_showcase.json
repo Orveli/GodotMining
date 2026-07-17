@@ -1,0 +1,17 @@
+{
+  "auto_exit": true,
+  "_doc": "Visuaalinen sprite-verifiointi + hauler liikkeessa kuormineen. Boottaa (base + 2 bottia), sijoittaa furnacen ja crusherin, designoi louhinta-alueen -> miner louhii, hauler kuljettaa. Ottaa useita ajastettuja kuvia jotta liikkuva/kuormaa kantava hauler saadaan kiinni. AJETTAVA IKKUNALLISENA (Vulkan renderoi CanvasItem-spritet).",
+  "steps": [
+    { "cmd": "place_building", "type": "furnace", "x": 770, "y": 376 },
+    { "cmd": "place_building", "type": "crusher", "x": 895, "y": 376 },
+    { "cmd": "designate_rect", "side": "left", "gap": 20, "width": 40, "margin": 12, "depth": 30 },
+    { "cmd": "run_frames", "n": 260 },
+    { "cmd": "screenshot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/sprite_showcase_a.png" },
+    { "cmd": "run_frames", "n": 60 },
+    { "cmd": "screenshot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/sprite_showcase_b.png" },
+    { "cmd": "run_frames", "n": 60 },
+    { "cmd": "screenshot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/sprite_showcase_c.png" },
+    { "cmd": "run_frames", "n": 60 },
+    { "cmd": "screenshot", "path": "C:/Users/mauri/Desktop/Git/GodotMining/tests/output/sprite_showcase_d.png" }
+  ]
+}

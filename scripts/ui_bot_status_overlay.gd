@@ -87,10 +87,12 @@ func _draw() -> void:
 		var frac: float = clampf(float(b["cargo_total"]) / float(cap), 0.0, 1.0)
 		var role_col: Color = COL_BAR_MINER if int(b.get("role", 0)) == ROLE_MINER else COL_BAR_HAULER
 
-		var bar_pos := screen + Vector2(-BAR_W * 0.5, BAR_OFFSET_Y)
-		draw_rect(Rect2(bar_pos, Vector2(BAR_W, BAR_H)),
-			Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * alpha))
+		# Kuormapalkki VAIN kun botti kantaa jotain — ei jatkuvaa palkkia tyhjan botin paalla
+		# (kayttajapalaute: "liikkuva viiva ei sovi"). Tyhja botti = siisti, ei viivaa.
 		if frac > 0.0:
+			var bar_pos := screen + Vector2(-BAR_W * 0.5, BAR_OFFSET_Y)
+			draw_rect(Rect2(bar_pos, Vector2(BAR_W, BAR_H)),
+				Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * alpha))
 			draw_rect(Rect2(bar_pos, Vector2(BAR_W * frac, BAR_H)),
 				Color(role_col.r, role_col.g, role_col.b, role_col.a * alpha))
 
@@ -102,13 +104,17 @@ func _draw() -> void:
 			var batt_alpha: float = 1.0 if charging else alpha
 			var bmax: float = maxf(float(b["battery_max"]), 0.001)
 			var bfrac: float = clampf(float(b["battery"]) / bmax, 0.0, 1.0)
-			var batt_pos := screen + Vector2(-BAR_W * 0.5, BATT_BAR_OFFSET_Y)
-			draw_rect(Rect2(batt_pos, Vector2(BAR_W, BATT_BAR_H)),
-				Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * batt_alpha))
-			if bfrac > 0.0:
-				var bcol: Color = COL_BATT_LOW if bfrac <= BATT_LOW_FRAC else COL_BATT_OK
-				draw_rect(Rect2(batt_pos, Vector2(BAR_W * bfrac, BATT_BAR_H)),
-					Color(bcol.r, bcol.g, bcol.b, bcol.a * batt_alpha))
+			# Akkupalkki VAIN kun akku vahissa tai lataus kaynnissa — ei jatkuvaa vihreaa viivaa
+			# taysien akkujen paalla (kayttajapalaute: "liikkuva viiva ei sovi"). Kunnossa oleva
+			# akku ei nayta mitaan; punainen palkki ilmestyy vasta kun bottia pitaa ladata.
+			if bfrac <= BATT_LOW_FRAC or charging:
+				var batt_pos := screen + Vector2(-BAR_W * 0.5, BATT_BAR_OFFSET_Y)
+				draw_rect(Rect2(batt_pos, Vector2(BAR_W, BATT_BAR_H)),
+					Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * batt_alpha))
+				if bfrac > 0.0:
+					var bcol: Color = COL_BATT_LOW if bfrac <= BATT_LOW_FRAC else COL_BATT_OK
+					draw_rect(Rect2(batt_pos, Vector2(BAR_W * bfrac, BATT_BAR_H)),
+						Color(bcol.r, bcol.g, bcol.b, bcol.a * batt_alpha))
 			# Lataus-/odotusikoni botin oikealla puolella.
 			if charging:
 				_draw_charge_icon(screen, COL_CHARGE)
