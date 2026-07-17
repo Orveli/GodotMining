@@ -66,6 +66,8 @@ const ICON_SPEED_4X := preload("res://assets/ui/icons/speed_4x.png")
 
 const MAT_EMPTY := 0
 const MAT_IRON_ORE := 12   # M2: botti-reseptin rakennusaine
+const MAT_COAL := 16       # M3: latauspaikan polttoaine (hiilibuusti)
+const COAL_FEED_BATCH := 5 # M3: montako COAL-px syötetään yhdellä napinpainalluksella
 # Roolit (bot.gd Role-enum: MINER=0, HAULER=1)
 const ROLE_MINER := 0
 const ROLE_HAULER := 1
@@ -152,6 +154,9 @@ var _machine_popover_machine: Object = null
 var _machine_popover_rows: Dictionary = {}   # input_mat -> {"label": Label, "need": int}
 # Base-popover (M1): inventaariolistan VBox, jotta myynti/politiikka-napit voivat rakentaa sen uudelleen.
 var _base_popover_vb: VBoxContainer = null
+# Latauspaikka-popover (M3): VBox + charger-viittaus, jotta hiilensyöttö voi rakentaa sisällön uudelleen.
+var _charger_popover_vb: VBoxContainer = null
+var _charger_popover_charger: Object = null
 
 # Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
 # [{panel(=Button), price_label, cost_fn}]
@@ -801,6 +806,8 @@ func _on_world_object_clicked(kind: String, data: Dictionary) -> void:
 			_open_base_popover()
 		"furnace", "crusher":
 			_open_machine_popover(kind, data.get("obj"))
+		"charger":
+			_open_charger_popover(data.get("charger"))
 		"zone":
 			_open_zone_popover(data.get("zone", {}))
 
@@ -921,6 +928,83 @@ func _refresh_base_popover() -> void:
 		return
 	_clear_children(_base_popover_vb)
 	_fill_base_popover.call_deferred(_base_popover_vb)
+
+
+# ── Latauspaikka-popover (M3): slotit + hiilipuskuri + [Syötä hiiltä] ──
+# Latauspaikka lataa dokatut botit: ilmainen trickle hitaasti, COAL-syöttö 6× nopeasti.
+# Popover näyttää slottimäärän ja hiilipuskurin, ja antaa syöttää varastoitua COALia
+# puskuriin (kuluttaa inventaarion COALin -> charger.feed_coal).
+func _open_charger_popover(charger: Object) -> void:
+	if charger == null or not is_instance_valid(charger):
+		return
+	_close_context_popover()
+	_close_build_tray()
+	_close_bot_tray()
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+	_charger_popover_vb = vb
+	_charger_popover_charger = charger
+	_fill_charger_popover(vb, charger)
+
+	get_parent().add_child(panel)
+	_context_popover = panel
+	_context_popover_kind = "charger"
+	_register_panel(panel)
+	# Ankkuroi ensimmäisen slotin dokkauspisteen (sim-px) yläpuolelle.
+	var sp: Vector2 = charger.slot_pos(0)
+	var anchor: Vector2 = pixel_world.grid_to_screen(sp)
+	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
+	_popover_just_opened = true
+
+
+# Rakentaa/uudelleenrakentaa latauspaikka-popoverin sisällön annettuun VBoxiin.
+func _fill_charger_popover(vb: VBoxContainer, charger: Object) -> void:
+	var title := "Base-latauspaikka" if bool(charger.is_base) else "Latauspaikka"
+	vb.add_child(_label(title, 13, COL_TEXT))
+	vb.add_child(_label("Slotit: %d" % int(charger.slot_count), 11, COL_TEXT))
+
+	# Hiilibuusti aktiivinen jos puskuria on jäljellä.
+	var buf := int(charger.coal_buffer)
+	if buf > 0:
+		vb.add_child(_label("Hiilibuusti: %d yks. (6× lataus)" % buf, 11, COL_TEXT))
+	else:
+		vb.add_child(_label("Ei hiiltä — ilmainen trickle-lataus", 10, COL_DIM))
+
+	# Varastoidun COALin määrä + syöttönappi.
+	var avail := int(pixel_world.inventory_amount(MAT_COAL))
+	vb.add_child(_label("Hiiltä varastossa: %d px" % avail, 10, COL_DIM))
+
+	var feed_n: int = mini(COAL_FEED_BATCH, avail)
+	var feed_btn := _make_btn("Syötä hiiltä (%d)" % feed_n, 11)
+	feed_btn.disabled = feed_n <= 0
+	feed_btn.pressed.connect(_on_charger_feed_coal.bind(charger))
+	vb.add_child(feed_btn)
+
+
+# Syötä COAL-batch varastosta latauspaikan puskuriin (atominen kulutus -> feed_coal).
+func _on_charger_feed_coal(charger: Object) -> void:
+	if charger == null or not is_instance_valid(charger):
+		return
+	var avail := int(pixel_world.inventory_amount(MAT_COAL))
+	var n: int = mini(COAL_FEED_BATCH, avail)
+	if n > 0 and pixel_world.spend_materials({MAT_COAL: n}):
+		charger.feed_coal(n)
+	_refresh_charger_popover()
+
+
+# Rakentaa latauspaikka-popoverin sisällön uudelleen (deferred, kuten base-popover).
+func _refresh_charger_popover() -> void:
+	if _charger_popover_vb == null or not is_instance_valid(_charger_popover_vb):
+		return
+	if _charger_popover_charger == null or not is_instance_valid(_charger_popover_charger):
+		return
+	_clear_children(_charger_popover_vb)
+	_fill_charger_popover.call_deferred(_charger_popover_vb, _charger_popover_charger)
 
 
 # Vyöhykkeen (pickup/dump) materiaalifiltteri + poisto. Korvaa vanhan checkbox-
@@ -1128,6 +1212,8 @@ func _close_context_popover() -> void:
 	_machine_popover_machine = null
 	_machine_popover_rows = {}
 	_base_popover_vb = null
+	_charger_popover_vb = null
+	_charger_popover_charger = null
 
 
 # Pitää popoverin ruudun sisällä (1664×960-ikkuna, mutta lasketaan aina oikeasta
