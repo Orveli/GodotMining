@@ -264,6 +264,9 @@ var grav_held_written: Array[int] = []
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
 var physics_initialized := false  # Onko kivi-kappaleet skannattu
+# P3: viimeisin sim_frame jolloin puun tuki-BFS ajettiin. Portitus: aja täysi BFS vain
+# jos jokin tile on ollut aktiivinen tämän jälkeen (muuten skip — mikään ei muuttunut).
+var _last_wood_check_sim_frame: int = 0
 var is_painting_stone := false  # Maalataan kiveä parhaillaan — fysiikka tauolla
 var stroke_stone_pixels: Dictionary = {}  # Tämän vedon kivipikselit (deduplikoitu)
 var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
@@ -936,18 +939,32 @@ func _process(delta: float) -> void:
 					has_active = true
 					break
 			if has_active and sim_speed > 0.0:
+				# P3: merkitse likaisiksi vain kappaleiden AABB:t (P1:n koko-maailma-latauksen
+				# sijaan). Kerää AABB:t ENNEN steppiä (vanha sijainti: erase kirjoittaa sinne)
+				# ja stepin JÄLKEEN (uusi sijainti + stepin heräyttämät nukkuvat kappaleet).
+				# Molemmat merkitään -> unioni kattaa erase- ja write-solut + nesteensyrjäytyksen.
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 				physics_world.step(grid, color_seed, W, SIM_HEIGHT)
 				grid_modified = true
-				# P1: fysiikka kirjoittaa hajautetusti (erase-vanha + write-uusi useille
-				# kappaleille) -> merkitse koko maailma likaiseksi. Bursti-polku (vain kun
-				# kappaleita putoaa); steady-state (kappaleet nukkuvat) ei tule tänne.
-				_mark_grid_dirty_all()
+				for body_id in physics_world.bodies:
+					var b: RigidBodyData = physics_world.bodies[body_id]
+					if not b.is_static and not b.is_sleeping:
+						_mark_body_dirty(b)
 
-		# Vaihe 4: Puun tuki joka 10. frame
+		# Vaihe 4: Puun tuki joka 120. frame — P3: portitettu aktiivisuudella.
+		# Aja täysi BFS VAIN jos jokin tile on ollut aktiivinen edellisen tarkistuksen
+		# jälkeen; muuten skip (mikään ei ole muuttunut → tuki ei ole voinut kadota).
+		# Checkpoint päivitetään aina, myös skipatessa. Portitus koskee vain gpu_ready-
+		# polkua: headlessissa (cpu_ca) aktiivisuustaulua ei päivitetä lainkaan.
 		if frame_count > 60 and frame_count % 120 == 0 and sim_speed > 0.0:
-			if WoodSupport.check_support(grid, W, SIM_HEIGHT):
-				grid_modified = true
-				_mark_grid_dirty_all()  # P1: BFS-tuki muuttaa puuta hajautetusti
+			if _wood_check_needed():
+				if WoodSupport.check_support(grid, W, SIM_HEIGHT):
+					grid_modified = true
+					_mark_grid_dirty_all()  # P1: BFS-tuki muuttaa puuta hajautetusti
+			_last_wood_check_sim_frame = _sim_frame
 
 		# Vaihe 5: Vauriotarkistus (vain räjähdyksen jälkeen)
 		if physics_world.force_damage_check and not physics_world.bodies.is_empty():
@@ -979,9 +996,15 @@ func _process(delta: float) -> void:
 
 		# Vaihe 5.7: Hissilinkot + lentävät pikselit
 		if not launchers.is_empty() or not flying_pixels.is_empty():
+			# P3: launcherit kirjoittavat hajautetusti (intake/shaft/jalusta launcher.gd:n
+			# sisällä) — jos yksikin on läsnä, pysytään turvallisessa täydessä latauksessa.
+			# Pelkät lentävät pikselit sen sijaan merkitsevät oman tarkan rectinsä
+			# (_flying_land + rakettitrail alla; explode/_bullet_impact merkkaavat itse).
+			var had_launchers := not launchers.is_empty()
 			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
-				_mark_grid_dirty_all()  # P1: lentävät pikselit hajautuvat laajalti
+				if had_launchers:
+					_mark_grid_dirty_all()  # P1: launcherien hajautetut kirjoitukset -> täysi lataus
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
 		# Vaihe 5.8: Bottisimulaatio — CPU-logiikka joka 4. frame (kumuloitu delta).
@@ -2845,6 +2868,22 @@ func _reset_grid_dirty() -> void:
 	_dirty_any = false
 
 
+# P3: merkitse yhden rigid bodyn maailma-AABB likaiseksi. Käyttää RigidBodyData:n
+# rot-cachea (kierrettyjen offsettien AABB); maailma-AABB = offset + roundi(position).
+# Marginaali kattaa nesteensyrjäytyksen (kirjoittaa ±1 solun kappaleen ulkopuolelle)
+# sekä pienet nukahtamis-snap-siirtymät. filled-cachen aukontäyttö-pikselit mahtuvat
+# rot-AABB:n sisään (interpoloidut välipisteet), joten rot-AABB riittää.
+const BODY_DIRTY_PAD := 3
+func _mark_body_dirty(body: RigidBodyData) -> void:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	_mark_grid_dirty(
+		body.rot_min_x + px - BODY_DIRTY_PAD, body.rot_min_y + py - BODY_DIRTY_PAD,
+		body.rot_max_x + px + BODY_DIRTY_PAD, body.rot_max_y + py + BODY_DIRTY_PAD
+	)
+
+
 # Merkitse koneen jalanjälki likaiseksi: rakenne grid_pos..+(w,h) plus reilu marginaali
 # joka kattaa intake-purkualueen yläpuolella ja tuotoksen putoamisen alapuolella.
 const MACHINE_DIRTY_PAD := 16
@@ -3167,6 +3206,23 @@ func is_tile_active_recent(tx: int, ty: int, max_age: int) -> bool:
 # P2: onko solun (x,y) tile aktiivinen viimeisen max_age framen aikana (P3-mukavuusmetodi).
 func is_cell_active_recent(x: int, y: int, max_age: int) -> bool:
 	return is_tile_active_recent(x / TILE_SIZE, y / TILE_SIZE, max_age)
+
+
+# P3: pitääkö puun tuki-BFS ajaa? Palauttaa true jos jokin tile on ollut aktiivinen
+# viimeisimmän tarkistuksen (checkpoint) jälkeen — mikä tahansa materiaalin liike tai
+# CPU-kirjoitus leimaa tilen. 6240 int-vertailua = halpa. Turvallisuusmarginaali kattaa
+# aktiivisuustaulun ~1 framen async-viiveen: vertaa checkpoint - WOOD_CHECK_ACTIVITY_MARGIN
+# jotta viiveen takia myöhästynyt leima ei jää huomaamatta (ylimääräinen BFS on halpaa,
+# huomaamatta jäänyt tuen katoaminen olisi bugi).
+const WOOD_CHECK_ACTIVITY_MARGIN := 2
+func _wood_check_needed() -> bool:
+	if _activity_cpu.size() < TILE_COUNT:
+		return true  # ei vielä dataa -> aja turvallisesti
+	var thresh := _last_wood_check_sim_frame - WOOD_CHECK_ACTIVITY_MARGIN
+	for i in TILE_COUNT:
+		if _activity_cpu[i] > thresh:
+			return true
+	return false
 
 
 func _upload_render() -> void:
@@ -4478,6 +4534,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx] == MAT_EMPTY:
 					grid[tidx] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx, ty)  # P3: rakettitrail-pikseli -> tarkka piste
 			# Toinen trail-pikseli hieman lähempänä
 			var trail_pos2 := old_pos - vel_norm * 1.0
 			var tx2 := int(trail_pos2.x)
@@ -4487,6 +4544,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx2] == MAT_EMPTY:
 					grid[tidx2] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx2, ty2)  # P3: rakettitrail-pikseli -> tarkka piste
 
 		# Bresenham törmäystarkistus
 		var landed := false
@@ -4573,7 +4631,6 @@ func _mat_color(mat: int) -> Color:
 
 
 func _flying_land(fp: Dictionary, x: int, y: int) -> void:
-	_mark_grid_dirty_all()  # P1: lentävän pikselin laskeutuminen (bursti) -> täysi lataus
 	y = clampi(y, 0, SIM_HEIGHT - 1)
 	x = clampi(x, 0, W - 1)
 	var idx := y * W + x
@@ -4581,6 +4638,8 @@ func _flying_land(fp: Dictionary, x: int, y: int) -> void:
 		grid[idx] = fp["mat"]
 		color_seed[idx] = fp["seed"]
 		paint_pending = true
+		# P3: yksittäisen laskeutuvan pikselin kirjoitus -> tarkka piste (pad 1)
+		_mark_grid_dirty(x - 1, y - 1, x + 1, y + 1)
 
 
 func _bresenham(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
