@@ -860,8 +860,9 @@ func _update_bot(b: Bot, delta: float) -> void:
 	# M3: akku hupenee VAIN WORK- ja DUMP-tilassa (ei liikkeesta/idlesta/latauksesta).
 	if b.state == Bot.BotState.WORK or b.state == Bot.BotState.DUMP:
 		b.battery = maxf(0.0, b.battery - BATTERY_DRAIN * delta)
-	# Telemetria: seuraa suurinta etaisyytta spawnista (assert_bots_moved-testia varten)
-	var d := b.pos.distance_to(b.spawn_pos)
+	# Telemetria: seuraa suurinta etaisyytta spawnista (assert_bots_moved-testia varten).
+	# Toroidaalinen (x jaksollinen) -> sauman yli liikkuva botti ei raportoi valheellista ~SIM_W.
+	var d := PlanetGeom.torus_dist(b.pos, b.spawn_pos, float(SIM_W))
 	if d > b.max_dist_from_spawn:
 		b.max_dist_from_spawn = d
 	match b.state:
@@ -883,6 +884,9 @@ func _update_bot(b: Bot, delta: float) -> void:
 	# (MOVE/CARRY) ajettiin jo taydella budjetilla -> nettoliike waypointtia kohti sailyy
 	# positiivisena, ei livelockia. Tyonto on max SEP_FACTOR osuus omasta nopeudesta.
 	_apply_separation(b, delta)
+	# x on jaksollinen: varmista wrap kaikkien tilojen/liikkeiden jalkeen (yksi chokepoint;
+	# _apply_separation voi palata aikaisin ilman wrappia jos ei naapureita).
+	b.pos.x = fposmod(b.pos.x, float(SIM_W))
 
 
 func _st_idle(b: Bot, delta: float) -> void:
@@ -892,7 +896,8 @@ func _st_idle(b: Bot, delta: float) -> void:
 	if world.base == null:
 		return
 	var hp: Vector2 = world.base.spawn_pos() + b.hover_offset
-	var to := hp - b.pos
+	# x-suunta toroidaalinen (lyhin sauman yli); y suora.
+	var to := Vector2(PlanetGeom.wrap_dx(b.pos.x, hp.x, float(SIM_W)), hp.y - b.pos.y)
 	var dl := to.length()
 	if dl > 2.0:
 		var step := minf(b.move_speed() * delta, dl)
@@ -910,7 +915,7 @@ func _st_move(b: Bot, delta: float) -> void:
 		# Tarkista etta ollaan riittavan lahella louhittavaa solua
 		var c := b.target_cell
 		var cpx := Vector2(float(c.x * DCELL + DCELL / 2), float(c.y * DCELL + DCELL / 2))
-		if b.pos.distance_to(cpx) > MINE_REACH_DIST:
+		if PlanetGeom.torus_dist(b.pos, cpx, float(SIM_W)) > MINE_REACH_DIST:
 			_abort_job(b)
 			return
 		if world.desig != null:
@@ -1139,7 +1144,8 @@ func _follow_path(b: Bot, delta: float) -> bool:
 	var budget := b.move_speed() * delta
 	while budget > 0.0 and b.path_idx < b.path.size():
 		var wp := b.path[b.path_idx]
-		var to := wp - b.pos
+		# x-suunta toroidaalinen (lyhin sauman yli); y suora. Botti seuraa sauman ylittavaa polkua.
+		var to := Vector2(PlanetGeom.wrap_dx(b.pos.x, wp.x, float(SIM_W)), wp.y - b.pos.y)
 		var d := to.length()
 		if d <= ARRIVE_DIST:
 			b.path_idx += 1
@@ -1147,8 +1153,9 @@ func _follow_path(b: Bot, delta: float) -> bool:
 		var step := minf(budget, d)
 		b.pos += to / d * step
 		budget -= step
-		if b.pos.distance_to(wp) <= ARRIVE_DIST:
+		if PlanetGeom.torus_dist(b.pos, wp, float(SIM_W)) <= ARRIVE_DIST:
 			b.path_idx += 1
+	# x wrappaa (_update_bot-chokepoint hoitaa lopullisen wrapin; wrap_dx sietaa valivaiheen ylivuodon).
 	return b.path_idx >= b.path.size()
 
 
@@ -1560,7 +1567,8 @@ func _seek_charge(b: Bot) -> void:
 			if occ.has(key):
 				continue  # slotti varattu (joku botti dokannut/matkalla)
 			var sp := ch.slot_pos(si)
-			var dd := b.pos.distance_to(sp)
+			# Toroidaalinen etaisyys (x jaksollinen -> lyhin sauman yli).
+			var dd := PlanetGeom.torus_dist(b.pos, sp, float(SIM_W))
 			if dd < best_dist:
 				best_dist = dd
 				best_key = key
