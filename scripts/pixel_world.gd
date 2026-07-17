@@ -996,9 +996,15 @@ func _process(delta: float) -> void:
 
 		# Vaihe 5.7: Hissilinkot + lentävät pikselit
 		if not launchers.is_empty() or not flying_pixels.is_empty():
+			# P3: launcherit kirjoittavat hajautetusti (intake/shaft/jalusta launcher.gd:n
+			# sisällä) — jos yksikin on läsnä, pysytään turvallisessa täydessä latauksessa.
+			# Pelkät lentävät pikselit sen sijaan merkitsevät oman tarkan rectinsä
+			# (_flying_land + rakettitrail alla; explode/_bullet_impact merkkaavat itse).
+			var had_launchers := not launchers.is_empty()
 			if _update_launchers_and_flying(delta * sim_speed):
 				grid_modified = true
-				_mark_grid_dirty_all()  # P1: lentävät pikselit hajautuvat laajalti
+				if had_launchers:
+					_mark_grid_dirty_all()  # P1: launcherien hajautetut kirjoitukset -> täysi lataus
 		_t_gamelogic = float(Time.get_ticks_usec() - _t0) / 1000.0
 
 		# Vaihe 5.8: Bottisimulaatio — CPU-logiikka joka 4. frame (kumuloitu delta).
@@ -4528,6 +4534,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx] == MAT_EMPTY:
 					grid[tidx] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx, ty)  # P3: rakettitrail-pikseli -> tarkka piste
 			# Toinen trail-pikseli hieman lähempänä
 			var trail_pos2 := old_pos - vel_norm * 1.0
 			var tx2 := int(trail_pos2.x)
@@ -4537,6 +4544,7 @@ func _update_launchers_and_flying(delta: float) -> bool:
 				if grid[tidx2] == MAT_EMPTY:
 					grid[tidx2] = MAT_FIRE
 					paint_pending = true
+					_mark_grid_dirty_point(tx2, ty2)  # P3: rakettitrail-pikseli -> tarkka piste
 
 		# Bresenham törmäystarkistus
 		var landed := false
@@ -4623,7 +4631,6 @@ func _mat_color(mat: int) -> Color:
 
 
 func _flying_land(fp: Dictionary, x: int, y: int) -> void:
-	_mark_grid_dirty_all()  # P1: lentävän pikselin laskeutuminen (bursti) -> täysi lataus
 	y = clampi(y, 0, SIM_HEIGHT - 1)
 	x = clampi(x, 0, W - 1)
 	var idx := y * W + x
@@ -4631,6 +4638,8 @@ func _flying_land(fp: Dictionary, x: int, y: int) -> void:
 		grid[idx] = fp["mat"]
 		color_seed[idx] = fp["seed"]
 		paint_pending = true
+		# P3: yksittäisen laskeutuvan pikselin kirjoitus -> tarkka piste (pad 1)
+		_mark_grid_dirty(x - 1, y - 1, x + 1, y + 1)
 
 
 func _bresenham(a: Vector2i, b: Vector2i) -> Array[Vector2i]:
