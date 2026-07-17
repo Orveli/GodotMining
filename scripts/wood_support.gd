@@ -31,12 +31,14 @@ static func check_support(grid: PackedByteArray, width: int, height: int) -> boo
 				has_support = true
 
 			# Tarkista naapurit (4-suuntainen) — tuki = STONE tai SAND
-			if not has_support and x > 0:
-				var n := grid[idx - 1]
+			# PLANEETTA: x wrappaa toroidaalisesti -> x-naapuri on aina olemassa
+			# (x=0 vasen = width-1, x=width-1 oikea = 0). y-rajat sailyvat (ydin = ankkuri).
+			if not has_support:
+				var n := grid[row + PlanetGeom.wrap_x(x - 1, width)]
 				if n == 3 or n == 1:  # STONE tai SAND
 					has_support = true
-			if not has_support and x < width - 1:
-				var n := grid[idx + 1]
+			if not has_support:
+				var n := grid[row + PlanetGeom.wrap_x(x + 1, width)]
 				if n == 3 or n == 1:
 					has_support = true
 			if not has_support and y > 0:
@@ -60,10 +62,11 @@ static func check_support(grid: PackedByteArray, width: int, height: int) -> boo
 		var x := idx % width
 		var y := idx / width
 
-		# Tarkista naapurit
+		# Tarkista naapurit — PLANEETTA: x-naapuri wrappaa (aina olemassa), y-rajat sailyvat
+		var row := y * width
 		var neighbors: Array[int] = []
-		if x > 0: neighbors.append(idx - 1)
-		if x < width - 1: neighbors.append(idx + 1)
+		neighbors.append(row + PlanetGeom.wrap_x(x - 1, width))
+		neighbors.append(row + PlanetGeom.wrap_x(x + 1, width))
 		if y > 0: neighbors.append(idx - width)
 		if y < height - 1: neighbors.append(idx + width)
 
