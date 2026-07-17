@@ -38,6 +38,12 @@ const NOISE_CIRCLE_R := 220.0
 # Bedrock-ydinrenkaan alku suhteessa korkeuteen: syvimmät (1-CORE_BEDROCK_FRAC)
 # osuus riveistä on tuhoamatonta ydinkuorta. v1: bedrock alkaa 85 % syvyydestä.
 const CORE_BEDROCK_FRAC := 0.85
+# Louhittava kivikaista joka pidetään bedrock-ydinrenkaan YLÄPUOLELLA: syvien
+# suonien/blobien aloituspiste rajataan tähän, jotta ne mahtuvat renkaan päälle
+# (muuten esim. rare_earth (norm.syvyys 0.75-1.0 ≈ y-fraktio 0.85-1.0) aloittaisi
+# kokonaan bedrockin sisältä eikä carvaisi mitään). Suoni saa silti kävellä alas
+# renkaaseen asti (pysähtyy bedrockiin).
+const CORE_MINE_MARGIN := 20
 
 
 # Wräppää x-koordinaatin välille [0, w). Toimii myös negatiivisille.
@@ -656,10 +662,13 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 			w - EDGE_THICKNESS * 2 - 1)
 		var cx := rng.randi_range(x0, x1)
 
-		# Y: satunnainen syvyysvyöhykkeellä
+		# Y: satunnainen syvyysvyöhykkeellä. Pidä blob bedrock-ydinrenkaan
+		# yläpuolella (rengas on tuhoamaton, ei carvattavaa kiveä sen sisällä).
 		var dn := rng.randf_range(min_dn, max_dn)
 		var sy := surface_y[clampi(cx, 0, w - 1)]
-		var cy := clampi(int(sy + dn * max_depth_px), int(sy) + 2, h - EDGE_THICKNESS - 1)
+		var core_top := int(float(h) * CORE_BEDROCK_FRAC) - CORE_MINE_MARGIN
+		var cy := clampi(int(sy + dn * max_depth_px), int(sy) + 2,
+			maxi(int(sy) + 2, core_top))
 
 		# Koko kasvaa syvyyden mukaan + satunnainen vaihtelu
 		var t      := (dn - min_dn) / maxf(max_dn - min_dn, 0.001)
@@ -725,10 +734,14 @@ static func _place_vein_set(grid: PackedByteArray, w: int, h: int,
 			w - EDGE_THICKNESS * 2 - 1)
 		var start_x := rng.randi_range(x0, x1)
 
-		# Aloitus-y: satunnainen syvyysvyöhykkeellä (0=pinta, 1=pohja)
+		# Aloitus-y: satunnainen syvyysvyöhykkeellä (0=pinta, 1=pohja). Rajataan
+		# bedrock-ydinrenkaan yläpuolelle (CORE_MINE_MARGIN), jotta syvät suonet
+		# aloittavat kivessä eivätkä bedrockin sisällä → carvaus onnistuu ja suoni
+		# kävelee alas renkaaseen asti (pysähtyy bedrockiin).
 		var dn := rng.randf_range(depth_min, depth_max)
 		var sy := surface_y[clampi(start_x, 0, w - 1)]
-		var start_y := clampf(sy + dn * max_depth_px, sy + 2.0, float(h - EDGE_THICKNESS - 1))
+		var core_top := float(int(float(h) * CORE_BEDROCK_FRAC) - CORE_MINE_MARGIN)
+		var start_y := clampf(sy + dn * max_depth_px, sy + 2.0, maxf(sy + 2.0, core_top))
 
 		# Alaspäin painotettu satunnaissuunta: ~90° (suoraan alas) ± vaihtelu
 		var heading := PI * 0.5 + rng.randf_range(-0.9, 0.9)
