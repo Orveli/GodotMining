@@ -1,0 +1,23 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "P1 (SPEC_planet): todistaa x-suunnan wrappayksen saumassa (x=0 <-> x=W-1) seka GPU-shaderissa etta headless-CPU-CA:ssa. Lahde on hiekkapatsas sarakkeessa x=0 (y 42..50) joka lepaa STONE-lattialla (0..1, y=51) -> suoraan-alas ja alas-oikea (x=1) on tukittu -> ainoa vapaa siirto on alas-VASEN, joka wrappaa saumaan x=W-1. Vastapaata on umpinainen 1-levea 'kaivo' sarakkeessa x=W-1: vasen seina STONE x=4094 (y 51..64), oikea seina STONE x=0 (y 52..64), pohja STONE x=4095 (y=64). Kaivoon paasee VAIN sauman yli -> jos hiekkaa loytyy x=4095:sta, wrappays toimii. Deterministinen: seinat pakottavat siirtosuunnan (ei randi-tasapeleja), CA sailyttaa maaran (9).",
+  "steps": [
+    { "cmd": "clear" },
+
+    { "cmd": "fill_rect", "x": 0, "y": 42, "w": 1, "h": 9, "mat": 1, "label": "lahde: hiekkapatsas saumassa x=0" },
+    { "cmd": "fill_rect", "x": 0, "y": 51, "w": 2, "h": 1, "mat": 3, "label": "lattia + alas-oikea tukki (x=0,1)" },
+    { "cmd": "fill_rect", "x": 0, "y": 52, "w": 1, "h": 13, "mat": 3, "label": "kaivon oikea seina (x=0 lattian alla)" },
+    { "cmd": "fill_rect", "x": 4094, "y": 51, "w": 1, "h": 14, "mat": 3, "label": "kaivon vasen seina (x=W-2)" },
+    { "cmd": "fill_rect", "x": 4095, "y": 64, "w": 1, "h": 1, "mat": 3, "label": "kaivon pohja (x=W-1)" },
+
+    { "cmd": "assert_material", "x": 4095, "y": 63, "mat": 0, "label": "alkutila: kaivo (x=W-1) tyhja ennen ajoa" },
+
+    { "cmd": "run_frames", "n": 180 },
+
+    { "cmd": "assert_material", "x": 4095, "y": 63, "mat": 1, "label": "WRAP: hiekkaa saapui sauman yli kaivon pohjalle (x=W-1)" },
+    { "cmd": "assert_rect", "x": 4095, "y": 54, "w": 1, "h": 10, "mat": 1, "min_pct": 70, "label": "WRAP: kaivosarake x=W-1 tayttyi hiekalla (lahde oli x=0)" },
+    { "cmd": "assert_material", "x": 0, "y": 42, "mat": 0, "label": "lahdesarakkeen ylin solu (x=0) tyhjeni (hiekka valui saumaan)" },
+    { "cmd": "assert_count", "mat": 1, "min": 9, "max": 9, "label": "CA sailytti hiekan maaran (9, ei katoa/tuplaannu saumassa)" }
+  ]
+}
