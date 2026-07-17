@@ -5400,6 +5400,13 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			# Aja skenaario --activity=1 ja --activity=0 ja vertaa: HASH pitää täsmätä bit-tarkasti.
 			var hlabel: String = step.get("label", "")
 			_scenario_hash_grid(hlabel)
+		"gpu_bench":
+			# P2: mittaa PUHDAS GPU-sim-aika synkronisesti (ohittaa P1:n async-pipelinen joka
+			# piilottaa GPU-ajan). Ajaa vain CA-passit submit+sync N kertaa nykyisellä (asettuneella)
+			# grid-tilalla ja raportoi ms/frame. Vertaa --activity=1 vs --activity=0.
+			var iters: int = step.get("iters", 200)
+			var bpasses: int = step.get("passes", 0)  # 0 = käytä nykyistä gpu_passes
+			_scenario_gpu_bench(iters, bpasses)
 		"assert_material":
 			var ax: int = step.get("x", 0)
 			var ay: int = step.get("y", 0)
@@ -5944,6 +5951,65 @@ func _scenario_fill_rect(x: int, y: int, w: int, h: int, mat: int) -> void:
 			color_seed[idx] = randi() % 256
 	paint_pending = true
 	_ca_expand_bounds(Rect2i(x, y, w, h))
+
+
+# P2: synkroninen GPU-sim-mikrobenchmark. Ajaa vain CA-passit (ei pack/extract/render/readback)
+# submit+sync iters kertaa nykyisellä grid_buffer-tilalla ja mittaa seinäkelloajan/frame. Koska
+# P1:n async-pipeline piilottaa GPU-ajan (gpu:ms = vain komentojen tallennus), tämä on ainoa tapa
+# nähdä early-outin todellinen GPU-säästö asettuneessa maailmassa. sim_frame pidetään vakiona ->
+# asettuneet tilet nukkuvat (realistinen steady-state-kustannus). Idempotentti: settled ei kirjoita.
+func _scenario_gpu_bench(iters: int, passes_override: int = 0) -> void:
+	if not gpu_ready:
+		print("gpu_bench: gpu_ready=false, ohitetaan")
+		return
+	var bench_passes: int = passes_override if passes_override > 0 else gpu_passes
+	var groups_x := ceili(float(W) / 16.0)
+	var groups_y := ceili(float(SIM_HEIGHT) / 16.0)
+	var push := PackedByteArray()
+	push.resize(48)
+	push.encode_u32(0, W)
+	push.encode_u32(4, SIM_HEIGHT)
+	push.encode_u32(16, 0)
+	push.encode_u32(20, 0)
+	push.encode_u32(24, 0)
+	push.encode_u32(28, 0)   # grav_gun_mode = 0
+	push.encode_u32(32, 0)
+	push.encode_u32(36, _sim_frame)
+	push.encode_u32(40, 1 if tile_activity_enabled else 0)
+	push.encode_u32(44, 0)
+	# Lämmittely jotta ajurin/pipelinen alustus ei vääristä mittausta
+	for warm in 2:
+		var wcl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(wcl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(wcl, pipeline)
+			rd.compute_list_bind_uniform_set(wcl, uniform_set, 0)
+			rd.compute_list_set_push_constant(wcl, push, push.size())
+			rd.compute_list_dispatch(wcl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var t0 := Time.get_ticks_usec()
+	for it in iters:
+		var cl := rd.compute_list_begin()
+		for pass_i in bench_passes:
+			if pass_i > 0:
+				rd.compute_list_add_barrier(cl)
+			push.encode_u32(8, frame_count * 4 + pass_i)
+			push.encode_u32(12, pass_i)
+			rd.compute_list_bind_compute_pipeline(cl, pipeline)
+			rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
+			rd.compute_list_set_push_constant(cl, push, push.size())
+			rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+		rd.compute_list_end()
+		rd.submit()
+		rd.sync()
+	var ms := float(Time.get_ticks_usec() - t0) / 1000.0 / float(iters)
+	print("gpu_bench: activity=%d passes=%d act=%d/%d -> %.4f ms/frame (%d iters, synk. submit+sync)" % [
+		1 if tile_activity_enabled else 0, bench_passes, _activity_active_count, TILE_COUNT, ms, iters])
 
 
 # P2: hashaa materiaali-grid (FNV-1a) + per-materiaali-laskurit. Käytetään determinismi-
