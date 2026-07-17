@@ -44,7 +44,7 @@ func _new_grid() -> PackedByteArray:
 	return g
 
 
-func _set(g: PackedByteArray, x: int, y: int, mat: int) -> void:
+func _put(g: PackedByteArray, x: int, y: int, mat: int) -> void:
 	g[y * W + x] = mat
 
 
@@ -52,8 +52,8 @@ func _set(g: PackedByteArray, x: int, y: int, mat: int) -> void:
 func _test_seam_adjacency() -> void:
 	print("--- Testi 1: sauman yli naapuruus ---")
 	var g := _new_grid()
-	_set(g, 0, 3, MAT_STONE)
-	_set(g, W - 1, 3, MAT_STONE)
+	_put(g, 0, 3, MAT_STONE)
+	_put(g, W - 1, 3, MAT_STONE)
 
 	var fast := CCL.find_components_fast(g, W, H, MAT_STONE)
 	_check(fast.size() == 1, "find_components_fast: 1 komponentti (sauman yli)")
@@ -69,8 +69,8 @@ func _test_seam_adjacency() -> void:
 func _test_no_false_merge() -> void:
 	print("--- Testi 2: eri rivit eivat yhdisty ---")
 	var g := _new_grid()
-	_set(g, 0, 2, MAT_STONE)
-	_set(g, W - 1, 5, MAT_STONE)
+	_put(g, 0, 2, MAT_STONE)
+	_put(g, W - 1, 5, MAT_STONE)
 
 	var fast := CCL.find_components_fast(g, W, H, MAT_STONE)
 	_check(fast.size() == 2, "find_components_fast: 2 komponenttia (ei virheellista yhdistysta)")
@@ -83,10 +83,10 @@ func _test_no_false_merge() -> void:
 func _test_bar_across_seam() -> void:
 	print("--- Testi 3: vaakapalkki sauman yli ---")
 	var g := _new_grid()
-	_set(g, W - 2, 3, MAT_STONE)
-	_set(g, W - 1, 3, MAT_STONE)
-	_set(g, 0, 3, MAT_STONE)
-	_set(g, 1, 3, MAT_STONE)
+	_put(g, W - 2, 3, MAT_STONE)
+	_put(g, W - 1, 3, MAT_STONE)
+	_put(g, 0, 3, MAT_STONE)
+	_put(g, 1, 3, MAT_STONE)
 
 	var fast := CCL.find_components_fast(g, W, H, MAT_STONE)
 	_check(fast.size() == 1, "find_components_fast: 1 komponentti (palkki sauman yli)")
