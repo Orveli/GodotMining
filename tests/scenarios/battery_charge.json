@@ -1,0 +1,17 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "M3: akku + lataus. Todistaa etta matala akku pysayttaa tyon ja botti hakeutuu itse lataukseen (SEEK_CHARGE/CHARGING), ja etta lataus (hiilibuustilla nopea) palauttaa akun -> botti jatkaa louhintaa ja designoitu alue kuluu. Ajetaan headless cpu_ca:lla ilman GPU:ta. Base-charger (1 slotti) luodaan _init_bot_sim:ssa basen kylkeen.",
+  "steps": [
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 48, "margin": 12, "depth": 36 },
+    { "cmd": "run_frames", "n": 60 },
+
+    { "cmd": "set_battery", "value": 3.0 },
+    { "cmd": "run_frames", "n": 400 },
+    { "cmd": "assert_charging", "min": 1, "label": "matala akku -> botti lopetti tyon ja hakeutui lataukseen" },
+
+    { "cmd": "feed_coal", "px": 12 },
+    { "cmd": "run_frames", "n": 1800 },
+    { "cmd": "assert_desig_consumed_pct", "min_pct": 12, "label": "lataus palautti akun -> botti jatkoi louhintaa (alue kuluu, ei deadlock)" }
+  ]
+}

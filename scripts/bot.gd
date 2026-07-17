@@ -9,7 +9,9 @@ extends RefCounted
 enum Role { MINER, HAULER }
 
 # Tilakone: IDLE -> MOVE -> WORK -> CARRY_MOVE -> DUMP
-enum BotState { IDLE, MOVE, WORK, CARRY_MOVE, DUMP }
+# M3: SEEK_CHARGE=5, CHARGING=6 LISATTY LOPPUUN. Ala muuta 0-4 numerointia
+# (skenaariot/UI/testit viittaavat niihin numeroin).
+enum BotState { IDLE, MOVE, WORK, CARRY_MOVE, DUMP, SEEK_CHARGE, CHARGING }
 
 # --- Upgrade-tierit (Mk1/Mk2/Mk3), taulukkoindeksi = tier - 1 ---
 # GDD §2.5 lahtoarvot olivat mine 25/50/90, mutta koodin nykybalanssi kayttaa jo MINE_RATE=80
@@ -28,6 +30,13 @@ const MAX_TIER := 3        # Mk3 on korkein
 const MOVE_SPEED := 40.0   # px/s (Mk1)
 const MINE_RATE := 80.0    # px/s (Mk1; 16x16-solu = 256 px -> tayden kivisolun louhinta ~3.2 s)
 const CARRY_CAP := 40      # px  (Mk1)
+
+# --- Akku (M3) ---
+# Akkuyksikko = "tyosekunti". Hupenee VAIN WORK/DUMP-tilassa (BotManager.BATTERY_DRAIN).
+# Botti hakeutuu lataukseen kun akku alittaa BotManager.BATTERY_SEEK-kynnyksen.
+const BATTERY_MAX := 90.0
+var battery: float = BATTERY_MAX
+var charger_slot: int = -1       # varattu latausslotin globaali indeksi; -1 = ei varausta
 
 # --- Kontraktin mukainen julkinen tila ---
 var id: int = -1                         # pysyva tunniste (BotManager antaa add_botissa)

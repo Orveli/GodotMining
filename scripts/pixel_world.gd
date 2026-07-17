@@ -1184,6 +1184,11 @@ func _collect_light_emitters() -> Array:
 		for b in bot_manager.bots:
 			if is_instance_valid(b):
 				emitters.append({"position": Vector2i(b.pos), "radius": 48.0, "intensity": 0.85})
+	# Latauspaikat (M3) — pieni lämmin valo per slotti (dokkauspiste)
+	if bot_manager != null:
+		for ch in bot_manager.chargers:
+			for sp in ch.slot_positions:
+				emitters.append({"position": Vector2i(sp), "radius": 50.0, "intensity": 0.8})
 	# Koneet (uunit, murskaajat, porat) — keskikokoinen valo
 	for m in furnaces:
 		if is_instance_valid(m):
@@ -1594,6 +1599,9 @@ func _init_bot_sim() -> void:
 	bot_manager.dig_sites.clear()
 	bot_manager.logistics = logistics
 	bot_manager.setup(self)
+	# M3: basen sisaanrakennettu latauspaikka (1 slotti). Dokkauspiste basen kyljessa,
+	# hieman spawn-pisteen sivussa jottei mene bottien IDLE-leijunnan paalle.
+	bot_manager.make_base_charger(base.spawn_pos() + Vector2(22.0, 0.0))
 	# Nollaa talous- ja demo-kaaren tila uuteen peliin
 	money = START_MONEY
 	# Inventaario & politiikat (M1): rakennusaineet varastoon, roska myyntiin.
@@ -3356,6 +3364,12 @@ func _hit_test_world_target(coords: Vector2i) -> Dictionary:
 	if base != null and is_instance_valid(base) and base in money_exits:
 		if Rect2i(base.grid_pos, Vector2i(base.EXIT_W, base.EXIT_H)).has_point(coords):
 			return {"kind": "base", "obj": base}
+	# Latauspaikat (M3): pieni klikattava alue kunkin slotin dokkauspisteen ymparilla.
+	if bot_manager != null:
+		for ch in bot_manager.chargers:
+			for sp in ch.slot_positions:
+				if Rect2i(Vector2i(sp) - Vector2i(6, 6), Vector2i(12, 12)).has_point(coords):
+					return {"kind": "charger", "charger": ch}
 	# Vyöhykkeet — pois lukien koneiden omat auto-rekisteröidyt intake/output-vyöhykkeet
 	# (niitä ei saa poistaa/suodattaa yleisellä vyöhykepopoverilla, ne kuuluvat koneelle).
 	if logistics != null:
@@ -4972,6 +4986,56 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 				print("ScenarioRunner: PASS  [%s] kulutettu=%.1f%% (%d/%d, jaljella=%d) >= %.0f%%" % [plabel, ppct, pconsumed, _scenario_desig_count0, pactive, pmin])
 			else:
 				print("ScenarioRunner: FAIL  [%s] kulutettu=%.1f%% (%d/%d, jaljella=%d), odotettu >= %.0f%%" % [plabel, ppct, pconsumed, _scenario_desig_count0, pactive, pmin])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"set_battery":
+			# M3: aseta KAIKKIEN bottien akku (testaa lataushakeutumista).
+			var sb_val: float = float(step.get("value", Bot.BATTERY_MAX))
+			if bot_manager != null:
+				for b in bot_manager.bots:
+					b.battery = sb_val
+			print("ScenarioRunner: set_battery value=%.1f (%d bottia)" % [
+				sb_val, (bot_manager.bots.size() if bot_manager != null else 0)])
+		"feed_coal":
+			# M3: syota hiilta base-chargeriin (buustattu lataus). px = COAL-pikselit.
+			var fc_px: int = step.get("px", 0)
+			var fed := false
+			if bot_manager != null:
+				for ch in bot_manager.chargers:
+					if ch.is_base:
+						ch.feed_coal(fc_px)
+						fed = true
+						print("ScenarioRunner: feed_coal px=%d coal_buffer=%.1f" % [fc_px, ch.coal_buffer])
+						break
+			if not fed:
+				print("ScenarioRunner: feed_coal px=%d — ei base-chargeria" % fc_px)
+		"assert_charging":
+			# M3: assert >= min bottia CHARGING/SEEK_CHARGE-tilassa (jono muodostuu, ei deadlock).
+			var ac_min: int = step.get("min", 1)
+			var ac_label: String = step.get("label", "")
+			var ac_n := 0
+			if bot_manager != null:
+				for b in bot_manager.bots:
+					if b.state == Bot.BotState.SEEK_CHARGE or b.state == Bot.BotState.CHARGING:
+						ac_n += 1
+			if ac_n >= ac_min:
+				print("ScenarioRunner: PASS  [%s] charging=%d >= %d" % [ac_label, ac_n, ac_min])
+			else:
+				print("ScenarioRunner: FAIL  [%s] charging=%d, odotettu >= %d" % [ac_label, ac_n, ac_min])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_waiting_charger":
+			# M3: assert >= min bottia WAITING_CHARGER-tilassa (akku vahissa, ei vapaata slottia ->
+			# jono muodostuu). Todistaa pehmean capin: jono syntyy mutta ei deadlockaa.
+			var wc_min: int = step.get("min", 1)
+			var wc_label: String = step.get("label", "")
+			var wc_n := 0
+			if bot_manager != null:
+				wc_n = int(bot_manager.get_fleet_stats().get("waiting_charger", 0))
+			if wc_n >= wc_min:
+				print("ScenarioRunner: PASS  [%s] waiting_charger=%d >= %d" % [wc_label, wc_n, wc_min])
+			else:
+				print("ScenarioRunner: FAIL  [%s] waiting_charger=%d, odotettu >= %d" % [wc_label, wc_n, wc_min])
 				_scenario_failures += 1
 			_scenario_tests += 1
 		"mvp_shot":

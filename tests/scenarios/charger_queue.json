@@ -1,0 +1,21 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "M3: latausjono = pehmea cap. Rakennetaan iso lauma (set_inventory + build_bot), 1 base-slotti, kaikki akut matalalla -> yksi lataa kerrallaan ja LOPUT jaavat WAITING_CHARGER-tilaan (jono). Todistaa: jono muodostuu MUTTA tyo etenee silti (ei deadlock) -- designoitu alue kuluu kun botit vuorottelevat latauksessa.",
+  "steps": [
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 64, "margin": 12, "depth": 48 },
+    { "cmd": "set_inventory", "mat": 12, "px": 200 },
+    { "cmd": "build_bot", "role": 0, "count": 3 },
+    { "cmd": "build_bot", "role": 1, "count": 1 },
+    { "cmd": "assert_fleet", "min": 6, "max": 6, "label": "lauma kasvoi 6:een (2 aloitus + 4 rakennettua)" },
+
+    { "cmd": "set_battery", "value": 4.0 },
+    { "cmd": "run_frames", "n": 300 },
+    { "cmd": "assert_charging", "min": 1, "label": "yksi slotti -> yksi botti lataa/hakeutuu kerrallaan" },
+    { "cmd": "assert_waiting_charger", "min": 1, "label": "loput matala-akkuiset jonottavat (WAITING_CHARGER, ei vapaata slottia)" },
+
+    { "cmd": "feed_coal", "px": 40 },
+    { "cmd": "run_frames", "n": 2400 },
+    { "cmd": "assert_desig_consumed_pct", "min_pct": 15, "label": "jono ei deadlockaa: botit vuorottelevat, tyo etenee (alue kuluu)" }
+  ]
+}

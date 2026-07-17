@@ -30,6 +30,10 @@ const IDLE_REASON_OK := 1        # idle, mutta tyota on saatavilla (siirtyy pian
 const IDLE_REASON_NO_QUEUED := 2 # miner: ei yhtaan louhintadesignaatiota jaljella
 const IDLE_REASON_ALL_BLOCKED := 3  # miner: designaatioita on, mutta yksikaan ei ole tavoitettavissa
 const IDLE_REASON_NO_LOOSE := 4  # hauler: ei kerattavaa irtomateriaalia
+# M3: latausaikaiset syyt. CHARGING = dokattu ja lataa (SEEK_CHARGE/CHARGING nakyy overlayssa);
+# WAITING_CHARGER = akku vahissa mutta kaikki slotit varattuja -> odottaa vuoroa (pehmea cap).
+const IDLE_REASON_CHARGING := 5
+const IDLE_REASON_WAITING_CHARGER := 6
 
 # --- Navigaatiogridi (peilaus NavGridista) ---
 const NCELL := 16
@@ -101,6 +105,18 @@ const CONGEST_K := 0.4            # ruuhkakertoimen jyrkkyys
 const CONGEST_FREE := 1            # monta MUUTA bottia lahella on "ilmaisia" (2 bottia pisteessa = ei sakkoa)
 const CONGEST_FLOOR := 0.25        # kertoimen lattia: tyo etenee aina
 
+# --- Akku + lataus (M3, SPEC 2.4). Akkuyksikko = "tyosekunti". ---
+const BATTERY_MAX := 90.0          # tays akku = 90 s tyota
+const BATTERY_DRAIN := 1.0         # /s; hupenee VAIN WORK- ja DUMP-tilassa (ei liikkeesta/idlesta)
+const BATTERY_SEEK := 18.0         # (20 %) botti hakeutuu lataukseen kun akku alle taman
+const BATTERY_FULL_ENOUGH := 85.0  # lataus loppuu kun akku >= tama (estaa thrashingin)
+const CHARGE_TRICKLE := 1.5        # /s; ilmainen trickle -> tays lataus ~60 s
+const CHARGE_COAL := 9.0           # /s; hiilibuusti (6x) -> tays lataus ~10 s
+const COAL_UNITS_PER_PX := 30.0    # 1 COAL px = 30 latausyksikkoa buustattua latausta
+const CHARGER_BASE_SLOTS := 1      # basen sisaanrakennettu latauspaikka
+const CHARGER_BUILT_SLOTS := 2     # rakennettava latausrivisto-moduuli (M4) lisaa slotit
+const SLOT_KEY_STRIDE := 1000      # globaali slot-avain = charger.id * STRIDE + slotti-indeksi
+
 # 8 suuntaa (nav-naapurit)
 const NAV_DIRS: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -134,6 +150,11 @@ var logistics: Logistics = null
 var _bought_count: int = 0                 # ostettujen bottien maara (aloitus-2 EI laske) -> hinnankorotus
 var _next_id: int = 0                       # monotoninen bot-id-jakaja
 
+# M3: latauspaikat. pixel_world._init_bot_sim luo base-chargerin; M4 lisaa latausrivisto-moduulin.
+# Slot-miehitys JOHDETAAN bottien tilasta joka tyonjakokierros (ei pysyvaa laskuria) -> ei varausvuotoa.
+var chargers: Array[Charger] = []
+var _next_charger_id: int = 0               # monotoninen charger-id-jakaja
+
 # A4/B2: frontier-cache. _scan_designations rakentaa taman kerran/kierros (yksi kevyt
 # byte-skannaus + naapuritarkistus vain designoiduille soluille); _assign_miner valitsee
 # tasta lahimman EIKA skannaa koko 6240-gridia per botti.
@@ -162,6 +183,9 @@ func setup(world: Node) -> void:
 	# Nollaa tila (uusi peli / regenerate): osto, tunnisteet, frontier, jaahyt.
 	_bought_count = 0
 	_next_id = 0
+	# M3: nollaa latauspaikat uuteen peliin (pixel_world lisaa base-chargerin setupin jalkeen).
+	chargers.clear()
+	_next_charger_id = 0
 	_frontier_cells.clear()
 	_cell_cooldown.clear()
 	_assign_timer = 0.0
@@ -241,6 +265,24 @@ func build_bot(role: int) -> bool:
 	return true
 
 
+# M3: rekisteroi uusi latauspaikka. Antaa monotonisen id:n (globaali slot-avain johdetaan
+# siita) ja lisaa listaan. pixel_world luo base-chargerin, M4 latausrivisto-moduulin.
+func add_charger(ch: Charger) -> Charger:
+	ch.id = _next_charger_id
+	_next_charger_id += 1
+	chargers.append(ch)
+	return ch
+
+
+# M3: luo basen sisaanrakennettu latauspaikka (1 slotti, dokkauspiste basen kyljessa).
+func make_base_charger(dock_pos: Vector2) -> Charger:
+	var ch := Charger.new()
+	ch.is_base = true
+	ch.slot_count = CHARGER_BASE_SLOTS
+	ch.slot_positions = [dock_pos]
+	return add_charger(ch)
+
+
 # Vaihda botin rooli lennossa. Keskeyttaa tyon siististi:
 #   - varattu louhintadesignaatio (CLAIMED/MINING) -> QUEUED (muille vapaaksi, ei jaahya),
 #   - cargo dumpataan baseen ensin jos ei tyhja (heti jos tyhja),
@@ -265,6 +307,7 @@ func set_role(bot_id: int, new_role: int) -> void:
 	b.dump_target = {}
 	b.path = PackedVector2Array()
 	b.path_idx = 0
+	b.charger_slot = -1   # M3: vapauta mahdollinen latausvaraus (miehitys johdetaan tilasta)
 	_set_state(b, Bot.BotState.IDLE)
 
 
@@ -298,6 +341,9 @@ func get_fleet_stats() -> Dictionary:
 	var haulers := 0
 	var miners_active := 0
 	var haulers_active := 0
+	# M4 lukee naita latausrivisto-triggeriin (waiting_charger > 0) ja UI overlayn ikoniin.
+	var waiting_charger := 0
+	var charging := 0
 	var bot_list: Array = []
 	for b in bots:
 		var active: bool = b.state != Bot.BotState.IDLE
@@ -312,10 +358,16 @@ func get_fleet_stats() -> Dictionary:
 		# pos/cargo_total/carry_cap: additiivisia read-only-kenttiä (UI-REDESIGN Vaihe 4,
 		# scripts/ui_bot_status_overlay.gd) — eivät vaikuta bottilogiikkaan, vain UI lukee niitä.
 		# idle_reason (P0-1): johdettu tilannekuvasta, kertoo MIKSI botti on idle (overlay + herateet).
+		# battery (M3): akun tila 0..BATTERY_MAX (overlayn akkupalkki lukee taman).
+		var reason: int = _idle_reason_for(b)
+		if reason == IDLE_REASON_CHARGING:
+			charging += 1
+		elif reason == IDLE_REASON_WAITING_CHARGER:
+			waiting_charger += 1
 		bot_list.append({
 			"id": b.id, "role": b.role, "tier": b.tier, "state": b.state,
 			"pos": b.pos, "cargo_total": b.cargo_total, "carry_cap": b.carry_cap(),
-			"idle_reason": _idle_reason_for(b),
+			"idle_reason": reason, "battery": b.battery, "battery_max": Bot.BATTERY_MAX,
 		})
 	# P0-1/P0-3: laumatason tilannekooste UI-heratteita varten (kaikki JOHDETTUA tilaa,
 	# paivitetaan _scan_designationsissa 2 Hz -> ei omaa gridiskannausta per kutsu).
@@ -332,6 +384,10 @@ func get_fleet_stats() -> Dictionary:
 		"any_designation": (_frontier_cells.size() + _scan_blocked_count + _scan_working_count) > 0,
 		"loose_material": loose,
 		"designations_consumed": _designations_consumed,
+		# M3/M4: latausjonon tila. waiting_charger = akku vahissa mutta ei vapaata slottia
+		# (M4:n latausrivisto-triggeri); charging = dokattu/menossa lataukseen.
+		"waiting_charger": waiting_charger,
+		"charging": charging,
 	}
 
 
@@ -344,8 +400,14 @@ func bot_count() -> int:
 # on -> ALL_BLOCKED; ei designaatioita lainkaan -> NO_QUEUED; muuten OK (tyo tulossa). Hauler:
 # kuorma tallella tai kerattavaa on -> OK; muuten NO_LOOSE.
 func _idle_reason_for(b: Bot) -> int:
+	# M3: lataustilat nakyvat omana syyna (overlay + M4-trigger). SEEK_CHARGE/CHARGING = CHARGING.
+	if b.state == Bot.BotState.SEEK_CHARGE or b.state == Bot.BotState.CHARGING:
+		return IDLE_REASON_CHARGING
 	if b.state != Bot.BotState.IDLE:
 		return IDLE_REASON_ACTIVE
+	# Idle mutta akku vahissa eika slottia saatu -> odottaa vuoroa (pehmea cap, ei deadlock).
+	if b.battery <= BATTERY_SEEK:
+		return IDLE_REASON_WAITING_CHARGER
 	if b.role == Bot.Role.MINER:
 		if not _frontier_cells.is_empty():
 			return IDLE_REASON_OK
@@ -514,6 +576,11 @@ func _run_assignment() -> void:
 	_build_round_claims()
 	for b in bots:
 		if b.state == Bot.BotState.IDLE:
+			# M3: akku vahissa -> hakeudu lataukseen ENNEN tyota. WAITING_CHARGER-botti (ei vapaata
+			# slottia) jaa IDLEen ja yrittaa uudelleen taalla joka kierros -> pehmea cap, ei deadlock.
+			if b.battery <= BATTERY_SEEK:
+				_seek_charge(b)
+				continue
 			if b.role == Bot.Role.MINER:
 				_assign_miner(b)
 			else:
@@ -783,6 +850,9 @@ func _pickup_zone_congestion(rect: Rect2i, self_bot: Bot) -> int:
 
 func _update_bot(b: Bot, delta: float) -> void:
 	b.state_timer += delta
+	# M3: akku hupenee VAIN WORK- ja DUMP-tilassa (ei liikkeesta/idlesta/latauksesta).
+	if b.state == Bot.BotState.WORK or b.state == Bot.BotState.DUMP:
+		b.battery = maxf(0.0, b.battery - BATTERY_DRAIN * delta)
 	# Telemetria: seuraa suurinta etaisyytta spawnista (assert_bots_moved-testia varten)
 	var d := b.pos.distance_to(b.spawn_pos)
 	if d > b.max_dist_from_spawn:
@@ -798,6 +868,10 @@ func _update_bot(b: Bot, delta: float) -> void:
 			_st_carry(b, delta)
 		Bot.BotState.DUMP:
 			_st_dump(b, delta)
+		Bot.BotState.SEEK_CHARGE:
+			_st_seek_charge(b, delta)
+		Bot.BotState.CHARGING:
+			_st_charging(b, delta)
 	# Kerros 2: separation-tyonto KAIKILLE tiloille, tilakone-matchin JALKEEN. _follow_path
 	# (MOVE/CARRY) ajettiin jo taydella budjetilla -> nettoliike waypointtia kohti sailyy
 	# positiivisena, ei livelockia. Tyonto on max SEP_FACTOR osuus omasta nopeudesta.
@@ -907,6 +981,10 @@ func _st_dump(b: Bot, delta: float) -> void:
 func _finish_dump(b: Bot) -> void:
 	b.dump_target = {}
 	_set_state(b, Bot.BotState.IDLE)
+	# M3: akku vahissa -> hakeudu lataukseen (kuorma purettu jo yllä).
+	if b.battery <= BATTERY_SEEK:
+		_seek_charge(b)
+		return
 	_assign_hauler(b)
 
 
@@ -1121,6 +1199,10 @@ func _finish_mining(b: Bot) -> void:
 	b.mine_targets = []
 	b.mine_cursor = 0
 	_set_state(b, Bot.BotState.IDLE)
+	# M3: akku vahissa -> hakeudu lataukseen (designaatio vapautettu jo yllä normaalisti).
+	if b.battery <= BATTERY_SEEK:
+		_seek_charge(b)
+		return
 	# Hae heti seuraava tyo
 	_assign_miner(b)
 
@@ -1429,6 +1511,100 @@ func _find_pile(dx: int, dy: int) -> Dictionary:
 
 
 # ============================================================
+#  Akku + lataus (M3)
+# ============================================================
+
+# Globaali slot-avain (charger.id * STRIDE + slotti-indeksi). Yksikasitteinen int koko laumalle;
+# botti tallentaa taman b.charger_slotiin. Purku: id = key / STRIDE, si = key % STRIDE.
+func _global_slot_key(ch: Charger, si: int) -> int:
+	return ch.id * SLOT_KEY_STRIDE + si
+
+
+func _charger_by_id(cid: int) -> Charger:
+	for ch in chargers:
+		if ch.id == cid:
+			return ch
+	return null
+
+
+# Slot-miehitys JOHDETAAN bottien nykytilasta (SEEK_CHARGE/CHARGING + charger_slot >= 0) joka
+# kutsulla -> ei pysyvaa laskuria, joten varausvuotoa ei voi syntya jos botti abortoi (charger_slot
+# nollataan aina ulospaasyssa). Palauttaa { slot_key -> true }.
+func _charger_slot_occupancy() -> Dictionary:
+	var occ: Dictionary = {}
+	for b in bots:
+		if b.charger_slot >= 0 and (b.state == Bot.BotState.SEEK_CHARGE or b.state == Bot.BotState.CHARGING):
+			occ[b.charger_slot] = true
+	return occ
+
+
+# Hakeudu lataukseen: valitse lahin charger jolla on vapaa slotti (miehitys johdettu tilasta),
+# varaa slotti (b.charger_slot), reitita dokkauspisteeseen ja siirry SEEK_CHARGEen. Jos yksikaan
+# slotti ei ole vapaa -> jaa IDLEen (WAITING_CHARGER); yritetaan uudelleen joka tyonjakokierros.
+func _seek_charge(b: Bot) -> void:
+	var occ := _charger_slot_occupancy()
+	var best_pos := Vector2.ZERO
+	var best_key := -1
+	var best_dist := INF
+	for ch in chargers:
+		for si in ch.slot_count:
+			var key := _global_slot_key(ch, si)
+			if occ.has(key):
+				continue  # slotti varattu (joku botti dokannut/matkalla)
+			var sp := ch.slot_pos(si)
+			var dd := b.pos.distance_to(sp)
+			if dd < best_dist:
+				best_dist = dd
+				best_key = key
+				best_pos = sp
+	if best_key < 0:
+		# Kaikki slotit varattu (tai ei chargeria) -> pehmea cap: jaa IDLEen, yrita ensi kierroksella.
+		b.charger_slot = -1
+		_set_state(b, Bot.BotState.IDLE)
+		return
+	b.charger_slot = best_key
+	var path: PackedVector2Array = world.nav.find_path_px(b.pos, best_pos)
+	if path.is_empty():
+		# Charger voi olla avoimella alueella -> lenna suoraan (drone lapaisee kaiken).
+		path = PackedVector2Array([best_pos])
+	b.path = path
+	b.path_idx = 0
+	_set_state(b, Bot.BotState.SEEK_CHARGE)
+
+
+# SEEK_CHARGE: lenna dokkauspisteeseen -> CHARGING. Turvavahti: jos ei paase perille jarkevassa
+# ajassa, vapauta slotti ja palaa IDLEen (yrita uudelleen seuraavalla kierroksella).
+func _st_seek_charge(b: Bot, delta: float) -> void:
+	var arrived := _follow_path(b, delta)
+	if arrived:
+		_set_state(b, Bot.BotState.CHARGING)
+		return
+	if b.state_timer > MOVE_MAX_TIME:
+		b.charger_slot = -1
+		_set_state(b, Bot.BotState.IDLE)
+
+
+# CHARGING: kerry akkua charger.charge_rate()-tahtiin. coal_buffer kuluu VAIN buustatusta
+# osuudesta (rate - CHARGE_TRICKLE); trickle on ilmainen. Kun akku >= BATTERY_FULL_ENOUGH ->
+# vapauta slotti ja palaa IDLEen (seuraava tyonjako hakee tyon). Charger kadonnut -> IDLE.
+func _st_charging(b: Bot, delta: float) -> void:
+	var ch: Charger = null
+	if b.charger_slot >= 0:
+		ch = _charger_by_id(b.charger_slot / SLOT_KEY_STRIDE)
+	if ch == null:
+		b.charger_slot = -1
+		_set_state(b, Bot.BotState.IDLE)
+		return
+	var rate := ch.charge_rate()
+	b.battery = minf(Bot.BATTERY_MAX, b.battery + rate * delta)
+	if ch.coal_buffer > 0.0:
+		ch.coal_buffer = maxf(0.0, ch.coal_buffer - (rate - CHARGE_TRICKLE) * delta)
+	if b.battery >= BATTERY_FULL_ENOUGH:
+		b.charger_slot = -1
+		_set_state(b, Bot.BotState.IDLE)
+
+
+# ============================================================
 #  Vikasieto / apurit
 # ============================================================
 
@@ -1446,6 +1622,7 @@ func _abort_job(b: Bot) -> void:
 	b.mine_cursor = 0
 	b.path = PackedVector2Array()
 	b.path_idx = 0
+	b.charger_slot = -1   # M3: turvavaralla — miehitys johdetaan tilasta, ei jaa roikkuvaa varausta
 	_set_state(b, Bot.BotState.IDLE)
 
 

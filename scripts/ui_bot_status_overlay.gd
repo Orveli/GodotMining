@@ -23,8 +23,11 @@ var pixel_world: TextureRect = null
 # tarvitaan vain kaksi kokonaislukuvakiota).
 const ROLE_MINER := 0
 const BOT_STATE_IDLE := 0
+const BOT_STATE_SEEK_CHARGE := 5   # M3
+const BOT_STATE_CHARGING := 6      # M3
 # Idle-syy (bot_manager.gd IDLE_REASON_*): vain ALL_BLOCKED nostetaan diegeettisesti esiin (P0-1b).
 const IDLE_REASON_ALL_BLOCKED := 3
+const IDLE_REASON_WAITING_CHARGER := 6  # M3
 
 const BAR_W := 14.0
 const BAR_H := 3.0
@@ -33,6 +36,15 @@ const COL_BAR_BG := Color(0.05, 0.05, 0.08, 0.85)
 const COL_BAR_MINER := Color(0.88, 0.66, 0.25, 0.95)
 const COL_BAR_HAULER := Color(0.35, 0.62, 0.95, 0.95)
 const IDLE_ALPHA := 0.35   # himmennys kun botti on IDLE (ei töissä)
+
+# M3: akkupalkki kuormapalkin alapuolella + lataustilan ikoni.
+const BATT_BAR_H := 2.0
+const BATT_BAR_OFFSET_Y := -7.0
+const COL_BATT_OK := Color(0.45, 0.85, 0.4, 0.95)     # vihreä = riittää
+const COL_BATT_LOW := Color(0.95, 0.35, 0.2, 0.95)    # punainen = vähissä (hakeutuu lataukseen)
+const BATT_LOW_FRAC := 0.2                             # BATTERY_SEEK / BATTERY_MAX = 18/90
+const COL_CHARGE := Color(1.0, 0.85, 0.25, 1.0)       # keltainen lataussalama
+const COL_WAIT := Color(1.0, 0.55, 0.15, 1.0)         # amber = odottaa vuoroa
 
 # P0-1b: "ei reittiä" -varoitus tavoittamattoman designaation ylle jaaneelle idle-minerille.
 const COL_WARN := Color(1.0, 0.55, 0.15, 1.0)      # amber-oranssi huutomerkki (erottuu himmennyksesta)
@@ -79,10 +91,42 @@ func _draw() -> void:
 			draw_rect(Rect2(bar_pos, Vector2(BAR_W * frac, BAR_H)),
 				Color(role_col.r, role_col.g, role_col.b, role_col.a * alpha))
 
+		# M3: akkupalkki kuormapalkin alapuolella. Vihreä kun riittää, punainen kun vähissä.
+		# Lataus-/odotustilassa alphaa ei himmennetä (tila on merkityksellinen, ei "toimeton").
+		if b.has("battery") and b.has("battery_max"):
+			var state: int = int(b.get("state", 0))
+			var charging: bool = state == BOT_STATE_CHARGING or state == BOT_STATE_SEEK_CHARGE
+			var batt_alpha: float = 1.0 if charging else alpha
+			var bmax: float = maxf(float(b["battery_max"]), 0.001)
+			var bfrac: float = clampf(float(b["battery"]) / bmax, 0.0, 1.0)
+			var batt_pos := screen + Vector2(-BAR_W * 0.5, BATT_BAR_OFFSET_Y)
+			draw_rect(Rect2(batt_pos, Vector2(BAR_W, BATT_BAR_H)),
+				Color(COL_BAR_BG.r, COL_BAR_BG.g, COL_BAR_BG.b, COL_BAR_BG.a * batt_alpha))
+			if bfrac > 0.0:
+				var bcol: Color = COL_BATT_LOW if bfrac <= BATT_LOW_FRAC else COL_BATT_OK
+				draw_rect(Rect2(batt_pos, Vector2(BAR_W * bfrac, BATT_BAR_H)),
+					Color(bcol.r, bcol.g, bcol.b, bcol.a * batt_alpha))
+			# Lataus-/odotusikoni botin oikealla puolella.
+			if charging:
+				_draw_charge_icon(screen, COL_CHARGE)
+			elif int(b.get("idle_reason", 0)) == IDLE_REASON_WAITING_CHARGER:
+				_draw_charge_icon(screen, COL_WAIT)
+
 		# P0-1b: idle-miner jolla ei ole reittia (kaikki designaatiot BLOCKED) -> diegeettinen
 		# varoitus TAYDELLA alphalla (himmennys ei kertonut mitaan). Piirretaan vain talle syylle.
 		if idle and int(b.get("idle_reason", 0)) == IDLE_REASON_ALL_BLOCKED:
 			_draw_blocked_warning(screen)
+
+
+# M3: pieni lataussalama-ikoni (kolmio) botin oikealla puolella. Väri kertoo tilan
+# (keltainen = lataa, amber = odottaa vuoroa).
+func _draw_charge_icon(screen: Vector2, col: Color) -> void:
+	var o := screen + Vector2(BAR_W * 0.5 + 3.0, -2.0)
+	var pts := PackedVector2Array([
+		o + Vector2(1.0, -4.0), o + Vector2(-2.0, 1.0), o + Vector2(0.0, 1.0),
+		o + Vector2(-1.0, 4.0), o + Vector2(2.0, -1.0), o + Vector2(0.0, -1.0),
+	])
+	draw_colored_polygon(pts, col)
 
 
 # Piirtaa pienen "! ei reittiä" -varoituksen botin ylle (P0-1b). Tausta takaa luettavuuden
