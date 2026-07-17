@@ -21,6 +21,7 @@ const MAT_DIRT         := 11
 const MAT_IRON_ORE     := 12
 const MAT_GOLD_ORE     := 13
 const MAT_COAL         := 16
+const MAT_GRAVEL       := 18  # Sora — kiven murskautuessa syntyvä jauhe
 const MAT_BEDROCK      := 19  # Pohjakivi — tuhoamaton reunakerros
 const MAT_COPPER       := 20  # Kupari — malmisuoni, keskisyvä
 const MAT_RARE_EARTH   := 21  # Rare earth — malmisuoni, syvin ja arvokkain
@@ -821,6 +822,32 @@ static func _place_starter_iron_vein(grid: PackedByteArray, w: int, h: int,
 	var heading := PI * 0.5 + rng.randf_range(-0.25, 0.25)
 	_walk_vein(grid, w, h, float(start_x), start_y, heading, 34, 3.0,
 		MAT_IRON_ORE, perturb_data, rng, 0)
+
+	# --- Pintapaljastuma: tiheä IRON_ORE-laikku alustan oikealle puolelle ---
+	# Pelkkä suoni on ohut ja osittain pinnan alla; sen viereen lisätään leveä,
+	# maanpinnassa NÄKYVÄ malmilaikku josta pelaaja saa heti runsaasti rautaa.
+	# Sijainti on kokonaan alustan oikean reunan ULKOPUOLELLA (x > alustan reuna),
+	# joten se ei kosketa alustan STONE-perustusta eikä basea. Muoto seuraa
+	# maanpintaa (per-sarake surface_y). Korvaa VAIN kiinteät maasolut
+	# (STONE/DIRT/GRAVEL) — EI ilmaa (ei kelluvaa malmia) eikä bedrockia.
+	var exp_x0 := clampi(platform_x0 + platform_w + 8, EDGE_THICKNESS + 2,
+		w - EDGE_THICKNESS - 2)
+	var exp_x1 := clampi(platform_x0 + platform_w + 44, EDGE_THICKNESS + 2,
+		w - EDGE_THICKNESS - 2)
+	for px in range(exp_x0, exp_x1 + 1):
+		# Ylin täytettävä rivi = pintakivi (col_sy), jotta laikun latva näkyy pinnassa.
+		var col_sy := int(surface_y[clampi(px, 0, w - 1)])
+		# Syvyys ~12–16 px + kevyt per-sarake reunakohina (deterministinen rng-virta,
+		# kutsutaan aina viimeisenä generointivaiheena → ei häiritse muuta gen:iä).
+		var col_depth := 14 + rng.randi_range(-2, 2)
+		for dy in range(0, col_depth):
+			var py := col_sy + dy
+			if py < 0 or py >= h - EDGE_THICKNESS:
+				continue
+			var pidx := py * w + px
+			var cur := grid[pidx]
+			if cur == MAT_STONE or cur == MAT_DIRT or cur == MAT_GRAVEL:
+				grid[pidx] = MAT_IRON_ORE
 
 
 # Tehdasalustan alue sim-pikseleinä; position.y = alustan pinnan y-taso.

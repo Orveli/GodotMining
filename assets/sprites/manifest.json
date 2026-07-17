@@ -1,0 +1,82 @@
+{
+  "sprites": [
+    {
+      "name": "base",
+      "w": 12,
+      "h": 10,
+      "frames": 2,
+      "anchor": "topleft",
+      "files": [
+        "base_0.png",
+        "base_1.png"
+      ],
+      "role": "anim_pulse",
+      "note": "ship hub, amber core"
+    },
+    {
+      "name": "base_module",
+      "w": 8,
+      "h": 8,
+      "frames": 1,
+      "anchor": "topleft",
+      "files": [
+        "base_module.png"
+      ],
+      "role": "static",
+      "note": "expansion module, amber connector node"
+    },
+    {
+      "name": "bot_hauler",
+      "w": 12,
+      "h": 12,
+      "frames": 2,
+      "anchor": "center",
+      "files": [
+        "bot_hauler_0.png",
+        "bot_hauler_1.png"
+      ],
+      "role": "hauler",
+      "note": "blue drone + cargo container"
+    },
+    {
+      "name": "bot_miner",
+      "w": 12,
+      "h": 12,
+      "frames": 2,
+      "anchor": "center",
+      "files": [
+        "bot_miner_0.png",
+        "bot_miner_1.png"
+      ],
+      "role": "miner",
+      "note": "amber drone + drill"
+    },
+    {
+      "name": "charger_pad",
+      "w": 7,
+      "h": 7,
+      "frames": 3,
+      "anchor": "center",
+      "files": [
+        "charger_pad_0.png",
+        "charger_pad_1.png",
+        "charger_pad_2.png"
+      ],
+      "role": "anim_pulse",
+      "note": "bot charging dock, brightens per frame"
+    },
+    {
+      "name": "money_exit",
+      "w": 12,
+      "h": 10,
+      "frames": 2,
+      "anchor": "topleft",
+      "files": [
+        "money_exit_0.png",
+        "money_exit_1.png"
+      ],
+      "role": "anim_pulse",
+      "note": "sell point, gold core"
+    }
+  ]
+}

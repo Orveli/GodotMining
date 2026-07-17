@@ -195,7 +195,7 @@ void fragment() {
 
 
 	// Vignette — aina päällä, vahvistuu shaken mukaan
-	float vign_base = 0.35;
+	float vign_base = 0.28;
 	float vign_shake = shake_intensity * 0.4;
 	vec2 vign_uv = UV * (1.0 - UV.yx);
 	float vign = vign_uv.x * vign_uv.y * 15.0;

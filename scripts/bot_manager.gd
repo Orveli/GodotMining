@@ -1796,7 +1796,7 @@ func _mat_color(mat: int) -> Color:
 		MAT_SAND:     return Color(0.859, 0.780, 0.447)
 		MAT_ASH:      return Color(0.349, 0.329, 0.298)
 		MAT_DIRT:     return Color(0.447, 0.318, 0.176)
-		MAT_IRON_ORE: return Color(0.549, 0.420, 0.376)
+		MAT_IRON_ORE: return Color(0.66, 0.40, 0.26)
 		MAT_GOLD_ORE: return Color(0.718, 0.647, 0.247)
 		MAT_COAL:     return Color(0.180, 0.169, 0.208)
 		MAT_GRAVEL:   return Color(0.698, 0.588, 0.455)

@@ -14,3 +14,4 @@ tests/output/
 .claude/worktrees/
 .claude/agent-memory/
 build/
+__pycache__/

@@ -87,7 +87,7 @@ const PALETTE_DEFAULT: Array = [
 	Vector3(0.45, 0.28, 0.12),   # 9 WOOD_FALLING
 	Vector3(0.65, 0.88, 0.84),   # 10 GLASS
 	Vector3(0.45, 0.32, 0.18),   # 11 DIRT
-	Vector3(0.55, 0.42, 0.38),   # 12 IRON_ORE
+	Vector3(0.66, 0.40, 0.26),   # 12 IRON_ORE (ruosteoranssi — erottuu mullasta)
 	Vector3(0.72, 0.65, 0.25),   # 13 GOLD_ORE
 	Vector3(0.68, 0.68, 0.72),   # 14 IRON
 	Vector3(0.90, 0.78, 0.20),   # 15 GOLD
@@ -126,7 +126,7 @@ const PALETTE_DEEP: Array = [
 
 const PALETTE_VAR_DEFAULT: Array = [
 	0.0, 0.06, 0.04, 0.05, 0.04, 0.2, 0.02, 0.05, 0.03, 0.04, 0.03,
-	0.03, 0.04, 0.04, 0.02, 0.02, 0.05, 0.05, 0.07, 0.03, 0.04, 0.05
+	0.03, 0.08, 0.04, 0.02, 0.02, 0.05, 0.05, 0.07, 0.03, 0.04, 0.05
 ]
 
 var current_palette: Array = PALETTE_DEFAULT
@@ -1204,6 +1204,51 @@ func _mouse_to_grid() -> Vector2i:
 	return Vector2i(gx, gy)
 
 
+# Materiaalien suomenkieliset näyttönimet hover-inspektointiin (ui.gd:n oikean
+# alareunan nimikyltti). Erillään mat_names-debugkartasta, joka pysyy englanniksi
+# AI-työkaluille. EMPTY -> tyhjä merkkijono (kylttiä ei näytetä taivaan päällä).
+const MAT_DISPLAY_NAMES := {
+	MAT_EMPTY: "",
+	MAT_SAND: "Hiekka",
+	MAT_WATER: "Vesi",
+	MAT_STONE: "Kivi",
+	MAT_WOOD: "Puu",
+	MAT_FIRE: "Tuli",
+	MAT_OIL: "Öljy",
+	MAT_STEAM: "Höyry",
+	MAT_ASH: "Tuhka",
+	MAT_WOOD_FALLING: "Puu",
+	MAT_GLASS: "Lasi",
+	MAT_DIRT: "Multa",
+	MAT_IRON_ORE: "Rautamalmi",
+	MAT_GOLD_ORE: "Kultamalmi",
+	MAT_IRON: "Rauta",
+	MAT_GOLD: "Kulta",
+	MAT_COAL: "Hiili",
+	MAT_GRAVEL: "Sora",
+	MAT_BEDROCK: "Peruskallio",
+	MAT_COPPER: "Kupari",
+	MAT_RARE_EARTH: "Harvinainen maametalli",
+}
+
+
+# Kursorin alla olevan materiaalin näyttönimi hover-inspektointiin. Palauttaa tyhjän
+# merkkijonon jos kursori on ruudun ulkopuolella tai tyhjän (EMPTY) päällä. Lukee
+# CPU-peilikuvan gridistä, joka ladataan GPU:lta joka frame (_download_from_gpu),
+# joten myös irtopikselit (putoava hiekka/sora ym.) näkyvät oikein.
+func hovered_material_name() -> String:
+	var gp := _mouse_to_grid()
+	if gp.x < 0:
+		return ""
+	var idx := gp.y * W + gp.x
+	if idx < 0 or idx >= grid.size():
+		return ""
+	var mat := grid[idx] & 0xFF
+	if mat == MAT_EMPTY:
+		return ""
+	return MAT_DISPLAY_NAMES.get(mat, "Materiaali %d" % mat)
+
+
 # Käänteisoperaatio _mouse_to_grid():lle — muuntaa sim-pikselikoordinaatin ruutukoordinaatiksi
 # (huomioi zoomin/panorin, sillä ne asetetaan tämän Controlin transformiin _update_camera():ssa).
 # UI-REDESIGN Vaihe 4: käytetään kontekstipaneelien (base/kone/vyöhyke-popover, bottien
@@ -1645,9 +1690,13 @@ func _init_bot_sim() -> void:
 	logistics = Logistics.new()
 	# Oletus-pudotuspiste: klikattava/visuaalinen dump-vyohyke basen intake-aukon ylapuolelle.
 	# Hauler tiputtaa taha -> _drop_cargo_above_base kirjoittaa intake-sarakkeisiin -> CA pudottaa baseen.
-	var drop_rect := Rect2i(
-		base.grid_pos.x, base.grid_pos.y - MoneyExit.DROP_HEIGHT,
-		MoneyExit.EXIT_W, MoneyExit.DROP_HEIGHT)
+	# Pieni, intake-aukon (INTAKE_W) levyinen ja keskitetty ruutu — aiempi koko basen levyinen laatikko
+	# (EXIT_W x DROP_HEIGHT = 12x12) oli 4x liian iso. Puhtaasti visuaali/klikkaus: pudotuksen fysiikka
+	# menee silti intake-sarakkeisiin, ei taman rectin mukaan, joten pienennys ei riko dumppia.
+	var drop_w := MoneyExit.INTAKE_W          # 6 px = sama kuin intake-aukko
+	var drop_h := MoneyExit.DROP_HEIGHT / 2   # 6 px korkea (aiemmin 12)
+	var drop_x := base.grid_pos.x + (MoneyExit.EXIT_W - drop_w) / 2  # keskitetty aukon paalle
+	var drop_rect := Rect2i(drop_x, base.grid_pos.y - drop_h, drop_w, drop_h)
 	base_dropoff_zone_id = logistics.add_base_dropoff(drop_rect, 0)
 	# Alusta bottimanageri ja spawnaa 1 miner + 1 hauler basen ylapuolelle
 	bot_manager.bots.clear()
@@ -4647,6 +4696,12 @@ func _save_ai_screenshot() -> void:
 				"rect": {"x": zr.position.x, "y": zr.position.y, "w": zr.size.x, "h": zr.size.y},
 			})
 
+	# Inventaario luettavassa muodossa (materiaalinimi -> maara), numeeristen
+	# ID-avainten lisaksi — helpottaa mm. IRON_ORE-keraytymisen tarkistusta.
+	var inv_named: Dictionary = {}
+	for mid in inventory:
+		inv_named[mat_names.get(mid, str(mid))] = inventory[mid]
+
 	var state: Dictionary = {
 		"timestamp": Time.get_datetime_string_from_system(),
 		"fps": Engine.get_frames_per_second(),
@@ -4655,6 +4710,7 @@ func _save_ai_screenshot() -> void:
 		"money": money,
 		"total_revenue": total_revenue,
 		"inventory": inventory.duplicate(),
+		"inventory_named": inv_named,
 		"inventory_value": inventory_total_value(),
 		"income_per_s": snappedf(income_per_s, 0.1),
 		"fleet": fleet_stats,
@@ -5683,7 +5739,7 @@ func _scenario_mvp_render(path: String, label: String) -> void:
 		MAT_WOOD_FALLING: Color(0.60, 0.35, 0.15),
 		MAT_GLASS: Color(0.65, 0.85, 0.90),
 		MAT_DIRT: Color(0.45, 0.32, 0.18),
-		MAT_IRON_ORE: Color(0.70, 0.55, 0.45),
+		MAT_IRON_ORE: Color(0.66, 0.40, 0.26),
 		MAT_GOLD_ORE: Color(0.85, 0.72, 0.25),
 		MAT_IRON: Color(0.75, 0.76, 0.80),
 		MAT_GOLD: Color(0.95, 0.82, 0.20),

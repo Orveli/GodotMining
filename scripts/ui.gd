@@ -91,10 +91,16 @@ const COL_BAD := UiThemeRef.COL_BAD
 const COL_DIM := UiThemeRef.COL_TEXT_DIM
 const COL_ACTIVE := UiThemeRef.COL_ACTIVE
 const COL_TEXT := UiThemeRef.COL_TEXT
+# Rautavaraston ruosteoranssi (sama sävy kuin IRON_ORE-malmi) — HUD-laskuri + swatch.
+const COL_IRON := Color(0.66, 0.40, 0.26)
 
 # ── Yläpalkki (kompakti, vasen-ylä) ─────────────────────────────────────────
 var money_label: Label
 var income_label: Label
+# Pysyvä rautalaskuri (rautatalous): varastoitu IRON_ORE + seuraavan botin hinta,
+# aina näkyvissä rahan alla. Rauta on ensisijainen rakennusresurssi.
+var iron_row: HBoxContainer
+var iron_label: Label
 # Pysyvä bottilaskuri (D5): miner/hauler aktiiviset/kaikki rahamittarin alla,
 # aina näkyvissä (ei enää vain F3-debugin takana).
 var fleet_row: HBoxContainer
@@ -105,12 +111,22 @@ var fps_label: Label
 var debug_row: HBoxContainer
 var _debug_visible: bool = false
 
+# Hover-materiaalinimi (oikea alareuna): näyttää kursorin alla olevan materiaalin
+# nimen — louhimaton kenttä TAI irtopikseli. Piilossa kun kursori on tyhjän päällä.
+var hover_panel: PanelContainer
+var hover_label: Label
+
 # ── Actionbar (alakeskellä, aina näkyvissä) ─────────────────────────────────
 var actionbar_panel: PanelContainer
 var tool_btn_mine: Button
 var tool_btn_build: Button
 var tool_btn_bots: Button
 var tool_btn_erase: Button
+# Botit-ikonin affordanssihehku: kun can_build_bot() muuttuu ekaa kertaa todeksi,
+# ikoni pulssaa amberina + toast, kunnes bot-tray avataan (kertahuomio, ei spämmiä).
+var _bot_glow_active: bool = false
+var _prev_can_build_bot: bool = false
+const BOT_GLOW_PERIOD := 1.1   # s, pulssin jakso (sin-aalto WHITE <-> COL_ACTIVE)
 
 # ── Mine-rivi (näkyy vain kun louhinta aktiivinen) ──────────────────────────
 var mine_row_panel: PanelContainer
@@ -182,9 +198,9 @@ var _onboarding_done: bool = false
 var _onboarding_money_base: int = 0
 var _onboarding_bot_base: int = 0
 const ONBOARDING_TEXTS: Array[String] = [
-	"Paina V ja maalaa alue louhittavaksi",
-	"Hauler tuo saaliin baseen — raha kasvaa",
-	"Osta botti: klikkaa alapalkin 3. ikonia (Botit) — hinta $300",
+	"Vedä hiirellä kaivuualue rautamalmin päälle (oikealla)",
+	"Miner louhii, Hauler kantaa baseen — rauta karttuu",
+	"10 rautaa riittää: avaa Botit [TAB] ja rakenna botti",
 ]
 
 # ── Toast (välitavoitteet) ─────────────────────────────────────────────────
@@ -277,6 +293,7 @@ func _ready() -> void:
 	_build_toast()
 	_build_onboarding()
 	_build_bot_status_overlay()
+	_build_hover_label()
 	_connect_world_signals()
 	_init_game_flow()
 
@@ -353,6 +370,28 @@ func _build_top_bar() -> void:
 	income_label.add_theme_color_override("font_color", COL_DIM)
 	vbox.add_child(income_label)
 
+	# ── Pysyvä rautalaskuri (rautatalous) — varastoitu rauta / seuraavan botin hinta ──
+	# Rauta on ensisijainen rakennusresurssi (botit rakennetaan IRON_OREsta), joten se
+	# näkyy pysyvästi rahan alla. Ruosteoranssi väriruutu = malmin sävy (COL_IRON).
+	iron_row = HBoxContainer.new()
+	iron_row.add_theme_constant_override("separation", 5)
+	vbox.add_child(iron_row)
+
+	var iron_swatch := ColorRect.new()
+	iron_swatch.custom_minimum_size = Vector2(14.0, 14.0)
+	iron_swatch.color = COL_IRON
+	iron_swatch.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	iron_swatch.tooltip_text = "Rautaa varastossa / seuraavan botin hinta"
+	iron_row.add_child(iron_swatch)
+
+	iron_label = Label.new()
+	iron_label.text = "0 rautaa"
+	iron_label.tooltip_text = "Rautaa varastossa / seuraavan botin hinta"
+	iron_label.add_theme_font_size_override("font_size", 15)
+	iron_label.add_theme_color_override("font_color", COL_TEXT)
+	iron_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	iron_row.add_child(iron_label)
+
 	# ── Pysyvä bottilaskuri (D5) — miner N/M + hauler N/M rahamittarin alla ────
 	# Aina näkyvissä (toisin kuin alla oleva F3-debug-rivi). Lisätään saman VBoxin
 	# lapseksi → container hoitaa asettelun automaattisesti, EI omia ankkureita.
@@ -402,6 +441,49 @@ func _build_top_bar() -> void:
 	fps_label.add_theme_font_size_override("font_size", 12)
 	fps_label.add_theme_color_override("font_color", COL_DIM)
 	debug_row.add_child(fps_label)
+
+
+# ── Hover-materiaalinimi (oikea alareuna) ───────────────────────────────────
+# Pieni diegeettinen kyltti joka näyttää kursorin alla olevan materiaalin nimen.
+# mouse_filter = IGNORE eikä rekisteröidy input-estoon -> ei blokkaa louhintaa
+# alareunassa. Piilotetaan oletuksena; _update_hover_material() näyttää sen.
+func _build_hover_label() -> void:
+	hover_panel = PanelContainer.new()
+	hover_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	hover_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	hover_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	hover_panel.offset_right = -12.0
+	hover_panel.offset_bottom = -12.0
+	hover_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	hover_panel.visible = false
+
+	hover_label = Label.new()
+	hover_label.text = ""
+	hover_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_label.add_theme_font_size_override("font_size", 15)
+	hover_label.add_theme_color_override("font_color", COL_TEXT)
+	hover_panel.add_child(hover_label)
+
+	get_parent().add_child.call_deferred(hover_panel)
+
+
+# Päivittää oikean alareunan materiaalinimi-kyltin kursorin alta joka frame.
+# Piilottaa kyltin kun kursori ei osu materiaaliin (tyhjä/ruudun ulkopuoli) tai
+# kun ollaan title-/demo-ruudussa. Näkyy myös tauolla (inspektointi).
+func _update_hover_material() -> void:
+	if hover_panel == null:
+		return
+	if _flow == Flow.TITLE or _flow == Flow.DEMO_COMPLETE \
+			or not pixel_world.has_method("hovered_material_name"):
+		hover_panel.visible = false
+		return
+	var mat_display: String = pixel_world.hovered_material_name()
+	if mat_display == "":
+		hover_panel.visible = false
+	else:
+		hover_label.text = mat_display
+		hover_panel.visible = true
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -686,6 +768,7 @@ func _open_bot_tray() -> void:
 	_set_designation_mode(false)   # sulkee mine-rivin (sama ankkuripaikka, ei saa jäädä päällekkäin)
 	_animate_tray_open(bot_tray_panel)
 	_bot_tray_open = true
+	_bot_glow_active = false   # kertahuomio kuitattu: pelaaja avasi bottivalikon
 	_last_fleet_sig = ""   # pakota bottilistan uudelleenrakennus heti avattaessa
 	_maybe_rebuild_bot_list()
 
@@ -1663,8 +1746,9 @@ func _update_onboarding() -> void:
 			if _desig_any_active():
 				_advance_onboarding()
 		1:
-			# Kunnes raha alkaa kasvaa (hauler toi saalista)
-			if int(pixel_world.money) > _onboarding_money_base:
+			# Kunnes rautaa alkaa kertyä varastoon (hauler toi malmia baseen). Raha voi
+			# pysyä 0:ssa jos rauta menee STORE-inventaarioon -> gate raudan saapumiseen.
+			if pixel_world.inventory_amount(MAT_IRON_ORE) > 0:
 				_advance_onboarding()
 		2:
 			# Kunnes kolmas botti ostettu
@@ -1989,6 +2073,7 @@ func _process(delta: float) -> void:
 
 	# Kevyet päivitykset joka frame
 	money_label.text = "$%d" % int(pixel_world.money)
+	_update_iron_counter()
 	fps_label.text = "FPS %d" % Engine.get_frames_per_second()
 	_update_toast(delta)
 	_update_onboarding()
@@ -1996,6 +2081,7 @@ func _process(delta: float) -> void:
 	_update_build_tray_visibility()
 	_handle_popover_outside_click()
 	_clamp_context_popover()
+	_update_hover_material()
 
 	# Raskaammat päivitykset ~5 Hz
 	_ui_accum += delta
@@ -2009,6 +2095,7 @@ func _process(delta: float) -> void:
 		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
 		_update_activity_hints(step)   # P0-1c + P0-3: toimettomuus-herateet
 		_update_disclosure()   # M4: furnace/crusher-nappien näkyvyys jalostamo-moduulin takana
+		_update_bot_affordance_glow()   # Botit-ikonin hehku kun rautaa riittää bottiin
 
 	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
 	if _debug_visible:
@@ -2079,6 +2166,37 @@ func _update_fleet() -> void:
 		role_plus_btn.disabled = true
 
 
+# Rautalaskuri: varastoitu IRON_ORE + seuraavan botin hinta ("N / M rautaa").
+# Korostuu amberilla kun rautaa riittää seuraavaan bottiin (tukee ikonin hehkua).
+func _update_iron_counter() -> void:
+	if iron_label == null:
+		return
+	var have := int(pixel_world.inventory_amount(MAT_IRON_ORE))
+	var need := _bot_price()   # next_bot_cost()[IRON_ORE], -1 jos backend puuttuu
+	if need > 0:
+		iron_label.text = "%d / %d rautaa" % [have, need]
+		iron_label.add_theme_color_override("font_color", COL_MONEY if have >= need else COL_TEXT)
+	else:
+		iron_label.text = "%d rautaa" % have
+		iron_label.add_theme_color_override("font_color", COL_TEXT)
+
+
+# Havaitsee can_build_bot()-tilan false->true-siirtymän: sytyttää Botit-ikonin hehkun
+# ja näyttää kertaluontoisen toastin. Hehku sammuu kun bot-tray avataan (_open_bot_tray)
+# tai kun rautaa ei enää riitä. Kutsutaan ~5 Hz (ei joka frame) -> ei toast-spämmiä.
+func _update_bot_affordance_glow() -> void:
+	var can_build := _can_build_bot()
+	if can_build and not _prev_can_build_bot:
+		# Rautaa alkoi juuri riittää -> kannusta replikoimaan (vain aktiivisessa pelissä,
+		# ei jos tray on jo auki eli pelaaja katsoo bottivalikkoa).
+		if not _bot_tray_open and _is_in_game():
+			_bot_glow_active = true
+			_show_toast("Voit rakentaa botin — avaa Botit [TAB]", 4.0)
+	if not can_build:
+		_bot_glow_active = false
+	_prev_can_build_bot = can_build
+
+
 func _update_actionbar_highlight() -> void:
 	if tool_btn_mine == null:
 		return
@@ -2091,7 +2209,15 @@ func _update_actionbar_highlight() -> void:
 	var building: bool = pixel_world.build_mode != pixel_world.BUILD_NONE
 	tool_btn_build.modulate = COL_ACTIVE if (building or _build_tray_open) else Color.WHITE
 
-	tool_btn_bots.modulate = COL_ACTIVE if _bot_tray_open else Color.WHITE
+	# Botit-ikoni: tray auki -> kiinteä amber; muuten affordanssihehku pulssaa amberin
+	# ja valkoisen välillä kun rautaa juuri riittää bottiin (_bot_glow_active); muuten valkoinen.
+	if _bot_tray_open:
+		tool_btn_bots.modulate = COL_ACTIVE
+	elif _bot_glow_active:
+		var pulse: float = 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) / 1000.0 * TAU / BOT_GLOW_PERIOD)
+		tool_btn_bots.modulate = Color.WHITE.lerp(COL_ACTIVE, pulse)
+	else:
+		tool_btn_bots.modulate = Color.WHITE
 
 	var erasing: bool = (not dm) and (not building) and int(pixel_world.current_material) == MAT_EMPTY
 	tool_btn_erase.modulate = COL_ACTIVE if erasing else Color.WHITE

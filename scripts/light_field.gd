@@ -21,13 +21,17 @@ const DS := 8
 const MAT_EMPTY := 0
 
 # Taivasvalon vaimennuskerroin kiinteän materiaalin kohdalla (kerroin/solu).
-const SKY_DECAY := 0.5
+const SKY_DECAY := 0.72
+
+# Pinnan ensimmäisen kiinteän solun kirkkaus avotaivaan alla — maanpinta ja
+# ~30 px sen alta pysyy luettavana ennen kuin decay pimentää syvemmät solut.
+const SURFACE_LIGHT := 0.9
 
 # Valoarvo jonka ylittyessä solu merkitään pysyvästi "tutkituksi".
-const EXPLORED_THRESHOLD := 0.35
+const EXPLORED_THRESHOLD := 0.28
 
 # Tutkitun mutta ei-valaistun alueen himmeä pohjataso (0..1).
-const EXPLORED_FLOOR := 0.12
+const EXPLORED_FLOOR := 0.20
 
 var sim_width: int = 0
 var sim_height: int = 0
@@ -135,8 +139,12 @@ func _apply_sky_light(grid: PackedByteArray) -> void:
 			var is_open := grid[idx] == MAT_EMPTY
 			if is_open and not blocked:
 				light_val = 1.0
-			else:
+			elif not blocked:
+				# Ensimmäinen kiinteä solu = maanpinta → kirkas SURFACE_LIGHT,
+				# vasta seuraavat solut vaimenevat SKY_DECAY:llä.
 				blocked = true
+				light_val = SURFACE_LIGHT
+			else:
 				light_val *= SKY_DECAY
 			var li := cy * lw + cx
 			if light_val > _light_f[li]:
