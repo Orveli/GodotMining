@@ -264,6 +264,9 @@ var grav_held_written: Array[int] = []
 # Fysiikkamoottori
 var physics_world: PhysicsWorld
 var physics_initialized := false  # Onko kivi-kappaleet skannattu
+# P3: viimeisin sim_frame jolloin puun tuki-BFS ajettiin. Portitus: aja täysi BFS vain
+# jos jokin tile on ollut aktiivinen tämän jälkeen (muuten skip — mikään ei muuttunut).
+var _last_wood_check_sim_frame: int = 0
 var is_painting_stone := false  # Maalataan kiveä parhaillaan — fysiikka tauolla
 var stroke_stone_pixels: Dictionary = {}  # Tämän vedon kivipikselit (deduplikoitu)
 var stone_dynamic := false  # Tosi = maalattu kivi on irrallinen fysiikkakappale
@@ -943,11 +946,17 @@ func _process(delta: float) -> void:
 				# kappaleita putoaa); steady-state (kappaleet nukkuvat) ei tule tänne.
 				_mark_grid_dirty_all()
 
-		# Vaihe 4: Puun tuki joka 10. frame
+		# Vaihe 4: Puun tuki joka 120. frame — P3: portitettu aktiivisuudella.
+		# Aja täysi BFS VAIN jos jokin tile on ollut aktiivinen edellisen tarkistuksen
+		# jälkeen; muuten skip (mikään ei ole muuttunut → tuki ei ole voinut kadota).
+		# Checkpoint päivitetään aina, myös skipatessa. Portitus koskee vain gpu_ready-
+		# polkua: headlessissa (cpu_ca) aktiivisuustaulua ei päivitetä lainkaan.
 		if frame_count > 60 and frame_count % 120 == 0 and sim_speed > 0.0:
-			if WoodSupport.check_support(grid, W, SIM_HEIGHT):
-				grid_modified = true
-				_mark_grid_dirty_all()  # P1: BFS-tuki muuttaa puuta hajautetusti
+			if _wood_check_needed():
+				if WoodSupport.check_support(grid, W, SIM_HEIGHT):
+					grid_modified = true
+					_mark_grid_dirty_all()  # P1: BFS-tuki muuttaa puuta hajautetusti
+			_last_wood_check_sim_frame = _sim_frame
 
 		# Vaihe 5: Vauriotarkistus (vain räjähdyksen jälkeen)
 		if physics_world.force_damage_check and not physics_world.bodies.is_empty():
@@ -3167,6 +3176,23 @@ func is_tile_active_recent(tx: int, ty: int, max_age: int) -> bool:
 # P2: onko solun (x,y) tile aktiivinen viimeisen max_age framen aikana (P3-mukavuusmetodi).
 func is_cell_active_recent(x: int, y: int, max_age: int) -> bool:
 	return is_tile_active_recent(x / TILE_SIZE, y / TILE_SIZE, max_age)
+
+
+# P3: pitääkö puun tuki-BFS ajaa? Palauttaa true jos jokin tile on ollut aktiivinen
+# viimeisimmän tarkistuksen (checkpoint) jälkeen — mikä tahansa materiaalin liike tai
+# CPU-kirjoitus leimaa tilen. 6240 int-vertailua = halpa. Turvallisuusmarginaali kattaa
+# aktiivisuustaulun ~1 framen async-viiveen: vertaa checkpoint - WOOD_CHECK_ACTIVITY_MARGIN
+# jotta viiveen takia myöhästynyt leima ei jää huomaamatta (ylimääräinen BFS on halpaa,
+# huomaamatta jäänyt tuen katoaminen olisi bugi).
+const WOOD_CHECK_ACTIVITY_MARGIN := 2
+func _wood_check_needed() -> bool:
+	if _activity_cpu.size() < TILE_COUNT:
+		return true  # ei vielä dataa -> aja turvallisesti
+	var thresh := _last_wood_check_sim_frame - WOOD_CHECK_ACTIVITY_MARGIN
+	for i in TILE_COUNT:
+		if _activity_cpu[i] > thresh:
+			return true
+	return false
 
 
 func _upload_render() -> void:
