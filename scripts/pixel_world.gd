@@ -29,8 +29,10 @@ const MAT_BEDROCK := 19  # Pohjakivi — tuhoamaton, worldgen kirjoittaa reunoih
 const MAT_COPPER := 20  # Kupari — malmi, syvyysvyöhyke keskisyvä
 const MAT_RARE_EARTH := 21  # Rare earth — harvinaisin ja arvokkain malmi, syvimmällä
 
-const SIM_WIDTH := 1664
-const SIM_HEIGHT := 960
+# Planeetta (SPEC_planet §2.2): x = kulma planeetan ympäri (wräppää saumassa),
+# y = syvyys kohti ydintä (ei wräppää). W parillinen (Margolus-invariantti).
+const SIM_WIDTH := 4096
+const SIM_HEIGHT := 448
 const TOTAL := SIM_WIDTH * SIM_HEIGHT
 const W := SIM_WIDTH
 
@@ -5461,10 +5463,12 @@ func _step_cpu_ca() -> void:
 	if _ca_bounds.size.x <= 0 or _ca_bounds.size.y <= 0:
 		return
 	# Rajaa iterointi aktiiviselle alueelle (skenaarioissa muu grid on tyhjaa) — muuten koko
-	# 1664x960 skannaus GDScriptissa olisi liian hidas (~1 fps). Kasitellaan alhaalta ylos, jotta
+	# 4096x448 skannaus GDScriptissa olisi liian hidas (~1 fps). Kasitellaan alhaalta ylos, jotta
 	# kukin solu liikkuu korkeintaan yhden askeleen/frame. Vuorotellaan vaakaskannaus symmetrian vuoksi.
-	var x_lo: int = maxi(_ca_bounds.position.x, 1)                       # x-1 pysyy rajoissa
-	var x_hi: int = mini(_ca_bounds.position.x + _ca_bounds.size.x, W - 1)  # exclusive; x+1 pysyy rajoissa
+	# Planeetta: x-naapurit wräppäävät saumassa (PlanetGeom.wrap_x) — peilaa simulation.glsl:aa.
+	# y-rajat sailyvat (below-rivi pysyy [0,SIM_HEIGHT) sisalla).
+	var x_lo: int = maxi(_ca_bounds.position.x, 0)                       # sallii saumasolun x=0
+	var x_hi: int = mini(_ca_bounds.position.x + _ca_bounds.size.x, W)   # exclusive; sallii saumasolun x=W-1
 	var y_lo: int = maxi(_ca_bounds.position.y, 0)
 	var y_hi: int = mini(_ca_bounds.position.y + _ca_bounds.size.y, SIM_HEIGHT - 1)  # exclusive; below pysyy rajoissa
 	if x_lo >= x_hi or y_lo >= y_hi:
@@ -5473,6 +5477,7 @@ func _step_cpu_ca() -> void:
 	var y := y_hi - 1
 	while y >= y_lo:
 		var row := y * W
+		var below_row := row + W
 		var xs := -1 if flip else 1
 		var x := (x_hi - 1) if flip else x_lo
 		var x_end := (x_lo - 1) if flip else x_hi
@@ -5486,25 +5491,32 @@ func _step_cpu_ca() -> void:
 				or mat == MAT_COPPER or mat == MAT_RARE_EARTH
 			var liquid := mat == MAT_WATER or mat == MAT_OIL
 			if granular or liquid:
-				var below := idx + W
+				# x-naapurit wräppäävät saumassa (x=0:n vasen = W-1 jne.)
+				var xl := PlanetGeom.wrap_x(x - 1, W)
+				var xr := PlanetGeom.wrap_x(x + 1, W)
+				var below := below_row + x
 				if grid[below] == MAT_EMPTY:
 					_ca_move(idx, below)
 				else:
-					var dl_ok := grid[below - 1] == MAT_EMPTY
-					var dr_ok := grid[below + 1] == MAT_EMPTY
+					var below_l := below_row + xl
+					var below_r := below_row + xr
+					var dl_ok := grid[below_l] == MAT_EMPTY
+					var dr_ok := grid[below_r] == MAT_EMPTY
 					if dl_ok or dr_ok:
 						var go_left := dl_ok
 						if dl_ok and dr_ok:
 							go_left = (randi() & 1) == 0
-						_ca_move(idx, below - 1 if go_left else below + 1)
+						_ca_move(idx, below_l if go_left else below_r)
 					elif liquid:
-						var l_ok := grid[idx - 1] == MAT_EMPTY
-						var r_ok := grid[idx + 1] == MAT_EMPTY
+						var side_l := row + xl
+						var side_r := row + xr
+						var l_ok := grid[side_l] == MAT_EMPTY
+						var r_ok := grid[side_r] == MAT_EMPTY
 						if l_ok or r_ok:
 							var left2 := l_ok
 							if l_ok and r_ok:
 								left2 = (randi() & 1) == 0
-							_ca_move(idx, idx - 1 if left2 else idx + 1)
+							_ca_move(idx, side_l if left2 else side_r)
 			x += xs
 		y -= 1
 
