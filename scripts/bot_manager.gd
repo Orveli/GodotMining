@@ -1048,6 +1048,8 @@ func _flatten_cargo(b: Bot, max_px: int) -> Array:
 # Palauttaa montako px TOSIASIASSA kirjoitettiin ja vahentaa kuorman sen mukaan. Alueen
 # tayttyminen nakyy kutsujalle paluuarvona (placed < budget) -> _st_dump myy loput.
 # dump_target["rect"] = kohdealue.
+# PLANEETTA v1-YKSINKERTAISTUS: kirjoitusalue clampataan saumaan (ei wrappaa). Dump-vyohykkeet
+# ovat normaalisti basen lahella (keskella), kaukana saumasta -> hyvaksytty rajoite.
 func _deposit_cargo_to_zone(b: Bot, budget: int) -> int:
 	var rect: Rect2i = b.dump_target.get("rect", Rect2i())
 	if rect.size.x <= 0 or rect.size.y <= 0:
@@ -1233,9 +1235,8 @@ func _cell_solids(dx: int, dy: int) -> Array:
 			continue
 		var base_i := y * SIM_W
 		for xx in DCELL:
-			var x := x0 + xx
-			if x < 0 or x >= SIM_W:
-				continue
+			# x wrappaa sauman yli (yksittainen solu ei normaalisti ylita saumaa; wrap on turvallinen).
+			var x := PlanetGeom.wrap_x(x0 + xx, SIM_W)
 			var idx := base_i + x
 			if world.building_pixels.has(idx):
 				continue
@@ -1254,8 +1255,10 @@ func _mine_convert(mat: int) -> int:
 
 
 func _reeval_cell(dx: int, dy: int) -> void:
-	if dx < 0 or dx >= GW or dy < 0 or dy >= GH:
+	# x wrappaa (jaksollinen); vain y rajaa gridin ulkopuolen.
+	if dy < 0 or dy >= GH:
 		return
+	dx = PlanetGeom.wrap_x(dx, GW)
 	var d = world.desig
 	if d == null or d.cells.size() < GW * GH:
 		return
@@ -1305,9 +1308,9 @@ func _dig_site_has_material(c: Vector2i) -> bool:
 	var y := top
 	while y < maxy:
 		var base_i := y * SIM_W
-		for x in range(x0, x1):
-			if x < 0 or x >= SIM_W:
-				continue
+		for xs in range(x0, x1):
+			# x wrappaa sauman yli (skannausikkuna voi ylittaa sauman reunasoluissa).
+			var x := PlanetGeom.wrap_x(xs, SIM_W)
 			var mat: int = world.grid[base_i + x]
 			if _granular_lut[mat] == 1:
 				found += 1
@@ -1319,7 +1322,10 @@ func _dig_site_has_material(c: Vector2i) -> bool:
 
 # Etsi kasa mielivaltaiselta suorakulmiolta (pickup-vyohyke). filter_mask rajaa poimittavat
 # materiaalit (0 = kaikki granulaarit). Palauttaa { "count": int, "pos": Vector2 (massakeskipiste) }.
-func _find_pile_in_rect(rect: Rect2i, filter_mask: int) -> Dictionary:
+# PLANEETTA v1-YKSINKERTAISTUS: rect-skannaus clampataan saumaan (x0=max(0), x1=min(SIM_W)) eika
+# wrappaa, ja massakeskipiste (sx/count) on ei-wrappaava. Sauman yli vedetty pickup-vyohyke
+# aliarvioi kasan reunalla. Normaalipelissa vyohykkeet ovat basen lahella (keskella, x~2048),
+# kaukana saumasta -> hyvaksytty rajoite (speksi 3/P3 kohta 3). Bot-LIIKE/A*/imu wrapaavat oikein.
 	var y0 := maxi(rect.position.y, 0)
 	var y1 := mini(rect.position.y + rect.size.y, SIM_H)
 	var x0 := maxi(rect.position.x, 0)
@@ -1436,9 +1442,8 @@ func _vacuum(b: Bot, budget: int = -1) -> int:
 				return picked
 			if ox * ox + oy * oy > r2:
 				continue
-			var x := cx + ox
-			if x < 0 or x >= SIM_W:
-				continue
+			# x wrappaa sauman yli (imusade voi ylittaa sauman kun botti on lahella reunaa).
+			var x := PlanetGeom.wrap_x(cx + ox, SIM_W)
 			var idx := base_i + x
 			if world.building_pixels.has(idx):
 				continue
@@ -1498,9 +1503,10 @@ func _find_pile(dx: int, dy: int) -> Dictionary:
 		var base_i := y * SIM_W
 		var row_gran := 0
 		var row_floor := false
-		for x in range(x0, x1):
-			if x < 0 or x >= SIM_W:
-				continue
+		for xs in range(x0, x1):
+			# x wrappaa sauman yli (levennetty skannausikkuna voi ylittaa sauman reunasoluissa).
+			# Oman sarakkeen testi (cx0..cx1) toimii wrapatulla x:lla molemmin puolin saumaa.
+			var x := PlanetGeom.wrap_x(xs, SIM_W)
 			var idx := base_i + x
 			var mat: int = world.grid[idx]
 			if _granular_lut[mat] == 1:
