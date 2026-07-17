@@ -1,6 +1,8 @@
 # scripts/nav_grid.gd
 # Karkea navigaatiogridi lentaville boteille + A*-reititys.
-# Solu = 16x16 px -> 104x60 = 6240 solmua (per-pikseli-A* olisi 1.6 M solmua = mahdoton).
+# Solu = 16x16 px -> 256x28 = 7168 solmua (per-pikseli-A* olisi 1.8 M solmua = mahdoton).
+# Planeetta: x-akseli on jaksollinen (sauma x=0 <-> x=NW-1). A*/heuristiikka/snap wrapaavat
+# x:ssa PlanetGeom-apureilla; y (syvyys) ei wrappaa.
 # Solu on OPEN jos vahintaan 70 % sen 256 pikselista on lapaisevia (EMPTY/WATER/STEAM/FIRE).
 # Lapaisevyys johdetaan CPU:lla `grid`:sta; ei lasketa joka frame vaan dirty-flag-pohjaisesti:
 # louhinta/fysiikka merkitsee muuttuneet alueet mark_dirty_px_rect():lla, update_dirty()
@@ -9,11 +11,11 @@ class_name NavGrid
 extends RefCounted
 
 const CELL := 16           # solun sivu pikseleina
-const NW := 104            # soluja leveyssuunnassa (104*16 = 1664 px)
-const NH := 60             # soluja korkeussuunnassa (60*16 = 960 px)
+const NW := 256            # soluja leveyssuunnassa (256*16 = 4096 px); x wrappaa sauman yli
+const NH := 28             # soluja korkeussuunnassa (28*16 = 448 px); y ei wrappaa
 
-const SIM_W := NW * CELL   # 1664 — CA-gridin leveys (grid-indeksointi: y*SIM_W + x)
-const SIM_H := NH * CELL   # 960  — CA-gridin korkeus
+const SIM_W := NW * CELL   # 4096 — CA-gridin leveys (grid-indeksointi: y*SIM_W + x)
+const SIM_H := NH * CELL   # 448  — CA-gridin korkeus
 const PIXELS_PER_CELL := CELL * CELL  # 256
 
 # Kuinka monen solun sateelta lahto/kohde snapataan lahimpaan OPEN-soluun.
@@ -28,7 +30,7 @@ const _DY := [0, 0, 1, -1, 1, -1, 1, -1]
 # Heap-avaimen koodaus: (int(f * F_SCALE) << 16) | node.
 # Nain prioriteetti on upotettu heap-alkioon -> lazy-deletion ei karsi stale-f:sta.
 const F_SCALE := 1024
-const NODE_MASK := 0xFFFF   # node < 6240 mahtuu 16 bittiin
+const NODE_MASK := 0xFFFF   # node < 7168 mahtuu 16 bittiin
 
 # Lapaisevyyskartta, indeksi cy*NW+cx. 1 = OPEN, 0 = SOLID.
 var _open: PackedByteArray
@@ -63,22 +65,29 @@ func rebuild_full(grid: PackedByteArray) -> void:
 
 func mark_dirty_px_rect(r: Rect2i) -> void:
 	# Merkitsee pikselisuorakulmion peittamat navsolut likaisiksi.
+	# x on jaksollinen: sauman yli ulottuva rect iteroidaan wrapaten (x-solut wrap_x:lla).
 	if r.size.x <= 0 or r.size.y <= 0:
 		return
 	var px0 := r.position.x
 	var py0 := r.position.y
 	var px1 := r.position.x + r.size.x - 1
 	var py1 := r.position.y + r.size.y - 1
-	if px1 < 0 or py1 < 0 or px0 >= SIM_W or py0 >= SIM_H:
+	# Vain y rajaa (x wrappaa aina takaisin gridiin).
+	if py1 < 0 or py0 >= SIM_H:
 		return
-	var cx0 := clampi(px0 / CELL, 0, NW - 1)
 	var cy0 := clampi(py0 / CELL, 0, NH - 1)
-	var cx1 := clampi(px1 / CELL, 0, NW - 1)
 	var cy1 := clampi(py1 / CELL, 0, NH - 1)
+	# x-solujen span voi olla negatiivinen tai >= NW ennen wrappia (floori sietaa negatiivit).
+	var ccx0 := floori(float(px0) / float(CELL))
+	var ccx1 := floori(float(px1) / float(CELL))
+	# Jos veto peittaa koko renkaan, rajaa yhteen kierrokseen (ei turhaa toistoa).
+	if ccx1 - ccx0 >= NW - 1:
+		ccx0 = 0
+		ccx1 = NW - 1
 	for cy in range(cy0, cy1 + 1):
 		var row := cy * NW
-		for cx in range(cx0, cx1 + 1):
-			_dirty[row + cx] = true
+		for ccx in range(ccx0, ccx1 + 1):
+			_dirty[row + PlanetGeom.wrap_x(ccx, NW)] = true
 
 
 func update_dirty(grid: PackedByteArray) -> void:
@@ -114,8 +123,10 @@ func _cell_is_open(grid: PackedByteArray, cx: int, cy: int) -> bool:
 # --- Kyselyt ---------------------------------------------------------------
 
 func is_open(cx: int, cy: int) -> bool:
-	if cx < 0 or cx >= NW or cy < 0 or cy >= NH:
+	# x wrappaa (jaksollinen); vain y rajaa gridin ulkopuolen.
+	if cy < 0 or cy >= NH:
 		return false
+	cx = PlanetGeom.wrap_x(cx, NW)
 	return _open[cy * NW + cx] == 1
 
 
@@ -169,9 +180,10 @@ func find_path_px(from_px: Vector2, to_px: Vector2) -> PackedVector2Array:
 		var g_cur := _g[cur]
 
 		for dir in 8:
-			var ncx: int = cx + _DX[dir]
+			# x-naapuri wrappaa aina (jaksollinen); vain y-raja hylkaa reunan yli.
+			var ncx: int = PlanetGeom.wrap_x(cx + _DX[dir], NW)
 			var ncy: int = cy + _DY[dir]
-			if ncx < 0 or ncx >= NW or ncy < 0 or ncy >= NH:
+			if ncy < 0 or ncy >= NH:
 				continue
 			var nidx := ncy * NW + ncx
 			if _open[nidx] == 0 or _closed[nidx] == 1:
@@ -180,6 +192,7 @@ func find_path_px(from_px: Vector2, to_px: Vector2) -> PackedVector2Array:
 			var diagonal: bool = _DX[dir] != 0 and _DY[dir] != 0
 			if diagonal:
 				# Diagonaali vain jos molemmat sivunaapurit ovat OPEN (ei kulmien lapi).
+				# cx laillinen [0,NW), ncx jo wrapattu -> molemmat indeksit gridissa.
 				if _open[cy * NW + ncx] == 0 or _open[ncy * NW + cx] == 0:
 					continue
 
@@ -217,23 +230,31 @@ func find_path_px(from_px: Vector2, to_px: Vector2) -> PackedVector2Array:
 func _simplify(path: Array[Vector2i]) -> Array[Vector2i]:
 	# Poistaa solmut joissa suunta ei muutu. Vierekkaiset A*-solut eroavat yksikkoaskeleella,
 	# joten suuntavektorien yhtasuuruus kertoo kollineaarisuudesta.
+	# Valittu ratkaisu (speksin vaihtoehto A): wrappaa x-erotus _step_dir():ssa, jotta sauman
+	# ylittava askel (cx 255->0) nakyy +-1:na eika -255-hyppayksena -> suoristus toimii saumassa.
 	if path.size() <= 2:
 		return path
 	var out: Array[Vector2i] = [path[0]]
 	for i in range(1, path.size() - 1):
-		var d1 := path[i] - path[i - 1]
-		var d2 := path[i + 1] - path[i]
+		var d1 := _step_dir(path[i - 1], path[i])
+		var d2 := _step_dir(path[i], path[i + 1])
 		if d1 != d2:
 			out.append(path[i])
 	out.append(path[path.size() - 1])
 	return out
 
 
+func _step_dir(a: Vector2i, b: Vector2i) -> Vector2i:
+	# Yksikkoaskeleen suunta a->b. x wrapataan (sauman ylitys) -> arvo aina {-1,0,1}.
+	var sx := int(signf(PlanetGeom.wrap_dx(float(a.x), float(b.x), float(NW))))
+	var sy := signi(b.y - a.y)
+	return Vector2i(sx, sy)
+
+
 func _snap_to_open(cell: Vector2i) -> Vector2i:
 	# Palauttaa lahimman OPEN-solun sateelta SNAP_RADIUS, tai (-1,-1) jos ei loydy.
-	# Alkuperainen solu clampataan ensin gridiin, jotta reunan yli menevat lahtokohdat
-	# mappautuvat reunasoluun.
-	var ccx := clampi(cell.x, 0, NW - 1)
+	# x wrapataan gridiin (jaksollinen); y clampataan (ei wrappaa).
+	var ccx := PlanetGeom.wrap_x(cell.x, NW)
 	var ccy := clampi(cell.y, 0, NH - 1)
 	if _open[ccy * NW + ccx] == 1:
 		return Vector2i(ccx, ccy)
@@ -246,9 +267,9 @@ func _snap_to_open(cell: Vector2i) -> Vector2i:
 			for ox in range(-radius, radius + 1):
 				if absi(ox) != radius and absi(oy) != radius:
 					continue  # vain keha, ei sisaosaa
-				var nx := ccx + ox
+				var nx := PlanetGeom.wrap_x(ccx + ox, NW)
 				var ny := ccy + oy
-				if nx < 0 or nx >= NW or ny < 0 or ny >= NH:
+				if ny < 0 or ny >= NH:
 					continue
 				if _open[ny * NW + nx] == 1:
 					var d := ox * ox + oy * oy
@@ -262,7 +283,9 @@ func _snap_to_open(cell: Vector2i) -> Vector2i:
 
 func _octile(ax: int, ay: int, bx: int, by: int) -> float:
 	# Admissioituva 8-suunnan heuristiikka: (dx+dy) + (sqrt2 - 2)*min(dx,dy).
-	var dx := absi(ax - bx)
+	# x-komponentti wrapataan (lyhin sauman yli) -> pysyy admissiivisena eika yliarvioi
+	# sauman ohittavaa reittia; muuten A* ei loytaisi lyhinta polkua sauman kautta.
+	var dx := int(absf(PlanetGeom.wrap_dx(float(ax), float(bx), float(NW))))
 	var dy := absi(ay - by)
 	return float(dx + dy) + (SQRT2 - 2.0) * float(mini(dx, dy))
 
