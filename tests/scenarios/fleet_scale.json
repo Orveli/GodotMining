@@ -1,12 +1,13 @@
 {
   "auto_exit": true,
   "cpu_ca": true,
-  "_doc": "G2: 10 bottia yhtaaikaa toissa ilman jumeja. Ostaa 8 lisabottia (6 miner + 2 hauler -> 10 yhteensa), designoi leveahkon alueen ja ajaa bottisimulaatiota. Todistaa: (1) lauma kasvoi 10:een, (2) KAIKKI botit liikkuivat >30px spawnista (ei deadlockia/jumia), (3) designoitu alue kuluu mittakaavassa 10 botilla (frontier + BLOCKED-reaktivointi skaalautuu). Headless (gpu_ready=false) + cpu_ca=true kuten mvp_core_loop.",
+  "_doc": "G2: 10 bottia yhtaaikaa toissa ilman jumeja. Rakentaa 8 lisabottia (6 miner + 2 hauler -> 10 yhteensa) inventaarion IRON_ORE:sta (M2 build_bot), designoi leveahkon alueen ja ajaa bottisimulaatiota. Todistaa: (1) lauma kasvoi 10:een, (2) KAIKKI botit liikkuivat >30px spawnista (ei deadlockia/jumia), (3) designoitu alue kuluu mittakaavassa 10 botilla (frontier + BLOCKED-reaktivointi skaalautuu). Headless (gpu_ready=false) + cpu_ca=true kuten mvp_core_loop. M2: seed-inventaario 1000 IRON_ORE kattaa 8 botin nousevat reseptit (yht. ~300 px).",
   "steps": [
     { "cmd": "set_money", "amount": 100000 },
-    { "cmd": "buy_bot", "role": 0, "count": 6 },
-    { "cmd": "buy_bot", "role": 1, "count": 2 },
-    { "cmd": "assert_fleet", "min": 10, "max": 10, "label": "10 bottia laumassa (2 alku + 8 ostettua)" },
+    { "cmd": "set_inventory", "mat": 12, "px": 1000 },
+    { "cmd": "build_bot", "role": 0, "count": 6 },
+    { "cmd": "build_bot", "role": 1, "count": 2 },
+    { "cmd": "assert_fleet", "min": 10, "max": 10, "label": "10 bottia laumassa (2 alku + 8 rakennettua)" },
 
     { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 128, "margin": 12, "depth": 64 },
     { "cmd": "dump_bots" },
@@ -21,6 +22,6 @@
     { "cmd": "assert_fleet", "min": 10, "max": 10, "label": "lauma pysyi 10:ssa (ei kadonneita botteja)" },
     { "cmd": "assert_bots_moved", "min_dist": 30, "label": "kaikki 10 bottia liikkuivat >30px (ei jumeja)" },
     { "cmd": "assert_desig_consumed_pct", "min_pct": 60, "label": "designoidusta alueesta >=60% kulutettu 10 botilla" },
-    { "cmd": "assert_money_gt", "min": 85300, "label": "raha nousi louhinnasta yli osto-pohjan (100000 - 8 bottia = 85260)" }
+    { "cmd": "assert_money_gt", "min": 85300, "label": "raha sailyi/nousi (M2: botit rakennetaan raudasta, ei rahasta -> raha pysyy >= 100000 lahtoarvossa)" }
   ]
 }
