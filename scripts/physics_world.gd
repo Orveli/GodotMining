@@ -258,49 +258,6 @@ func step(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) ->
 		# (update_sleep snappasi position, write käyttää snapattua pos)
 
 
-# === AUKOTON RASTERIZATION ===
-# Forward transform + aukkojen täyttö vierekkäisten pikselien välillä
-# Palauttaa Dictionary[Vector2i, int]: maailmapos → lokaali-indeksi (-1 = aukontäyttö)
-
-func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
-	body._ensure_rot_cache()
-	var result := {}
-	var local_to_world := {}
-	var px := roundi(body.position.x)
-	var py := roundi(body.position.y)
-
-	for i in body.local_pixels.size():
-		var rot := body._rot_cache[i]
-		var wp := Vector2i(rot.x + px, rot.y + py)
-		result[wp] = i
-		local_to_world[body.local_pixels[i]] = wp
-
-	# Aukontäyttö — sama kuin ennen, käyttää local_to_world-mappingia
-	var local_set := {}
-	for lp in body.local_pixels:
-		local_set[lp] = true
-
-	for lp in body.local_pixels:
-		for dir in [Vector2i(1, 0), Vector2i(0, 1)]:
-			var neighbor: Vector2i = lp + dir
-			if not local_set.has(neighbor):
-				continue
-			if not local_to_world.has(neighbor):
-				continue
-			var wp_a: Vector2i = local_to_world[lp]
-			var wp_b: Vector2i = local_to_world[neighbor]
-			var mdist := absi(wp_b.x - wp_a.x) + absi(wp_b.y - wp_a.y)
-			if mdist > 1:
-				var mid1 := Vector2i(wp_a.x, wp_b.y)
-				var mid2 := Vector2i(wp_b.x, wp_a.y)
-				if not result.has(mid1):
-					result[mid1] = -1
-				if mid2 != mid1 and not result.has(mid2):
-					result[mid2] = -1
-
-	return result
-
-
 # === APUFUNKTIOT ===
 
 func _is_liquid(mat: int) -> bool:
@@ -308,47 +265,67 @@ func _is_liquid(mat: int) -> bool:
 
 
 # === ERASE / WRITE ===
+# Iteroivat kappaleen aukotonta täytettyä muotoa (flat filled-cache).
+# Maailmapikseli = filled-offset + pyöristetty positio.
 
 func _erase_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArray, w: int, h: int) -> void:
-	var filled := _get_filled_world_pixels(body)
-	for wp_key in filled:
-		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
-			if body_map[idx] == body.body_id:
+	body._ensure_filled_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var fox := body.filled_ox
+	var foy := body.filled_oy
+	var bid := body.body_id
+	for k in fox.size():
+		var wx := fox[k] + px
+		var wy := foy[k] + py
+		if wx >= 0 and wx < w and wy >= 0 and wy < h:
+			var idx := wy * w + wx
+			if body_map[idx] == bid:
 				grid[idx] = 0
 				seed[idx] = 0
 				body_map[idx] = 0
 
 
 func _write_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArray, w: int, h: int) -> int:
-	var filled := _get_filled_world_pixels(body)
+	body._ensure_filled_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var fox := body.filled_ox
+	var foy := body.filled_oy
+	var fsrc := body.filled_src
+	var seeds := body.pixel_seeds
+	var seeds_n := seeds.size()
+	var mat := body.material
+	var bid := body.body_id
 	var written := 0
-	for wp_key in filled:
-		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
-			if grid[idx] == 0 or _is_liquid(grid[idx]):
+	for k in fox.size():
+		var wx := fox[k] + px
+		var wy := foy[k] + py
+		if wx >= 0 and wx < w and wy >= 0 and wy < h:
+			var idx := wy * w + wx
+			var cur := grid[idx]
+			if cur == 0 or _is_liquid(cur):
 				# Syrjäytä neste viereiseen tyhjään soluun
-				if _is_liquid(grid[idx]):
-					var liq_mat := grid[idx]
+				if _is_liquid(cur):
+					var liq_mat := cur
 					var liq_seed := seed[idx]
 					for disp in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, -1), Vector2i(1, -1)]:
-						var np := Vector2i(wp.x + disp.x, wp.y + disp.y)
-						if np.x >= 0 and np.x < w and np.y >= 0 and np.y < h:
-							var nidx := np.y * w + np.x
+						var nx: int = wx + disp.x
+						var ny: int = wy + disp.y
+						if nx >= 0 and nx < w and ny >= 0 and ny < h:
+							var nidx := ny * w + nx
 							if grid[nidx] == 0 and body_map[nidx] == 0:
 								grid[nidx] = liq_mat
 								seed[nidx] = liq_seed
 								break
-				grid[idx] = body.material
-				body_map[idx] = body.body_id
-				var pi: int = filled[wp]
-				if pi >= 0 and pi < body.pixel_seeds.size():
-					seed[idx] = body.pixel_seeds[pi]
-				elif body.pixel_seeds.size() > 0:
+				grid[idx] = mat
+				body_map[idx] = bid
+				var pi := fsrc[k]
+				if pi >= 0 and pi < seeds_n:
+					seed[idx] = seeds[pi]
+				elif seeds_n > 0:
 					# Aukontäytön seed — ota naapurilta
-					seed[idx] = body.pixel_seeds[0]
+					seed[idx] = seeds[0]
 				written += 1
 	return maxi(body.local_pixels.size() - written, 0)
 
@@ -363,11 +340,17 @@ class CollisionResult:
 
 
 func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			return true
-		var mat := grid[wp.y * w + wp.x]
+		var mat := grid[wy * w + wx]
 		if mat != 0 and not _is_liquid(mat):
 			return true
 	return false
@@ -375,21 +358,29 @@ func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h:
 
 func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> CollisionResult:
 	var result := CollisionResult.new()
-	var world_pixels := body.get_world_pixels()
-	var collision_points: Array[Vector2] = []
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
 	var accumulated_normal := Vector2.ZERO
+	# Kontaktipisteiden summa + lukumäärä (ei Array-allokaatiota keskiarvoon)
+	var contact_sum := Vector2.ZERO
+	var contact_count := 0
 
-	for wp in world_pixels:
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
 		var colliding := false
 
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			colliding = true
-			if wp.x < 0: accumulated_normal += Vector2(1, 0)
-			elif wp.x >= w: accumulated_normal += Vector2(-1, 0)
-			if wp.y < 0: accumulated_normal += Vector2(0, 1)
-			elif wp.y >= h: accumulated_normal += Vector2(0, -1)
+			if wx < 0: accumulated_normal += Vector2(1, 0)
+			elif wx >= w: accumulated_normal += Vector2(-1, 0)
+			if wy < 0: accumulated_normal += Vector2(0, 1)
+			elif wy >= h: accumulated_normal += Vector2(0, -1)
 		else:
-			var idx := wp.y * w + wp.x
+			var idx := wy * w + wx
 			var hit_mat := grid[idx]
 			if hit_mat != 0 and not _is_liquid(hit_mat):
 				colliding = true
@@ -397,22 +388,20 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 				if body_map[idx] != 0 and result.hit_body_id == 0:
 					result.hit_body_id = body_map[idx]
 				var local_normal := Vector2.ZERO
-				if wp.x > 0 and grid[idx - 1] == 0: local_normal.x -= 1.0
-				if wp.x < w - 1 and grid[idx + 1] == 0: local_normal.x += 1.0
-				if wp.y > 0 and grid[idx - w] == 0: local_normal.y -= 1.0
-				if wp.y < h - 1 and grid[idx + w] == 0: local_normal.y += 1.0
+				if wx > 0 and grid[idx - 1] == 0: local_normal.x -= 1.0
+				if wx < w - 1 and grid[idx + 1] == 0: local_normal.x += 1.0
+				if wy > 0 and grid[idx - w] == 0: local_normal.y -= 1.0
+				if wy < h - 1 and grid[idx + w] == 0: local_normal.y += 1.0
 				accumulated_normal += local_normal
 
 		if colliding:
-			collision_points.append(Vector2(wp))
+			contact_sum += Vector2(wx, wy)
+			contact_count += 1
 
-	if not collision_points.is_empty():
+	if contact_count > 0:
 		result.hit = true
 		result.normal = accumulated_normal
-		var sum := Vector2.ZERO
-		for cp in collision_points:
-			sum += cp
-		result.contact_point = sum / float(collision_points.size())
+		result.contact_point = contact_sum / float(contact_count)
 
 	return result
 
@@ -420,21 +409,22 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 # === KAPPALE-KAPPALE TÖRMÄYS ===
 
 func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
-	var a_pixels := a.get_world_pixels()
-	var b_pixels := b.get_world_pixels()
+	# HUOM: tätä funktiota ei tällä hetkellä kutsuta mistään (kappale-kappale-
+	# vuorovaikutus hoidetaan sekventiaalisella erase→write + body_map -tunnistuksella
+	# step():ssä). Optimoitu silti flat-rakenteisiin: iteroi rot-offsetteja ja käyttää
+	# b:n pikseleille flat-bittikarttaa Dictionaryn sijaan. Semantiikka ennallaan.
+	a._ensure_rot_cache()
+	b._ensure_rot_cache()
+	var apx := roundi(a.position.x); var apy := roundi(a.position.y)
+	var bpx := roundi(b.position.x); var bpy := roundi(b.position.y)
+	var a_rox := a.rot_ox; var a_roy := a.rot_oy
+	var b_rox := b.rot_ox; var b_roy := b.rot_oy
 
-	# AABB-broadphase
-	var a_min_x := 99999; var a_max_x := -99999
-	var a_min_y := 99999; var a_max_y := -99999
-	for wp in a_pixels:
-		a_min_x = mini(a_min_x, wp.x); a_max_x = maxi(a_max_x, wp.x)
-		a_min_y = mini(a_min_y, wp.y); a_max_y = maxi(a_max_y, wp.y)
-
-	var b_min_x := 99999; var b_max_x := -99999
-	var b_min_y := 99999; var b_max_y := -99999
-	for wp in b_pixels:
-		b_min_x = mini(b_min_x, wp.x); b_max_x = maxi(b_max_x, wp.x)
-		b_min_y = mini(b_min_y, wp.y); b_max_y = maxi(b_max_y, wp.y)
+	# AABB-broadphase (maailmakoordinaatit = rot-AABB + pyöristetty positio)
+	var a_min_x := a.rot_min_x + apx; var a_max_x := a.rot_max_x + apx
+	var a_min_y := a.rot_min_y + apy; var a_max_y := a.rot_max_y + apy
+	var b_min_x := b.rot_min_x + bpx; var b_max_x := b.rot_max_x + bpx
+	var b_min_y := b.rot_min_y + bpy; var b_max_y := b.rot_max_y + bpy
 
 	# AABB ei osu → ei törmäystä
 	if a_max_x < b_min_x - 1 or b_max_x < a_min_x - 1:
@@ -442,33 +432,43 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 	if a_max_y < b_min_y - 1 or b_max_y < a_min_y - 1:
 		return
 
-	# Narrowphase: pikseli-overlap tai kosketus (etäisyys ≤ 1)
-	var b_set := {}
-	for wp in b_pixels:
-		b_set[wp] = true
+	# Narrowphase: b:n pikselit flat-bittikartalle b:n AABB:n yli
+	var bw := b_max_x - b_min_x + 1
+	var bh := b_max_y - b_min_y + 1
+	var b_set := PackedByteArray()
+	b_set.resize(bw * bh)
+	for i in b_rox.size():
+		b_set[(b_roy[i] + bpy - b_min_y) * bw + (b_rox[i] + bpx - b_min_x)] = 1
 
-	var contact_points: Array[Vector2] = []
+	# Overlap tai kosketus (etäisyys ≤ 1)
+	var contact_sum := Vector2.ZERO
+	var contact_count := 0
 	var overlap := false
-	for wp in a_pixels:
+	for i in a_rox.size():
+		var ax := a_rox[i] + apx
+		var ay := a_roy[i] + apy
 		# Suora overlap
-		if b_set.has(wp):
-			contact_points.append(Vector2(wp))
+		if ax >= b_min_x and ax <= b_max_x and ay >= b_min_y and ay <= b_max_y \
+				and b_set[(ay - b_min_y) * bw + (ax - b_min_x)] == 1:
+			contact_sum += Vector2(ax, ay)
+			contact_count += 1
 			overlap = true
 		else:
 			# Kosketus (vierekkäiset pikselit)
 			for dir in [Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0)]:
-				if b_set.has(wp + dir):
-					contact_points.append(Vector2(wp) + Vector2(dir) * 0.5)
+				var nx: int = ax + dir.x
+				var ny: int = ay + dir.y
+				if nx >= b_min_x and nx <= b_max_x and ny >= b_min_y and ny <= b_max_y \
+						and b_set[(ny - b_min_y) * bw + (nx - b_min_x)] == 1:
+					contact_sum += Vector2(ax, ay) + Vector2(dir) * 0.5
+					contact_count += 1
 					break
 
-	if contact_points.is_empty():
+	if contact_count == 0:
 		return
 
 	# Kontaktipiste
-	var contact := Vector2.ZERO
-	for p in contact_points:
-		contact += p
-	contact /= float(contact_points.size())
+	var contact := contact_sum / float(contact_count)
 
 	# Törmäysnormaali (A:sta B:hen)
 	var normal := (b.position - a.position)
@@ -517,7 +517,7 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 
 	# Erota kappaleet (pehmeä penetraation korjaus)
 	if overlap:
-		var depth := minf(float(contact_points.size()) * 0.3, 2.0)
+		var depth := minf(float(contact_count) * 0.3, 2.0)
 		var total_mass := a.mass + b.mass
 		a.position -= normal * depth * (b.mass / maxf(total_mass, 1.0))
 		b.position += normal * depth * (a.mass / maxf(total_mass, 1.0))
@@ -528,58 +528,44 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 # Kappale kaatuu jos painopiste on tukialueen ulkopuolella
 
 func _apply_tipping_torque(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> void:
-	var world_pixels := body.get_world_pixels()
-
-	# Etsi kappaleen alimmat pikselit (pohjapinta) ja niiden tukipisteet
-	var bottom_pixels: Array[Vector2i] = []
-	var body_set := {}
-	for wp in world_pixels:
-		body_set[wp] = true
-
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
-			continue
-		var below := Vector2i(wp.x, wp.y + 1)
-		# Pohjapinta = pikseli jonka alla EI ole omaa pikseliä
-		if body_set.has(below):
-			continue
-		bottom_pixels.append(wp)
-
-	if bottom_pixels.is_empty():
+	# Pohjapinta cachetaan (offsetit joiden alla ei omaa pikseliä).
+	body._ensure_bottom_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var box := body.bottom_ox
+	var boy := body.bottom_oy
+	if box.is_empty():
 		return
 
 	# Etsi tukipisteet — pohjapikselit joiden alla on jotain (maasto/muu kappale/reuna)
-	var support_points: Array[float] = []
-	for bp in bottom_pixels:
-		var below_y := bp.y + 1
+	var support_min := INF
+	var support_max := -INF
+	var has_support := false
+	for k in box.size():
+		var wx := box[k] + px
+		var wy := boy[k] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
+			continue
+		var below_y := wy + 1
 		var supported := false
 		if below_y >= h:
 			supported = true  # Maanpohja
-		elif grid[below_y * w + bp.x] != 0:
+		elif grid[below_y * w + wx] != 0:
 			supported = true  # Jotain alla
 		if supported:
-			support_points.append(float(bp.x))
+			var fx := float(wx)
+			if fx < support_min: support_min = fx
+			if fx > support_max: support_max = fx
+			has_support = true
 
-	if support_points.is_empty():
+	if not has_support:
 		return  # Vapaassa pudotuksessa
-
-	# Tukialueen rajat
-	var support_min := support_points[0]
-	var support_max := support_points[0]
-	for sx in support_points:
-		support_min = minf(support_min, sx)
-		support_max = maxf(support_max, sx)
 
 	var support_center := (support_min + support_max) * 0.5
 	var support_width := support_max - support_min + 1.0
 
-	# Kappaleen kokonaisleveys (vertailuarvoksi)
-	var body_min_x := 99999.0
-	var body_max_x := -99999.0
-	for wp in world_pixels:
-		body_min_x = minf(body_min_x, float(wp.x))
-		body_max_x = maxf(body_max_x, float(wp.x))
-	var body_width := body_max_x - body_min_x + 1.0
+	# Kappaleen kokonaisleveys (kierrettyjen offsettien AABB, position-riippumaton)
+	var body_width := float(body.rot_max_x - body.rot_min_x) + 1.0
 
 	# Painopisteen poikkeama tukikeskipisteestä
 	var offset_x := body.position.x - support_center
@@ -637,12 +623,18 @@ func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: in
 # Paljon nopeampi kuin bbox-skannaus — O(N_pikseleissä) eikä O(bbox²).
 # Early-exit: palaa heti kun ensimmäinen puuttuva pikseli löytyy.
 func is_body_damaged(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	var mat := body.material
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			continue
-		var idx := wp.y * w + wp.x
-		if grid[idx] != body.material:
+		if grid[wy * w + wx] != mat:
 			return true  # Vaurioitunut — early-exit
 	return false
 
@@ -823,12 +815,18 @@ func _clear_body_from_map(body_id: int) -> void:
 			if body_map[i] == body_id:
 				body_map[i] = 0
 		return
-	# Käytä kappaleen pikseleitä — paljon nopeampi
+	# Käytä kappaleen pikseleitä — paljon nopeampi (iteroi rot-offsetit suoraan)
 	var body: RigidBodyData = bodies[body_id]
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x >= 0 and wp.x < map_w and wp.y >= 0 and wp.y < map_h:
-			var idx := wp.y * map_w + wp.x
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx >= 0 and wx < map_w and wy >= 0 and wy < map_h:
+			var idx := wy * map_w + wx
 			if body_map[idx] == body_id:
 				body_map[idx] = 0
 
