@@ -1326,6 +1326,7 @@ func _dig_site_has_material(c: Vector2i) -> bool:
 # wrappaa, ja massakeskipiste (sx/count) on ei-wrappaava. Sauman yli vedetty pickup-vyohyke
 # aliarvioi kasan reunalla. Normaalipelissa vyohykkeet ovat basen lahella (keskella, x~2048),
 # kaukana saumasta -> hyvaksytty rajoite (speksi 3/P3 kohta 3). Bot-LIIKE/A*/imu wrapaavat oikein.
+func _find_pile_in_rect(rect: Rect2i, filter_mask: int) -> Dictionary:
 	var y0 := maxi(rect.position.y, 0)
 	var y1 := mini(rect.position.y + rect.size.y, SIM_H)
 	var x0 := maxi(rect.position.x, 0)
