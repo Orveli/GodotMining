@@ -40,6 +40,11 @@ class FakeWorld extends Node:
 	var base: MoneyExit
 	var building_pixels: Dictionary = {}
 	var money: int = 0
+	# M1: inventaario-API:n peilaus (pixel_world.deposit_* — oletuspolitiikka SELL,
+	# joten vanhat raha-assertit pysyvat valideina; STORE vain jos policy asetettu).
+	var inventory: Dictionary = {}
+	var material_policy: Dictionary = {}
+	var total_revenue: int = 0
 
 	func _init() -> void:
 		grid = PackedByteArray()
@@ -47,6 +52,20 @@ class FakeWorld extends Node:
 		grid.fill(MAT_EMPTY)
 		nav = NavGrid.new()
 		desig = DesignationGrid.new()
+
+	func deposit_material(mat_id: int, px: int) -> void:
+		if px <= 0:
+			return
+		if int(material_policy.get(mat_id, 0)) == 1:  # POLICY_STORE
+			inventory[mat_id] = int(inventory.get(mat_id, 0)) + px
+		else:
+			var value := int(MoneyExit.PRICES.get(mat_id, MoneyExit.DEFAULT_PRICE)) * px
+			money += value
+			total_revenue += value
+
+	func deposit_cargo(cargo: Dictionary) -> void:
+		for mat_id in cargo:
+			deposit_material(int(mat_id), int(cargo[mat_id]))
 
 	func mvp_write_pixel(x: int, y: int, mat: int) -> void:
 		if x < 0 or x >= SIM_W or y < 0 or y >= SIM_H:

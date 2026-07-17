@@ -244,9 +244,10 @@ func set_role(bot_id: int, new_role: int) -> void:
 		return
 	# 1) Vapauta varattu designaatio takaisin jonoon (ei jaahya -> toinen miner voi napata heti)
 	_release_designation(b)
-	# 2) Dumppaa mahdollinen kuorma baseen (haulerilla voi olla lastia kesken)
-	if b.cargo_total > 0 and world.base != null and is_instance_valid(world.base):
-		world.money += world.base.accept_cargo(b.cargo)
+	# 2) Purki mahdollinen kuorma baseen (haulerilla voi olla lastia kesken).
+	#    M1: deposit_cargo reitittaa politiikan mukaan (SELL -> money, STORE -> inventory).
+	if b.cargo_total > 0:
+		world.deposit_cargo(b.cargo)
 	b.clear_cargo()
 	# 3) Nollaa tilakonedata ja vaihda rooli
 	b.role = new_role
@@ -902,14 +903,15 @@ func _finish_dump(b: Bot) -> void:
 	_assign_hauler(b)
 
 
-# Myy koko jaljella oleva kuorma baseen (accept_cargo) — dumpin leftover/watchdog-fallback.
-# Kuorma-px:t muuttuvat rahaksi eika kuormaa jaa roikkumaan. Kuorma tyhjennetaan aina (myos
-# jos basea ei ole) jotta dump paattyy varmasti; base==null on vain degeneroitunut testitapaus.
+# Purki koko jaljella oleva kuorma baseen — dumpin leftover/watchdog-fallback.
+# M1: deposit_cargo reitittaa politiikan mukaan (SELL -> money, STORE -> inventory).
+# Kuorma tyhjennetaan aina (myos jos world puuttuu) jotta dump paattyy varmasti;
+# world==null on vain degeneroitunut testitapaus.
 func _sell_remaining_cargo(b: Bot) -> void:
 	if b.cargo_total <= 0:
 		return
-	if world.base != null and is_instance_valid(world.base):
-		world.money += world.base.accept_cargo(b.cargo)
+	if world != null:
+		world.deposit_cargo(b.cargo)
 	b.clear_cargo()
 
 

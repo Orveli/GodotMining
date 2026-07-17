@@ -30,7 +30,7 @@ func _init() -> void:
 	_test_accept_cargo_empty()
 	_test_spawn_and_intake_geometry()
 	_test_accept_cargo_increments_earned_total_cumulatively()
-	_test_update_exit_increments_earned_total()
+	_test_update_exit_returns_consumed_pixels()
 	_test_prices_include_copper_and_rare_earth()
 	_test_accept_cargo_copper_only()
 	_test_accept_cargo_rare_earth_only()
@@ -119,9 +119,9 @@ func _test_accept_cargo_increments_earned_total_cumulatively() -> void:
 	me.free()
 
 
-# update_exit (pikselinsyonti intake-aukosta) kasvattaa myos earned_totalia, ei vain
-# label-nakyvaa total_earnedia.
-func _test_update_exit_increments_earned_total() -> void:
+# M1: update_exit palauttaa nyt kulutetut intake-pikselit { mat_id -> px } (EI rahaa).
+# Kutsuja (pixel_world._update_money_exits) reitittaa tuloksen deposit_cargolla.
+func _test_update_exit_returns_consumed_pixels() -> void:
 	var me := _make_base(Vector2i(200, 200))
 	var w := 300
 	var h := 300
@@ -134,16 +134,18 @@ func _test_update_exit_increments_earned_total() -> void:
 	var intake_y := me.grid_pos.y - 1
 	var ix0: int = me.intake_x[0]
 	var ix1: int = me.intake_x[1]
-	grid[intake_y * w + ix0] = MAT_DIRT       # 1 $/px
-	grid[intake_y * w + ix1] = MAT_IRON_ORE   # 3 $/px
-	var frame_earn := me.update_exit(grid, color_seed, w, h, 0.016)
-	_check(frame_earn == 4, "update_exit palauttaa frame_earningsin (1 DIRT + 3 IRON_ORE = 4), sai %d" % frame_earn)
-	_check(me.earned_total == 4, "earned_total kasvoi frame_earningsin verran (4), sai %d" % me.earned_total)
-	_check(me.total_earned == 4, "total_earned (label-arvo) kasvoi myos (4), sai %d" % me.total_earned)
-	# Toinen kutsu ilman uutta materiaalia -> ei lisaa kasvua.
-	var frame_earn2 := me.update_exit(grid, color_seed, w, h, 0.016)
-	_check(frame_earn2 == 0, "toinen update_exit ilman materiaalia ei tuota lisatuloa")
-	_check(me.earned_total == 4, "earned_total pysyy ennallaan kun ei uutta materiaalia")
+	grid[intake_y * w + ix0] = MAT_DIRT       # 1 px multaa
+	grid[intake_y * w + ix1] = MAT_IRON_ORE   # 1 px rautaa
+	var consumed: Dictionary = me.update_exit(grid, color_seed, w, h, 0.016)
+	_check(typeof(consumed) == TYPE_DICTIONARY, "update_exit palauttaa Dictionaryn")
+	_check(int(consumed.get(MAT_DIRT, 0)) == 1, "kulutettu 1 px multaa, sai %d" % int(consumed.get(MAT_DIRT, 0)))
+	_check(int(consumed.get(MAT_IRON_ORE, 0)) == 1, "kulutettu 1 px rautaa, sai %d" % int(consumed.get(MAT_IRON_ORE, 0)))
+	# Intake-pikselit poistettiin gridista.
+	_check(grid[intake_y * w + ix0] == 0, "DIRT-intakepikseli poistettu gridista")
+	_check(grid[intake_y * w + ix1] == 0, "IRON_ORE-intakepikseli poistettu gridista")
+	# Toinen kutsu ilman uutta materiaalia -> tyhja consumed.
+	var consumed2: Dictionary = me.update_exit(grid, color_seed, w, h, 0.016)
+	_check(consumed2.is_empty(), "toinen update_exit ilman materiaalia palauttaa tyhjan {}")
 	me.free()
 
 

@@ -254,6 +254,15 @@ var drills: Array = []
 var money: int = 0
 var building_pixels: Dictionary = {}  # idx -> true, kaikki rakennusten pikselit
 
+# === INVENTAARIO & TALOUSMALLI (M1 — SPEC_seed_ship §2.1) ===
+# Materiaali on ensisijainen resurssi, raha toissijainen. Baseen tuotu materiaali
+# reititetään politiikan mukaan: STORE -> inventaario (rakentaminen), SELL -> raha.
+var inventory: Dictionary = {}          # mat_id (int) -> px-määrä (int). Vain STORE-materiaalit kertyvät.
+var material_policy: Dictionary = {}    # mat_id (int) -> POLICY_SELL | POLICY_STORE
+var total_revenue: int = 0              # kumulatiivinen myyntitulo (income-mittari lukee tätä)
+const POLICY_SELL := 0                  # materiaali myydään heti saapuessa (-> money)
+const POLICY_STORE := 1                 # materiaali varastoidaan inventaarioon (-> rakentaminen)
+
 # === BOTTISIMULAATIO (MVP Vaihe 1) ===
 var nav: NavGrid                      # navigaatiogridi + A* (lentavat botit)
 var desig: DesignationGrid            # louhinta-designaatiot (pelaajan maalaamat)
@@ -1586,6 +1595,15 @@ func _init_bot_sim() -> void:
 	bot_manager.setup(self)
 	# Nollaa talous- ja demo-kaaren tila uuteen peliin
 	money = START_MONEY
+	# Inventaario & politiikat (M1): rakennusaineet varastoon, roska myyntiin.
+	inventory.clear()
+	material_policy.clear()
+	total_revenue = 0
+	set_material_policy(MAT_IRON_ORE, POLICY_STORE)   # ensisijainen rakennusaine
+	set_material_policy(MAT_COPPER, POLICY_STORE)     # syvempi rakennus-/moduuliaine
+	set_material_policy(MAT_RARE_EARTH, POLICY_STORE) # harvinaisin rakennusaine
+	set_material_policy(MAT_COAL, POLICY_STORE)       # latauspaikkojen polttoaine (M3)
+	# Kaikki muu (GRAVEL, DIRT, SAND, STONE, GOLD_ORE, GOLD, ASH, GLASS…) jää SELL-oletukseen.
 	income_per_s = 0.0
 	_income_window.clear()
 	_income_time = 0.0
@@ -1623,6 +1641,105 @@ func mvp_write_pixel(x: int, y: int, mat: int) -> void:
 	if mat != MAT_EMPTY:
 		color_seed[idx] = randi() % 256
 	paint_pending = true
+
+
+# ============================================================
+#  INVENTAARIO- & MYYNTI-API (M1 — SPEC_seed_ship §2.1–2.2)
+#  Politiikka jakaa intake-virran saapumishetkellä. STORE-materiaali kertyy
+#  inventaarioon (rakentaminen), SELL-materiaali muuttuu heti rahaksi.
+#  M2/M3/M4 nojaavat can_afford_materials/spend_materials-pareihin.
+# ============================================================
+
+# Yksikköhinta materiaalille MoneyExit.PRICES-taulusta; tuntematon -> DEFAULT_PRICE.
+func _price_for(mat_id: int) -> int:
+	return int(MoneyExit.PRICES.get(mat_id, MoneyExit.DEFAULT_PRICE))
+
+
+# Reititä yksi intake-materiaalierä politiikan mukaan. STORE -> inventaario,
+# SELL -> money + total_revenue (täsmälleen vanha "raha nousee saalis­tuloista" -käytös).
+func deposit_material(mat_id: int, px: int) -> void:
+	if px <= 0:
+		return
+	var policy: int = int(material_policy.get(mat_id, POLICY_SELL))
+	if policy == POLICY_STORE:
+		inventory[mat_id] = int(inventory.get(mat_id, 0)) + px
+	else:
+		var value := _price_for(mat_id) * px
+		money += value
+		total_revenue += value
+
+
+# Reititä koko kuorma (mat_id -> px) politiikan mukaan. bot_managerin fallback-purku käyttää.
+func deposit_cargo(cargo: Dictionary) -> void:
+	for mat_id in cargo:
+		deposit_material(int(mat_id), int(cargo[mat_id]))
+
+
+# Myy inventaariosta: px<0 = kaikki. Poistaa varastosta, money += arvo, total_revenue += arvo.
+# Palauttaa saadun rahasumman.
+func sell_from_inventory(mat_id: int, px: int = -1) -> int:
+	var have: int = int(inventory.get(mat_id, 0))
+	if have <= 0:
+		return 0
+	var amount: int = have if px < 0 else mini(px, have)
+	if amount <= 0:
+		return 0
+	var value := _price_for(mat_id) * amount
+	var remaining := have - amount
+	if remaining > 0:
+		inventory[mat_id] = remaining
+	else:
+		inventory.erase(mat_id)
+	money += value
+	total_revenue += value
+	return value
+
+
+# Myy koko inventaario (kaikki materiaalit). Palauttaa kokonaisarvon.
+func sell_all_surplus() -> int:
+	var total := 0
+	for mat_id in inventory.keys():
+		total += sell_from_inventory(int(mat_id), -1)
+	return total
+
+
+func inventory_amount(mat_id: int) -> int:
+	return int(inventory.get(mat_id, 0))
+
+
+# Koko inventaarion rahallinen arvo (summa PRICES*px).
+func inventory_total_value() -> int:
+	var total := 0
+	for mat_id in inventory:
+		total += _price_for(int(mat_id)) * int(inventory[mat_id])
+	return total
+
+
+func set_material_policy(mat_id: int, policy: int) -> void:
+	material_policy[mat_id] = policy
+
+
+# Kattaako inventaario reseptin (mat_id -> px)? EI kuluta.
+func can_afford_materials(recipe: Dictionary) -> bool:
+	for mat_id in recipe:
+		if int(inventory.get(mat_id, 0)) < int(recipe[mat_id]):
+			return false
+	return true
+
+
+# Tarkista + vähennä resepti inventaariosta atomisesti. false jos ei kata (mitään ei kuluteta).
+func spend_materials(recipe: Dictionary) -> bool:
+	if not can_afford_materials(recipe):
+		return false
+	for mat_id in recipe:
+		var need := int(recipe[mat_id])
+		var have := int(inventory.get(mat_id, 0))
+		var remaining := have - need
+		if remaining > 0:
+			inventory[mat_id] = remaining
+		else:
+			inventory.erase(mat_id)
+	return true
 
 
 # ============================================================
@@ -1743,14 +1860,12 @@ func _update_economy(delta: float) -> void:
 	_update_demo_arc()
 
 
-# 10 s liukuva tulokeskiarvo money_exitien earned_total-summasta. Kestaa basen
+# 10 s liukuva tulokeskiarvo total_revenue-kentästä (kasvaa vain myynneistä, ei koskaan
+# pienene). Näin $/s mittaa oikeaa myyntituloa, ei intake-volyymiä. Kestää basen
 # uudelleenluonnin (negatiivinen delta clampataan nollaan).
 func _update_income(delta: float) -> void:
 	_income_time += delta
-	var total := 0
-	for me in money_exits:
-		if is_instance_valid(me):
-			total += me.earned_total
+	var total := total_revenue
 	var d := total - _income_last_total
 	_income_last_total = total
 	if d < 0:
@@ -3351,9 +3466,11 @@ func _update_money_exits(delta: float) -> bool:
 	var modified := false
 	var alive: Array = []
 	for me in money_exits:
-		var earned: int = me.update_exit(grid, color_seed, W, SIM_HEIGHT, delta)
-		if earned > 0:
-			money += earned
+		# update_exit palauttaa tämän framen kuluttamat intake-pikselit (mat_id -> px).
+		# deposit_cargo reitittää ne politiikan mukaan (SELL -> money+total_revenue, STORE -> inventory).
+		var consumed: Dictionary = me.update_exit(grid, color_seed, W, SIM_HEIGHT, delta)
+		if not consumed.is_empty():
+			deposit_cargo(consumed)
 			modified = true
 		if me.broken:
 			_unregister_building_pixels(me.structure_pixels)
@@ -4208,6 +4325,9 @@ func _save_ai_screenshot() -> void:
 		"sim_speed": sim_speed,
 		"cam_pos": {"x": int(cam_grid_pos.x), "y": int(cam_grid_pos.y)},
 		"money": money,
+		"total_revenue": total_revenue,
+		"inventory": inventory.duplicate(),
+		"inventory_value": inventory_total_value(),
 		"income_per_s": snappedf(income_per_s, 0.1),
 		"fleet": fleet_stats,
 		"logistics_zones": zones_out,
@@ -4723,6 +4843,49 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 		"set_money":
 			money = step.get("amount", 0)
 			print("ScenarioRunner: set_money %d" % money)
+		"set_inventory":
+			# M1: aseta inventaarion materiaalimäärä deterministiseen alkutilaan.
+			var si_mat: int = step.get("mat", 0)
+			var si_px: int = step.get("px", 0)
+			if si_px > 0:
+				inventory[si_mat] = si_px
+			else:
+				inventory.erase(si_mat)
+			print("ScenarioRunner: set_inventory mat=%d px=%d" % [si_mat, si_px])
+		"add_inventory":
+			# M1: kasvata inventaarion materiaalimäärää.
+			var ai_mat: int = step.get("mat", 0)
+			var ai_px: int = step.get("px", 0)
+			inventory[ai_mat] = int(inventory.get(ai_mat, 0)) + ai_px
+			print("ScenarioRunner: add_inventory mat=%d px=%d (yht=%d)" % [ai_mat, ai_px, int(inventory.get(ai_mat, 0))])
+		"assert_inventory":
+			# M1: varmista että inventory_amount(mat) on välillä [min, max].
+			var ci_mat: int = step.get("mat", 0)
+			var ci_min: int = step.get("min", 0)
+			var ci_max: int = step.get("max", 99999999)
+			var ci_label: String = step.get("label", "")
+			var ci_amt := inventory_amount(ci_mat)
+			if ci_amt >= ci_min and ci_amt <= ci_max:
+				print("ScenarioRunner: PASS  [%s] inventory[%d]=%d [%d, %d]" % [ci_label, ci_mat, ci_amt, ci_min, ci_max])
+			else:
+				print("ScenarioRunner: FAIL  [%s] inventory[%d]=%d, odotettu [%d, %d]" % [ci_label, ci_mat, ci_amt, ci_min, ci_max])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"set_material_policy":
+			# M1: 0=SELL (myy heti), 1=STORE (varastoi inventaarioon).
+			var mp_mat: int = step.get("mat", 0)
+			var mp_pol: int = step.get("policy", POLICY_SELL)
+			set_material_policy(mp_mat, mp_pol)
+			print("ScenarioRunner: set_material_policy mat=%d policy=%d" % [mp_mat, mp_pol])
+		"sell_inventory":
+			# M1: myy inventaariosta. mat=-1 -> myy kaikki (sell_all_surplus).
+			var sv_mat: int = step.get("mat", -1)
+			var sv_val := 0
+			if sv_mat < 0:
+				sv_val = sell_all_surplus()
+			else:
+				sv_val = sell_from_inventory(sv_mat, step.get("px", -1))
+			print("ScenarioRunner: sell_inventory mat=%d arvo=%d money=%d" % [sv_mat, sv_val, money])
 		"buy_bot":
 			# Osta botteja skriptista (bot_manager.buy_bot). role 0=miner 1=hauler, count kpl.
 			var brole: int = step.get("role", 0)

@@ -1,0 +1,27 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "M1 E2E: inventaario- ja myynti-API deterministisesti. Testaa set/add/assert_inventory, set_material_policy, sell_inventory (osamyynti + sell_all_surplus) ja etta myynti kasvattaa rahaa MoneyExit.PRICES-taulun mukaan (IRON_ORE 3$/px, COPPER 4$/px). Ei vaadi CA:ta eika bottisimulaatiota — komennot koskettavat pixel_world.inventory/money-tilaa suoraan. cpu_ca:true varmistaa headless-ajon ilman GPU:ta.",
+  "steps": [
+    { "cmd": "set_material_policy", "mat": 12, "policy": 1 },
+    { "cmd": "set_inventory", "mat": 12, "px": 50 },
+    { "cmd": "assert_inventory", "mat": 12, "min": 50, "max": 50, "label": "set_inventory asetti 50 rautaa" },
+    { "cmd": "add_inventory", "mat": 12, "px": 10 },
+    { "cmd": "assert_inventory", "mat": 12, "min": 60, "max": 60, "label": "add_inventory kasvatti 60:een" },
+
+    { "cmd": "set_money", "amount": 0 },
+    { "cmd": "sell_inventory", "mat": 12, "px": 20 },
+    { "cmd": "assert_inventory", "mat": 12, "min": 40, "max": 40, "label": "osamyynti jatti 40 rautaa" },
+    { "cmd": "assert_money_gt", "min": 59, "label": "osamyynti 20*3=60 -> raha > 59" },
+    { "cmd": "assert_money_lt", "max": 61, "label": "osamyynti tuotti tarkalleen 60 -> raha < 61" },
+
+    { "cmd": "set_material_policy", "mat": 20, "policy": 1 },
+    { "cmd": "set_inventory", "mat": 20, "px": 10 },
+    { "cmd": "set_money", "amount": 0 },
+    { "cmd": "sell_inventory", "mat": -1 },
+    { "cmd": "assert_inventory", "mat": 12, "min": 0, "max": 0, "label": "sell_all tyhjensi raudan" },
+    { "cmd": "assert_inventory", "mat": 20, "min": 0, "max": 0, "label": "sell_all tyhjensi kuparin" },
+    { "cmd": "assert_money_gt", "min": 159, "label": "sell_all: 40*3 + 10*4 = 160 -> raha > 159" },
+    { "cmd": "assert_money_lt", "max": 161, "label": "sell_all tuotti tarkalleen 160 -> raha < 161" }
+  ]
+}

@@ -149,6 +149,8 @@ var _prev_left_ui: bool = false          # oma left-just-seuranta (riippumaton p
 # kone, jotta collected/need-laskurit voi päivittää uudelleenrakentamatta koko paneelia.
 var _machine_popover_machine: Object = null
 var _machine_popover_rows: Dictionary = {}   # input_mat -> {"label": Label, "need": int}
+# Base-popover (M1): inventaariolistan VBox, jotta myynti/politiikka-napit voivat rakentaa sen uudelleen.
+var _base_popover_vb: VBoxContainer = null
 
 # Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
 # [{panel(=Button), price_label, cost_fn}]
@@ -790,11 +792,129 @@ func _mat_swatch(mat_id: int) -> Control:
 func _on_world_object_clicked(kind: String, data: Dictionary) -> void:
 	match kind:
 		"base":
-			_open_bot_tray()
+			_open_base_popover()
 		"furnace", "crusher":
 			_open_machine_popover(kind, data.get("obj"))
 		"zone":
 			_open_zone_popover(data.get("zone", {}))
+
+
+# ── Base-popover (M1): inventaariolista + myyntinapit + politiikkakytkimet ──
+# Base on talouden keskussolmu: baseen tuotu materiaali reititetään politiikan mukaan
+# (STORE -> inventaario, SELL -> raha). Popover näyttää varastoidut materiaalit ja
+# antaa pelaajan myydä ne tai kääntää politiikan. "Botit"-nappi avaa bottitrayn.
+func _open_base_popover() -> void:
+	if pixel_world.base == null or not is_instance_valid(pixel_world.base):
+		return
+	_close_context_popover()
+	_close_build_tray()
+	_close_bot_tray()
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+	_base_popover_vb = vb
+	_fill_base_popover(vb)
+
+	get_parent().add_child(panel)
+	_context_popover = panel
+	_context_popover_kind = "base"
+	_register_panel(panel)
+	var bp: Vector2i = pixel_world.base.grid_pos
+	var anchor: Vector2 = pixel_world.grid_to_screen(
+		Vector2(float(bp.x) + float(MoneyExit.EXIT_W) * 0.5, float(bp.y)))
+	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
+	_popover_just_opened = true
+
+
+# Rakentaa/uudelleenrakentaa base-popoverin sisällön annettuun VBoxiin.
+func _fill_base_popover(vb: VBoxContainer) -> void:
+	vb.add_child(_label("Base — varasto", 13, COL_TEXT))
+
+	# Näytettävät rivit: varastoidut materiaalit + kaikki STORE-politiikan materiaalit
+	# (jotta kytkin näkyy vaikka varasto olisi tyhjä).
+	var shown: Array = []
+	for mat_id in pixel_world.inventory:
+		if int(pixel_world.inventory[mat_id]) > 0 and not shown.has(int(mat_id)):
+			shown.append(int(mat_id))
+	for mat_id in pixel_world.material_policy:
+		if int(pixel_world.material_policy[mat_id]) == pixel_world.POLICY_STORE and not shown.has(int(mat_id)):
+			shown.append(int(mat_id))
+	shown.sort()
+
+	if shown.is_empty():
+		vb.add_child(_label("Varasto tyhjä", 10, COL_DIM))
+	else:
+		for mat_id: int in shown:
+			vb.add_child(_base_inventory_row(mat_id))
+
+	var total_val := int(pixel_world.inventory_total_value())
+	vb.add_child(_label("Arvo yhteensä: $%d" % total_val, 10, COL_DIM))
+
+	var sell_all_btn := _make_btn("Myy kaikki ylijäämä", 11)
+	sell_all_btn.disabled = pixel_world.inventory.is_empty()
+	sell_all_btn.pressed.connect(_on_base_sell_all)
+	vb.add_child(sell_all_btn)
+
+	var bots_btn := _make_btn("Botit…", 11)
+	bots_btn.pressed.connect(_open_bot_tray)
+	vb.add_child(bots_btn)
+
+
+# Yksi inventaariorivi: ikoni + nimi + px + $arvo + [Myy] + politiikkakytkin.
+func _base_inventory_row(mat_id: int) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 5)
+	row.add_child(_mat_swatch(mat_id))
+	var amount := int(pixel_world.inventory_amount(mat_id))
+	var unit := int(MoneyExit.PRICES.get(mat_id, MoneyExit.DEFAULT_PRICE))
+	var name_str := String(MAT_NAMES.get(mat_id, "?"))
+	row.add_child(_label("%s  %d px" % [name_str, amount], 11, COL_TEXT))
+	row.add_child(_label("$%d" % (unit * amount), 10, COL_DIM))
+
+	var sell_btn := _make_btn("Myy", 10)
+	sell_btn.disabled = amount <= 0
+	sell_btn.pressed.connect(_on_base_sell_material.bind(mat_id))
+	row.add_child(sell_btn)
+
+	var policy: int = int(pixel_world.material_policy.get(mat_id, pixel_world.POLICY_SELL))
+	var pol_btn := _make_btn(_policy_label(policy), 10)
+	pol_btn.pressed.connect(_on_base_toggle_policy.bind(mat_id))
+	row.add_child(pol_btn)
+	return row
+
+
+func _policy_label(policy: int) -> String:
+	return "Varastoi" if policy == pixel_world.POLICY_STORE else "Myy autom."
+
+
+func _on_base_sell_material(mat_id: int) -> void:
+	pixel_world.sell_from_inventory(mat_id, -1)
+	_refresh_base_popover()
+
+
+func _on_base_sell_all() -> void:
+	pixel_world.sell_all_surplus()
+	_refresh_base_popover()
+
+
+func _on_base_toggle_policy(mat_id: int) -> void:
+	var cur: int = int(pixel_world.material_policy.get(mat_id, pixel_world.POLICY_SELL))
+	var new_pol: int = pixel_world.POLICY_SELL if cur == pixel_world.POLICY_STORE else pixel_world.POLICY_STORE
+	pixel_world.set_material_policy(mat_id, new_pol)
+	_refresh_base_popover()
+
+
+# Rakentaa popoverin sisällön uudelleen napinpainalluksen jälkeen (deferred, jotta
+# signaali ehtii valmistua ennen lasten vapautusta).
+func _refresh_base_popover() -> void:
+	if _base_popover_vb == null or not is_instance_valid(_base_popover_vb):
+		return
+	_clear_children(_base_popover_vb)
+	_fill_base_popover.call_deferred(_base_popover_vb)
 
 
 # Vyöhykkeen (pickup/dump) materiaalifiltteri + poisto. Korvaa vanhan checkbox-
@@ -1001,6 +1121,7 @@ func _close_context_popover() -> void:
 	_zone_popover_active_btn = null
 	_machine_popover_machine = null
 	_machine_popover_rows = {}
+	_base_popover_vb = null
 
 
 # Pitää popoverin ruudun sisällä (1664×960-ikkuna, mutta lasketaan aina oikeasta

@@ -84,7 +84,7 @@ func setup(center: Vector2i) -> void:
 	_label.add_theme_font_size_override("font_size", 8)
 	_label.add_theme_color_override("font_color", Color(0.2, 0.9, 0.3))
 	_label.position = Vector2(float(grid_pos.x), float(grid_pos.y) - 10.0)
-	_label.text = "$0"
+	_label.text = ""
 	add_child(_label)
 
 	queue_redraw()
@@ -98,10 +98,14 @@ func build_structure(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 			color_seed[idx] = 100 + randi() % 30  # Vihertävä kivi
 
 
-func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int, delta: float) -> int:
-	var frame_earnings: int = 0
+# M1 (SPEC_seed_ship §2.1): palauttaa taman framen kuluttamat intake-pikselit
+# { mat_id:int -> px:int } (tyhja {} jos ei mitaan). EI enaa palauta rahaa — kutsuja
+# (_update_money_exits) reitittaa tuloksen deposit_cargolla politiikan mukaan
+# (SELL -> money+total_revenue, STORE -> inventory).
+func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int, delta: float) -> Dictionary:
+	var consumed: Dictionary = {}
 
-	# Skannaa intake-alue (rivi rakennuksen yläpuolella)
+	# Skannaa intake-alue (rivi rakennuksen ylapuolella)
 	var intake_y := grid_pos.y - 1
 	if intake_y >= 0:
 		for ix in intake_x:
@@ -110,10 +114,7 @@ func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 				var mat_id: int = grid[idx]
 				if mat_id == 0:
 					continue
-				var earned: int = PRICES.get(mat_id, DEFAULT_PRICE)
-				frame_earnings += earned
-				total_earned += earned
-				earned_total += earned  # kumulatiivinen (lane G: $/s)
+				consumed[mat_id] = int(consumed.get(mat_id, 0)) + 1
 				grid[idx] = 0
 				color_seed[idx] = randi() % 256
 				_flash_timer = 0.2
@@ -123,8 +124,9 @@ func update_exit(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: 
 		_flash_timer -= delta
 		queue_redraw()
 
-	_label.text = "$%d" % total_earned
-	return frame_earnings
+	# Label ei enaa naytettavaa rahalukua — inventaario/talous elaa pixel_world.gd:ssa.
+	_label.text = ""
+	return consumed
 
 
 func get_structure_pixels() -> Array[Vector2i]:
