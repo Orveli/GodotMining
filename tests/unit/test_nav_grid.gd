@@ -1,14 +1,17 @@
 extends SceneTree
 
 # Yksikkotestit NavGridille (scripts/nav_grid.gd).
-# Rakentaa synteettisen 1664x960 CA-gridin ja testaa A*-reitityksen +
-# lapaisevyyskynnyksen + dirty-osittaispaivityksen.
+# Rakentaa synteettisen 4096x448 CA-gridin (planeettakoko) ja testaa A*-reitityksen +
+# lapaisevyyskynnyksen + dirty-osittaispaivityksen + TOROIDAALISEN wrapin (sauman yli).
+# HUOM: x-akseli wrappaa (sauma x=0 <-> x=NW-1), joten yksi PYSTYseina EI enaa katkaise
+# maailmaa (voi kiertaa sauman kautta) -> estotestit kayttavat VAAKAseinaa (y ei wrappaa).
 #
 # Aja headless:
 #   godot --headless --path . --script res://tests/unit/test_nav_grid.gd
 
-const SIM_W := 1664
-const SIM_H := 960
+# Mirroroi NavGridin planeettakokoa (NW=256, NH=28 -> 4096x448).
+const SIM_W := 4096
+const SIM_H := 448
 
 const MAT_EMPTY := 0
 const MAT_STONE := 3
@@ -27,6 +30,8 @@ func _init() -> void:
 	_test_wall_blocks_path()
 	_test_open_threshold()
 	_test_dirty_update_opens_path()
+	_test_seam_path()
+	_test_octile_wrap()
 	print("\n=== YHTEENVETO ===")
 	print("RESULT: %d passed, %d failed" % [_pass, _fail])
 	if _fail > 0:
@@ -72,33 +77,34 @@ func _test_empty_world_path() -> void:
 	var nav := NavGrid.new()
 	nav.rebuild_full(_grid)
 
-	var from_px := Vector2(400, 480)
-	var to_px := Vector2(1200, 480)
+	var from_px := Vector2(400, 224)
+	var to_px := Vector2(1200, 224)
 	var path := nav.find_path_px(from_px, to_px)
 
 	_check(path.size() > 0, "polku loytyy kahden pisteen valilla tyhjassa maailmassa")
 	# Viimeisen waypointin tulisi osua kohdesolun keskipisteeseen.
 	if path.size() > 0:
 		var last: Vector2 = path[path.size() - 1]
-		var goal_center := Vector2(75 * 16 + 8, 30 * 16 + 8)  # (1208, 488)
+		var goal_center := Vector2(75 * 16 + 8, 14 * 16 + 8)  # (1208, 232)
 		_check(last.distance_to(goal_center) < 1.0, "polun paatepiste = kohdesolun keskipiste")
 
 
-# --- Testi 2: umpiseina estaa reitin ----------------------------------------
+# --- Testi 2: umpiseina estaa reitin (VAAKAseina, koska y ei wrappaa) --------
 
 func _test_wall_blocks_path() -> void:
-	print("\n--- Testi 2: Umpinainen STONE-seina estaa reitin ---")
+	print("\n--- Testi 2: Umpinainen VAAKA-STONE-seina estaa reitin ---")
 	_reset_grid()
-	# Pystyseina solusarakkeeseen 50 (x 800..815) koko korkeudelta -> jakaa maailman.
-	_fill_rect(800, 0, 16, SIM_H, MAT_STONE)
+	# Vaakaseina solurivilla 14 (y 224..239) koko leveydelta -> jakaa maailman ylos/alas.
+	# (Pystyseina EI kavisi: x wrappaa, joten sen voisi kiertaa sauman kautta.)
+	_fill_rect(0, 224, SIM_W, 16, MAT_STONE)
 	var nav := NavGrid.new()
 	nav.rebuild_full(_grid)
 
 	# Varmistetaan ettei seinasolu ole OPEN.
-	_check(not nav.is_open(50, 30), "seinasolu (50,30) on SOLID")
-	_check(nav.is_open(25, 30) and nav.is_open(75, 30), "vasen ja oikea puoli ovat OPEN")
+	_check(not nav.is_open(50, 14), "seinasolu (50,14) on SOLID")
+	_check(nav.is_open(25, 6) and nav.is_open(25, 21), "seinan ylä- ja alapuoli ovat OPEN")
 
-	var path := nav.find_path_px(Vector2(400, 480), Vector2(1200, 480))
+	var path := nav.find_path_px(Vector2(400, 100), Vector2(400, 350))
 	_check(path.size() == 0, "umpiseinan lapi EI loydy polkua")
 
 
@@ -131,23 +137,63 @@ func _test_open_threshold() -> void:
 func _test_dirty_update_opens_path() -> void:
 	print("\n--- Testi 4: Dirty-paivitys avaa reian ---")
 	_reset_grid()
-	# Sama umpiseina kuin testissa 2.
-	_fill_rect(800, 0, 16, SIM_H, MAT_STONE)
+	# Sama vaakaseina kuin testissa 2.
+	_fill_rect(0, 224, SIM_W, 16, MAT_STONE)
 	var nav := NavGrid.new()
 	nav.rebuild_full(_grid)
 
-	var path_before := nav.find_path_px(Vector2(400, 480), Vector2(1200, 480))
+	var path_before := nav.find_path_px(Vector2(400, 100), Vector2(400, 350))
 	_check(path_before.size() == 0, "ennen reikaa: ei polkua")
 
-	# Puhkaistaan solu (50,30): px (800,480)..(815,495) -> EMPTY.
-	_fill_rect(800, 480, 16, 16, MAT_EMPTY)
-	nav.mark_dirty_px_rect(Rect2i(800, 480, 16, 16))
+	# Puhkaistaan solu (25,14): px (400,224)..(415,239) -> EMPTY.
+	_fill_rect(400, 224, 16, 16, MAT_EMPTY)
+	nav.mark_dirty_px_rect(Rect2i(400, 224, 16, 16))
 	nav.update_dirty(_grid)
 
-	_check(nav.is_open(50, 30), "reikasolu (50,30) on paivittynyt OPENiksi")
-	var path_after := nav.find_path_px(Vector2(400, 480), Vector2(1200, 480))
+	_check(nav.is_open(25, 14), "reikasolu (25,14) on paivittynyt OPENiksi")
+	var path_after := nav.find_path_px(Vector2(400, 100), Vector2(400, 350))
 	_check(path_after.size() > 0, "reian jalkeen: polku loytyy")
 
 	# Varmistetaan etta muut seinasolut pysyivat SOLIDeina (osittaispaivitys ei
 	# nollannut koko karttaa).
-	_check(not nav.is_open(50, 10) and not nav.is_open(50, 50), "muut seinasolut yha SOLID")
+	_check(not nav.is_open(50, 14) and not nav.is_open(100, 14), "muut seinasolut yha SOLID")
+
+
+# --- Testi 5: A* loytaa reitin SAUMAN yli (toroidaalinen x) ------------------
+
+func _test_seam_path() -> void:
+	print("\n--- Testi 5: A* reitittaa sauman yli ---")
+	_reset_grid()
+	# Pystyseina keskelle (solusarake 128, x 2048..2063) koko korkeudelta. Se EI katkaise
+	# maailmaa (x wrappaa), mutta se PAKOTTAA suoran keskireitin kiertoon sauman kautta.
+	# Lahto solu (2,14) ja maali (254,14) ovat seinan eri puolilla suoraan mitattuna, mutta
+	# sauman yli (2 -> 1 -> 0 -> 255 -> 254) vain ~4 solun paassa.
+	_fill_rect(2048, 0, 16, SIM_H, MAT_STONE)
+	var nav := NavGrid.new()
+	nav.rebuild_full(_grid)
+
+	_check(not nav.is_open(128, 14), "keskiseinasolu (128,14) on SOLID")
+
+	var from_px := Vector2(2 * 16 + 8, 14 * 16 + 8)    # (40, 232), solu (2,14)
+	var to_px := Vector2(254 * 16 + 8, 14 * 16 + 8)    # (4072, 232), solu (254,14)
+	var path := nav.find_path_px(from_px, to_px)
+
+	# Polku loytyy VAIN jos A* osaa kiertaa sauman kautta (keskiseina tukkii suoran reitin).
+	_check(path.size() > 0, "polku loytyy sauman yli (keskiseina tukkii suoran reitin)")
+	if path.size() > 0:
+		var last: Vector2 = path[path.size() - 1]
+		_check(last.distance_to(to_px) < 1.0, "sauma-polun paatepiste = maalisolun keskipiste")
+
+
+# --- Testi 6: oktiili-heuristiikka wrappaa x:n ------------------------------
+
+func _test_octile_wrap() -> void:
+	print("\n--- Testi 6: Oktiili-heuristiikka wrappaa x:n ---")
+	var nav := NavGrid.new()
+	# Solusta 2 soluun 254 (NW=256): suora dx=252, mutta sauman yli dx=4.
+	# Admissiivinen heuristiikka kayttaa lyhinta (4) -> muuten A* ei loytaisi optimia.
+	var h_seam := nav._octile(2, 14, 254, 14)
+	_check(absf(h_seam - 4.0) < 0.001, "octile(2->254) = 4 (sauman yli), ei 252")
+	# Ei-sauma-tapaus sailyy ennallaan: dx=8.
+	var h_near := nav._octile(2, 14, 10, 14)
+	_check(absf(h_near - 8.0) < 0.001, "octile(2->10) = 8 (ei sauman yli)")

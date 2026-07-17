@@ -11,8 +11,9 @@ const D_NONE := 0
 const D_QUEUED := 1
 const D_MINING := 4
 
-const GW := 104
-const GH := 60
+# Planeettakoko (mirroroi DesignationGridia): GW=256, GH=28. x wrappaa, y ei.
+const GW := 256
+const GH := 28
 
 var _pass := 0
 var _fail := 0
@@ -24,6 +25,7 @@ func _init() -> void:
 	_test_add_false_clears()
 	_test_cell_px_rect_roundtrip()
 	_test_version_increments()
+	_test_seam_wrap()
 	print("\n=== YHTEENVETO ===")
 	print("RESULT: %d passed, %d failed" % [_pass, _fail])
 	if _fail > 0:
@@ -123,10 +125,10 @@ func _test_cell_px_rect_roundtrip() -> void:
 	_check(d.get_cell(7, 9) == D_QUEUED, "3: round-trip osuu soluun (7,9)")
 	_check(_count_state(d, D_QUEUED) == 1, "3: vain 1 solu QUEUED round-tripissa")
 
-	# Reunasolu (GW-1, GH-1) = (103,59) -> px (1648,944,16,16) (CELL=16).
+	# Reunasolu (GW-1, GH-1) = (255,27) -> px (4080,432,16,16) (CELL=16).
 	var d2 := DesignationGrid.new()
 	var r2 := d2.cell_px_rect(GW - 1, GH - 1)
-	_check(r2 == Rect2i(1648, 944, 16, 16), "3: cell_px_rect(103,59) == Rect2i(1648,944,16,16)")
+	_check(r2 == Rect2i(4080, 432, 16, 16), "3: cell_px_rect(255,27) == Rect2i(4080,432,16,16)")
 	d2.paint_px_rect(d2.cell_px_rect(GW - 1, GH - 1), true)
 	_check(d2.get_cell(GW - 1, GH - 1) == D_QUEUED, "3: reunasolu round-trip QUEUED")
 	_check(_count_state(d2, D_QUEUED) == 1, "3: reunasolun round-trip tasan 1 QUEUED")
@@ -152,11 +154,11 @@ func _test_version_increments() -> void:
 	d.set_cell(0, 0, D_NONE)
 	_check(d.version == 2, "4: set_cell NONE-muutos -> version 2")
 
-	# Rajojen ulkopuolinen set_cell -> ei muutosta.
-	d.set_cell(-1, 0, D_QUEUED)
-	d.set_cell(GW, 0, D_QUEUED)
+	# Planeetta: y-rajojen ulkopuolinen set_cell -> ei muutosta (y ei wrappaa).
+	# (x-wrap testataan erikseen _test_seam_wrapissa; x=-1/x=GW EIVAT ole rajan yli vaan wrapaavat.)
 	d.set_cell(0, GH, D_QUEUED)
-	_check(d.version == 2, "4: rajojen ulkopuoliset set_cellit eivat kasvata versiota")
+	d.set_cell(0, -1, D_QUEUED)
+	_check(d.version == 2, "4: y-rajojen ulkopuoliset set_cellit eivat kasvata versiota")
 
 	# paint_px_rect joka muuttaa soluja -> +1 (yksi inkrementti koko rectille).
 	d.paint_px_rect(Rect2i(0, 0, 48, 32), true)
@@ -173,3 +175,25 @@ func _test_version_increments() -> void:
 	# paint_px_rect add=false uudelleen (ei mitaan nollattavaa) -> ei muutosta.
 	d.paint_px_rect(Rect2i(0, 0, 48, 32), false)
 	_check(d.version == 4, "4: paint_px_rect add=false ilman muutosta ei kasvata versiota")
+
+
+# --- Testi 5: x wrappaa sauman yli (get/set/paint toroidaalisia) -------------
+
+func _test_seam_wrap() -> void:
+	print("\n--- Testi 5: x wrappaa (sauman yli) ---")
+
+	# get/set wrap: sarake GW osuu sarakkeeseen 0, sarake -1 sarakkeeseen GW-1.
+	var d := DesignationGrid.new()
+	d.set_cell(GW, 3, D_QUEUED)
+	_check(d.get_cell(0, 3) == D_QUEUED, "5: set_cell(GW,3) wrappaa sarakkeeseen 0")
+	_check(d.get_cell(GW, 3) == D_QUEUED, "5: get_cell(GW,3) lukee saman wrapatun solun")
+	d.set_cell(-1, 3, D_MINING)
+	_check(d.get_cell(GW - 1, 3) == D_MINING, "5: set_cell(-1,3) wrappaa sarakkeeseen GW-1")
+
+	# paint sauman yli: px x=-16..15 (solut -1 ja 0) -> wrap: GW-1 ja 0.
+	var d2 := DesignationGrid.new()
+	d2.paint_px_rect(Rect2i(-16, 48, 32, 16), true)
+	_check(d2.get_cell(GW - 1, 3) == D_QUEUED and d2.get_cell(0, 3) == D_QUEUED,
+		"5: paint sauman yli osuu sarakkeisiin GW-1 ja 0")
+	_check(_count_state(d2, D_QUEUED) == 2, "5: sauman yli veto tasan 2 solua")
+	_check(d2.get_cell(GW / 2, 3) == D_NONE, "5: sauman vastapuoli (GW/2) pysyy NONE")
