@@ -21,7 +21,7 @@ uniform vec2  screen_size = vec2(1664.0, 960.0);
 uniform vec3  core_color : source_color = vec3(0.16, 0.13, 0.11);   // core blob
 uniform vec3  sky_color : source_color = vec3(0.02, 0.02, 0.05);    // space (r > r_surface)
 
-const float TAU = 6.28318530717958647692;
+// TAU is a built-in constant in the Godot shading language (2*PI).
 
 void fragment() {
 	// Reconstruct screen-pixel position from UV (PlanetView spans the whole window).

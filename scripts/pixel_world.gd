@@ -606,9 +606,9 @@ func _setup_planet_view() -> void:
 	planet_view.material = planet_warp_mat
 	planet_view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	planet_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	planet_view.set_anchors_preset(Control.PRESET_FULL_RECT)
-	planet_view.position = Vector2.ZERO
-	planet_view.size = vp_size
+	# Täysruutu ankkureilla (0,0..1,1): layout venyttää PlanetView'n ikkunan kokoiseksi.
+	# Ei erillistä size-asetusta (se ylikirjoittuisi layoutissa -> varoitus).
+	planet_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	planet_view.stretch_mode = TextureRect.STRETCH_SCALE
 	planet_view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	add_child(planet_view)
