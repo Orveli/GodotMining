@@ -28,6 +28,30 @@ const MAT_RARE_EARTH   := 21  # Rare earth — malmisuoni, syvin ja arvokkain
 
 const EDGE_THICKNESS := 2
 
+# --- Planeetta (rullattu maailma, SPEC_planet P2) ---
+# x = kulma planeetan ympäri → wräppää (x=0 ja x=w-1 ovat naapureita),
+# y = syvyys kohti ydintä → EI wräppää.
+# Korkeuskohina näytteistetään ympyrältä tällä säteellä, jotta pinnan profiili
+# on jatkuva x-akselin ympäri (gx=0 ja gx=gw-1 vierekkäin ympyrällä → sauma
+# on huomaamaton). Isompi säde = tiheämpi vaihtelu planeetan ympäri.
+const NOISE_CIRCLE_R := 220.0
+# Bedrock-ydinrenkaan alku suhteessa korkeuteen: syvimmät (1-CORE_BEDROCK_FRAC)
+# osuus riveistä on tuhoamatonta ydinkuorta. v1: bedrock alkaa 85 % syvyydestä.
+const CORE_BEDROCK_FRAC := 0.85
+# Louhittava kivikaista joka pidetään bedrock-ydinrenkaan YLÄPUOLELLA: syvien
+# suonien/blobien aloituspiste rajataan tähän, jotta ne mahtuvat renkaan päälle
+# (muuten esim. rare_earth (norm.syvyys 0.75-1.0 ≈ y-fraktio 0.85-1.0) aloittaisi
+# kokonaan bedrockin sisältä eikä carvaisi mitään). Suoni saa silti kävellä alas
+# renkaaseen asti (pysähtyy bedrockiin).
+const CORE_MINE_MARGIN := 20
+
+
+# Wräppää x-koordinaatin välille [0, w). Toimii myös negatiivisille.
+# Paikallinen apuri (vastaa PlanetGeom.wrap_x-konventiota, P1) — pidetään
+# world_gen.gd itsenäisenä ennen merge-junaa, ei riippuvuutta planet_geom.gd:hen.
+static func _wrap_x(x: int, w: int) -> int:
+	return ((x % w) + w) % w
+
 # Kertymien lukumäärä — enemmän ja tasaisemmin jaettu
 # (coal/iron/gold: nyt suonien lukumäärä _place_vein_set():lle, ei enää blobeja)
 static var coal_count:  int = 12
@@ -149,6 +173,11 @@ static func generate(grid: PackedByteArray, color_seed: PackedByteArray, w: int,
 	# Phase 1: Maasto
 	var surface_y := _generate_terrain(grid, w, h, world_seed)
 
+	# Bedrock-ydinrengas: syvimmät rivit tuhoamattomaksi ydinkuoreksi ENNEN
+	# malmien/suonien sijoitusta → suonet carvaavat vain STONEen ja pysähtyvät
+	# renkaaseen (eivät ylikirjoita bedrockia; renkaan alle ei jää mineraaleja).
+	_enforce_core(grid, w, h)
+
 	# Phase 2: Luolat — poistettu käytöstä
 	var cave_paths: Array = []
 	# var cave_paths := _generate_caves(grid, w, h, surface_y, rng)
@@ -235,12 +264,17 @@ static func _generate_terrain(grid: PackedByteArray, w: int, h: int,
 	var noise := _make_noise(world_seed + 1, 0.003, 2)
 	var amp_cells := 2.0                        # korkeusvaihtelu ± ~2 solua (±32 px)
 
-	# Snapattu korkeus (soluina) per grid-sarake
+	# Snapattu korkeus (soluina) per grid-sarake.
+	# Sylinterijatkuvuus: kohina näytteistetään yksikköympyrältä (cos/sin(ang)),
+	# jolloin profiili on periodinen x:n ympäri → gx=0 ja gx=gw-1 ovat vierekkäin
+	# ympyrällä eikä saumaan synny korkeushyppäystä (vrt. suora get_noise_2d(cx,0)).
 	var top_cell := PackedInt32Array()
 	top_cell.resize(gw)
 	for gx in gw:
-		var cx := gx * cell + cell / 2
-		var n := noise.get_noise_2d(float(cx), 0.0)  # -1..1
+		var ang := float(gx) / float(gw) * TAU
+		var nx := cos(ang) * NOISE_CIRCLE_R
+		var ny := sin(ang) * NOISE_CIRCLE_R
+		var n := noise.get_noise_2d(nx, ny)  # -1..1, jatkuva ympyrällä
 		top_cell[gx] = base_cell + int(round(n * amp_cells))
 
 	# --- Tehdasalusta: pakota alustan sarakkeet pinnan perustasoon ---
@@ -258,6 +292,11 @@ static func _generate_terrain(grid: PackedByteArray, w: int, h: int,
 			top_cell[gx] = clampi(top_cell[gx], top_cell[gx - 1] - 1, top_cell[gx - 1] + 1)
 		for gx in range(gw - 2, -1, -1):
 			top_cell[gx] = clampi(top_cell[gx], top_cell[gx + 1] - 1, top_cell[gx + 1] + 1)
+		# Wräppäävä tasoituspari: pakota myös sauman (gx=0 <-> gx=gw-1) korkeusero
+		# enintään yhteen soluun, jotta sylinterin ensimmäinen ja viimeinen sarake
+		# jatkuvat saumatta (testi: korkeusero x=0 ja x=W-1 välillä ≤ 1 solu).
+		top_cell[0] = clampi(top_cell[0], top_cell[gw - 1] - 1, top_cell[gw - 1] + 1)
+		top_cell[gw - 1] = clampi(top_cell[gw - 1], top_cell[0] - 1, top_cell[0] + 1)
 	for gx in range(plat_gx0, plat_gx1 + 1):
 		top_cell[gx] = base_cell
 
@@ -388,10 +427,9 @@ static func _carve_circle(grid: PackedByteArray, w: int, h: int,
 		for dx in range(-radius, radius + 1):
 			if dx * dx + dy * dy > radius * radius:
 				continue
-			var px := cx + dx
+			# x wräppää sauman yli (sylinteri); ympyrätarkistus offsetista (dx,dy).
+			var px := _wrap_x(cx + dx, w)
 			var py := cy + dy
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
 			if py < 0 or py >= h:
 				continue
 			var pidx := py * w + px
@@ -499,10 +537,9 @@ static func _place_single_deposit(grid: PackedByteArray, w: int, h: int,
 	var scan := r + 4
 	for dy in range(-scan, scan + 1):
 		for dx in range(-scan, scan + 1):
-			var px := cx + dx
+			# x wräppää sauman yli (sylinteri); etäisyys lasketaan offsetista.
+			var px := _wrap_x(cx + dx, w)
 			var py := cy + dy
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
 			if py < 0 or py >= h:
 				continue
 			var pidx := py * w + px
@@ -625,10 +662,13 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 			w - EDGE_THICKNESS * 2 - 1)
 		var cx := rng.randi_range(x0, x1)
 
-		# Y: satunnainen syvyysvyöhykkeellä
+		# Y: satunnainen syvyysvyöhykkeellä. Pidä blob bedrock-ydinrenkaan
+		# yläpuolella (rengas on tuhoamaton, ei carvattavaa kiveä sen sisällä).
 		var dn := rng.randf_range(min_dn, max_dn)
 		var sy := surface_y[clampi(cx, 0, w - 1)]
-		var cy := clampi(int(sy + dn * max_depth_px), int(sy) + 2, h - EDGE_THICKNESS - 1)
+		var core_top := int(float(h) * CORE_BEDROCK_FRAC) - CORE_MINE_MARGIN
+		var cy := clampi(int(sy + dn * max_depth_px), int(sy) + 2,
+			maxi(int(sy) + 2, core_top))
 
 		# Koko kasvaa syvyyden mukaan + satunnainen vaihtelu
 		var t      := (dn - min_dn) / maxf(max_dn - min_dn, 0.001)
@@ -646,10 +686,10 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 		var scan := int(maxf(ax, ay)) + 6
 		for dy in range(-scan, scan + 1):
 			for dx in range(-scan, scan + 1):
-				var px := cx + dx
+				# x wräppää sauman yli (sylinteri); elliptinen etäisyys lasketaan
+				# offsetista (dx,dy), joten wräppäys ei vääristä muotoa.
+				var px := _wrap_x(cx + dx, w)
 				var py := cy + dy
-				if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-					continue
 				if py < 0 or py >= h:
 					continue
 				var pidx := py * w + px
@@ -694,10 +734,14 @@ static func _place_vein_set(grid: PackedByteArray, w: int, h: int,
 			w - EDGE_THICKNESS * 2 - 1)
 		var start_x := rng.randi_range(x0, x1)
 
-		# Aloitus-y: satunnainen syvyysvyöhykkeellä (0=pinta, 1=pohja)
+		# Aloitus-y: satunnainen syvyysvyöhykkeellä (0=pinta, 1=pohja). Rajataan
+		# bedrock-ydinrenkaan yläpuolelle (CORE_MINE_MARGIN), jotta syvät suonet
+		# aloittavat kivessä eivätkä bedrockin sisällä → carvaus onnistuu ja suoni
+		# kävelee alas renkaaseen asti (pysähtyy bedrockiin).
 		var dn := rng.randf_range(depth_min, depth_max)
 		var sy := surface_y[clampi(start_x, 0, w - 1)]
-		var start_y := clampf(sy + dn * max_depth_px, sy + 2.0, float(h - EDGE_THICKNESS - 1))
+		var core_top := float(int(float(h) * CORE_BEDROCK_FRAC) - CORE_MINE_MARGIN)
+		var start_y := clampf(sy + dn * max_depth_px, sy + 2.0, maxf(sy + 2.0, core_top))
 
 		# Alaspäin painotettu satunnaissuunta: ~90° (suoraan alas) ± vaihtelu
 		var heading := PI * 0.5 + rng.randf_range(-0.9, 0.9)
@@ -735,13 +779,14 @@ static func _walk_vein(grid: PackedByteArray, w: int, h: int,
 		cx += cos(heading)
 		cy += sin(heading)
 
-		# Clamp reunoihin — lopeta jos suoni ajautuu reunan tai pohjan ulkopuolelle
-		if cx < float(EDGE_THICKNESS + 2) or cx >= float(w - EDGE_THICKNESS - 2):
-			break
+		# x wräppää sauman yli (sylinterimaailma) — suoni jatkuu ehjänä molemmin
+		# puolin saumaa, ei katkea reunaan. y ei wräppää.
+		cx = fposmod(cx, float(w))
+		# Lopeta jos suoni saavuttaa pinnan yläpuolen tai pohjan/ytimen.
 		if cy < 0.0 or cy >= float(h - EDGE_THICKNESS - 2):
 			break
-		# Lopeta bedrockissa
-		if grid[int(cy) * w + int(cx)] == MAT_BEDROCK:
+		# Lopeta bedrockissa (ydinrengas tai pohja)
+		if grid[int(cy) * w + _wrap_x(int(cx), w)] == MAT_BEDROCK:
 			break
 
 
@@ -758,14 +803,15 @@ static func _carve_vein_disc(grid: PackedByteArray, w: int, h: int,
 		if py < 0 or py >= h:
 			continue
 		for dx in range(-scan, scan + 1):
-			var px := icx + dx
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
+			# x wräppää sauman yli (sylinteri); vain indeksointi wräpätään.
+			var px := _wrap_x(icx + dx, w)
 			var pidx := py * w + px
 			if grid[pidx] != MAT_STONE:
 				continue
 
-			var fdx := float(px) - cx
+			# Etäisyys lasketaan wräppäämättömästä paikallisesta offsetista
+			# (icx+dx), jotta sauman yli osuvat solut saavat oikean etäisyyden.
+			var fdx := float(icx + dx) - cx
 			var fdy := float(py) - cy
 			var dist := sqrt(fdx * fdx + fdy * fdy)
 
@@ -858,14 +904,28 @@ static func get_platform_rect() -> Rect2i:
 
 
 static func _enforce_edges(grid: PackedByteArray, w: int, h: int) -> void:
-	# Kirjoitetaan bedrockia reunoihin ja pohjaan (ei kivi — bedrock on tuhoamaton)
-	for y in h:
+	# Sylinterimaailmassa x wräppää (x=0 ja x=w-1 ovat naapureita), joten
+	# pystysuoraa x-reunabedrockia EI kirjoiteta — se loisi näkyvän seinän
+	# saumaan. Vain pohjabedrock (alin kerros kohti ydintä) säilyy; varsinainen
+	# bedrock-ydinrengas hoidetaan erikseen _enforce_core():ssa.
+	for x in w:
+		for y in range(h - EDGE_THICKNESS, h):
+			grid[y * w + x] = MAT_BEDROCK
+
+
+# ============================================================
+# Bedrock-ydinrengas: syvimmät rivit (CORE_BEDROCK_FRAC..1.0 syvyydestä) ovat
+# tuhoamatonta bedrockia. Rullatussa maailmassa tämä on planeetan ydinkuori,
+# jonka sisään renderöinti (P5) piirtää irrallisen ydinmöhkäleen. Suonet/blobit
+# carvaavat/korvaavat vain MAT_STONEa eivätkä ylikirjoita bedrockia, joten ne
+# pysähtyvät luonnostaan renkaan yläreunaan. Ajetaan ENNEN malmivaiheita, jotta
+# renkaan alle ei jää mineraaleja.
+# ============================================================
+static func _enforce_core(grid: PackedByteArray, w: int, h: int) -> void:
+	var core_y0 := int(float(h) * CORE_BEDROCK_FRAC)
+	for y in range(core_y0, h):
 		for x in w:
-			if x < EDGE_THICKNESS or x >= w - EDGE_THICKNESS:
-				if float(y) > float(h) * 0.40:
-					grid[y * w + x] = MAT_BEDROCK
-			if y >= h - EDGE_THICKNESS:
-				grid[y * w + x] = MAT_BEDROCK
+			grid[y * w + x] = MAT_BEDROCK
 
 
 # Järvet: 2 kpl, reunamarginaalilla
