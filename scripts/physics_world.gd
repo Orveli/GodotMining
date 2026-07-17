@@ -340,11 +340,17 @@ class CollisionResult:
 
 
 func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			return true
-		var mat := grid[wp.y * w + wp.x]
+		var mat := grid[wy * w + wx]
 		if mat != 0 and not _is_liquid(mat):
 			return true
 	return false
@@ -352,21 +358,29 @@ func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h:
 
 func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> CollisionResult:
 	var result := CollisionResult.new()
-	var world_pixels := body.get_world_pixels()
-	var collision_points: Array[Vector2] = []
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
 	var accumulated_normal := Vector2.ZERO
+	# Kontaktipisteiden summa + lukumäärä (ei Array-allokaatiota keskiarvoon)
+	var contact_sum := Vector2.ZERO
+	var contact_count := 0
 
-	for wp in world_pixels:
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
 		var colliding := false
 
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			colliding = true
-			if wp.x < 0: accumulated_normal += Vector2(1, 0)
-			elif wp.x >= w: accumulated_normal += Vector2(-1, 0)
-			if wp.y < 0: accumulated_normal += Vector2(0, 1)
-			elif wp.y >= h: accumulated_normal += Vector2(0, -1)
+			if wx < 0: accumulated_normal += Vector2(1, 0)
+			elif wx >= w: accumulated_normal += Vector2(-1, 0)
+			if wy < 0: accumulated_normal += Vector2(0, 1)
+			elif wy >= h: accumulated_normal += Vector2(0, -1)
 		else:
-			var idx := wp.y * w + wp.x
+			var idx := wy * w + wx
 			var hit_mat := grid[idx]
 			if hit_mat != 0 and not _is_liquid(hit_mat):
 				colliding = true
@@ -374,22 +388,20 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 				if body_map[idx] != 0 and result.hit_body_id == 0:
 					result.hit_body_id = body_map[idx]
 				var local_normal := Vector2.ZERO
-				if wp.x > 0 and grid[idx - 1] == 0: local_normal.x -= 1.0
-				if wp.x < w - 1 and grid[idx + 1] == 0: local_normal.x += 1.0
-				if wp.y > 0 and grid[idx - w] == 0: local_normal.y -= 1.0
-				if wp.y < h - 1 and grid[idx + w] == 0: local_normal.y += 1.0
+				if wx > 0 and grid[idx - 1] == 0: local_normal.x -= 1.0
+				if wx < w - 1 and grid[idx + 1] == 0: local_normal.x += 1.0
+				if wy > 0 and grid[idx - w] == 0: local_normal.y -= 1.0
+				if wy < h - 1 and grid[idx + w] == 0: local_normal.y += 1.0
 				accumulated_normal += local_normal
 
 		if colliding:
-			collision_points.append(Vector2(wp))
+			contact_sum += Vector2(wx, wy)
+			contact_count += 1
 
-	if not collision_points.is_empty():
+	if contact_count > 0:
 		result.hit = true
 		result.normal = accumulated_normal
-		var sum := Vector2.ZERO
-		for cp in collision_points:
-			sum += cp
-		result.contact_point = sum / float(collision_points.size())
+		result.contact_point = contact_sum / float(contact_count)
 
 	return result
 
@@ -505,58 +517,44 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 # Kappale kaatuu jos painopiste on tukialueen ulkopuolella
 
 func _apply_tipping_torque(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> void:
-	var world_pixels := body.get_world_pixels()
-
-	# Etsi kappaleen alimmat pikselit (pohjapinta) ja niiden tukipisteet
-	var bottom_pixels: Array[Vector2i] = []
-	var body_set := {}
-	for wp in world_pixels:
-		body_set[wp] = true
-
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
-			continue
-		var below := Vector2i(wp.x, wp.y + 1)
-		# Pohjapinta = pikseli jonka alla EI ole omaa pikseliä
-		if body_set.has(below):
-			continue
-		bottom_pixels.append(wp)
-
-	if bottom_pixels.is_empty():
+	# Pohjapinta cachetaan (offsetit joiden alla ei omaa pikseliä).
+	body._ensure_bottom_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var box := body.bottom_ox
+	var boy := body.bottom_oy
+	if box.is_empty():
 		return
 
 	# Etsi tukipisteet — pohjapikselit joiden alla on jotain (maasto/muu kappale/reuna)
-	var support_points: Array[float] = []
-	for bp in bottom_pixels:
-		var below_y := bp.y + 1
+	var support_min := INF
+	var support_max := -INF
+	var has_support := false
+	for k in box.size():
+		var wx := box[k] + px
+		var wy := boy[k] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
+			continue
+		var below_y := wy + 1
 		var supported := false
 		if below_y >= h:
 			supported = true  # Maanpohja
-		elif grid[below_y * w + bp.x] != 0:
+		elif grid[below_y * w + wx] != 0:
 			supported = true  # Jotain alla
 		if supported:
-			support_points.append(float(bp.x))
+			var fx := float(wx)
+			if fx < support_min: support_min = fx
+			if fx > support_max: support_max = fx
+			has_support = true
 
-	if support_points.is_empty():
+	if not has_support:
 		return  # Vapaassa pudotuksessa
-
-	# Tukialueen rajat
-	var support_min := support_points[0]
-	var support_max := support_points[0]
-	for sx in support_points:
-		support_min = minf(support_min, sx)
-		support_max = maxf(support_max, sx)
 
 	var support_center := (support_min + support_max) * 0.5
 	var support_width := support_max - support_min + 1.0
 
-	# Kappaleen kokonaisleveys (vertailuarvoksi)
-	var body_min_x := 99999.0
-	var body_max_x := -99999.0
-	for wp in world_pixels:
-		body_min_x = minf(body_min_x, float(wp.x))
-		body_max_x = maxf(body_max_x, float(wp.x))
-	var body_width := body_max_x - body_min_x + 1.0
+	# Kappaleen kokonaisleveys (kierrettyjen offsettien AABB, position-riippumaton)
+	var body_width := float(body.rot_max_x - body.rot_min_x) + 1.0
 
 	# Painopisteen poikkeama tukikeskipisteestä
 	var offset_x := body.position.x - support_center
@@ -614,12 +612,18 @@ func scan_stone_bodies(grid: PackedByteArray, color_seed: PackedByteArray, w: in
 # Paljon nopeampi kuin bbox-skannaus — O(N_pikseleissä) eikä O(bbox²).
 # Early-exit: palaa heti kun ensimmäinen puuttuva pikseli löytyy.
 func is_body_damaged(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	var mat := body.material
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx < 0 or wx >= w or wy < 0 or wy >= h:
 			continue
-		var idx := wp.y * w + wp.x
-		if grid[idx] != body.material:
+		if grid[wy * w + wx] != mat:
 			return true  # Vaurioitunut — early-exit
 	return false
 
@@ -800,12 +804,18 @@ func _clear_body_from_map(body_id: int) -> void:
 			if body_map[i] == body_id:
 				body_map[i] = 0
 		return
-	# Käytä kappaleen pikseleitä — paljon nopeampi
+	# Käytä kappaleen pikseleitä — paljon nopeampi (iteroi rot-offsetit suoraan)
 	var body: RigidBodyData = bodies[body_id]
-	var world_pixels := body.get_world_pixels()
-	for wp in world_pixels:
-		if wp.x >= 0 and wp.x < map_w and wp.y >= 0 and wp.y < map_h:
-			var idx := wp.y * map_w + wp.x
+	body._ensure_rot_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var rox := body.rot_ox
+	var roy := body.rot_oy
+	for i in rox.size():
+		var wx := rox[i] + px
+		var wy := roy[i] + py
+		if wx >= 0 and wx < map_w and wy >= 0 and wy < map_h:
+			var idx := wy * map_w + wx
 			if body_map[idx] == body_id:
 				body_map[idx] = 0
 
