@@ -620,9 +620,8 @@ func _mark_miner_penalty(cx: int, cy: int) -> void:
 			continue
 		var row := y * GW
 		for ox in range(-1, 2):
-			var x := cx + ox
-			if x < 0 or x >= GW:
-				continue
+			# x-naapuri wrappaa sauman yli; vain y rajaa.
+			var x := PlanetGeom.wrap_x(cx + ox, GW)
 			_round_miner_penalty[row + x] = true
 
 
@@ -670,9 +669,10 @@ func _has_open_neighbor(dx: int, dy: int) -> bool:
 	var ncx := (dx * DCELL + DCELL / 2) / NCELL
 	var ncy := (dy * DCELL + DCELL / 2) / NCELL
 	for dir in NAV_DIRS:
-		var cx := ncx + dir.x
+		# x-naapuri wrappaa sauman yli; vain y rajaa (is_open wrappaa x:n muutenkin).
+		var cx := PlanetGeom.wrap_x(ncx + dir.x, NW)
 		var cy := ncy + dir.y
-		if cx < 0 or cx >= NW or cy < 0 or cy >= NH:
+		if cy < 0 or cy >= NH:
 			continue
 		if world.nav.is_open(cx, cy):
 			return true
@@ -698,7 +698,8 @@ func _assign_miner(b: Bot) -> void:
 			continue  # varattu/muuttunut tallä kierroksella
 		if _cell_cooldown.has(key):
 			continue
-		var dist := absi(cell.x - bcx) + absi(cell.y - bcy)
+		# Manhattan-etaisyys; x-komponentti toroidaalinen (lyhin sauman yli).
+		var dist := int(absf(PlanetGeom.wrap_dx(float(bcx), float(cell.x), float(GW)))) + absi(cell.y - bcy)
 		# PEHMEA ruuhkasakko: toisen minerin kohteen viereinen solu (±1) on vahemman houkutteleva.
 		# Sakko vain kasvattaa etaisyytta -> jos KAIKKI kandidaatit ovat sakotettuja, lahin
 		# sakotettu valitaan silti (tyo ei koskaan pysahdy).
@@ -750,9 +751,9 @@ func _assign_hauler_dig(b: Bot) -> bool:
 		return false
 	var bcx := int(b.pos.x) / DCELL
 	var bcy := int(b.pos.y) / DCELL
-	# Jarjesta ehdokkaat etaisyyden mukaan (Manhattan soluina)
+	# Jarjesta ehdokkaat etaisyyden mukaan (Manhattan soluina); x-komponentti toroidaalinen.
 	var cand := dig_sites.duplicate()
-	cand.sort_custom(func(a, z): return (absi(a.x - bcx) + absi(a.y - bcy)) < (absi(z.x - bcx) + absi(z.y - bcy)))
+	cand.sort_custom(func(a, z): return (int(absf(PlanetGeom.wrap_dx(float(bcx), float(a.x), float(GW)))) + absi(a.y - bcy)) < (int(absf(PlanetGeom.wrap_dx(float(bcx), float(z.x), float(GW)))) + absi(z.y - bcy)))
 	var scans := 0
 	for cell in cand:
 		if scans >= MAX_PILE_SCANS:
@@ -810,7 +811,8 @@ func _assign_hauler_pickup(b: Bot) -> void:
 		var pos: Vector2 = pile["pos"]
 		# Korkea prioriteetti pienentaa tehollista etaisyytta (haetaan ensin).
 		var prio: int = int(z.get("priority", 0))
-		var metric := bpos.distance_to(pos) - float(prio) * 64.0
+		# Toroidaalinen etaisyys (x jaksollinen -> lyhin sauman yli).
+		var metric := PlanetGeom.torus_dist(bpos, pos, float(SIM_W)) - float(prio) * 64.0
 		# (Kerros 1) Ruuhkasakko: montako MUUTA hauleria on jo menossa tahan pickup-vyohykkeeseen.
 		# Kasvattaa tehollista etaisyytta -> haulerit hajautuvat eri vyohykkeille. Laske live per
 		# kutsu iteroimalla bots-listaa (n pieni) -> saman kierroksen aiemmat tyonannot nakyvat heti.
