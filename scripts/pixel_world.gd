@@ -1832,7 +1832,7 @@ func deposit_material(mat_id: int, px: int) -> void:
 		var gm := base_modules.active_module()
 		if gm != null and gm.req.has(mat_id):
 			var used := base_modules.add_fill(gm, mat_id, px)
-			if base_modules.is_complete(gm):
+			if gm.is_complete():
 				_complete_module(gm)
 			px -= used
 			if px <= 0:
