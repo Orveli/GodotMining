@@ -213,22 +213,29 @@ func add_bot(role: int, p: Vector2) -> Bot:
 #  Osto, roolinvaihto, upgrade, tilastot (A1 + A2 — API_CONTRACT_demo.md)
 # ============================================================
 
-# Seuraavan botin hinta: 25 * 1.25^(ostetut botit) — loiva kasvu tukee lauman skaalausta
-# (25, 31, 39, 49, 61, 76, ...). Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen
-# ostettu (3. botti) = 25.
-func next_bot_price() -> int:
-	return int(round(25.0 * pow(1.25, _bought_count)))
+# M2: Botti rakennetaan inventaarion IRON_ORE:sta rahan sijaan. Resepti kasvaa
+# rakennettujen bottien maaran (_bought_count) mukaan: cost_px = ceil(10 * 1.35^n).
+# Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen rakennettu (3. botti) = 10 px.
+# Progressio: 10, 14, 19, 26, 35, 47, ...
+func next_bot_cost() -> Dictionary:
+	var px := int(ceil(10.0 * pow(1.35, float(_bought_count))))
+	return { MAT_IRON_ORE: px }
 
 
-# Osta botti: tarkistaa hinnan world.moneya vasten, vahentaa rahan, spawnaa basesta.
-# true jos onnistui, false jos ei varaa tai basea ei ole.
-func buy_bot(role: int) -> bool:
+# Onko varaa rakentaa (world.inventory kattaa reseptin)?
+func can_build_bot() -> bool:
+	if world == null:
+		return false
+	return world.can_afford_materials(next_bot_cost())
+
+
+# Rakenna botti: kuluta materiaalit inventaariosta, spawnaa basesta. Korvaa vanhan
+# rahapohjaisen buy_bot():in. true jos onnistui, false jos ei varaa tai basea ei ole.
+func build_bot(role: int) -> bool:
 	if world == null or world.base == null or not is_instance_valid(world.base):
 		return false
-	var price := next_bot_price()
-	if world.money < price:
+	if not world.spend_materials(next_bot_cost()):
 		return false
-	world.money -= price
 	_bought_count += 1
 	add_bot(role, world.base.spawn_pos())
 	return true

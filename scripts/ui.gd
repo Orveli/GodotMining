@@ -65,6 +65,7 @@ const ICON_SPEED_4X := preload("res://assets/ui/icons/speed_4x.png")
 @onready var pixel_world: TextureRect = get_node("../../PixelWorld")
 
 const MAT_EMPTY := 0
+const MAT_IRON_ORE := 12   # M2: botti-reseptin rakennusaine
 # Roolit (bot.gd Role-enum: MINER=0, HAULER=1)
 const ROLE_MINER := 0
 const ROLE_HAULER := 1
@@ -155,6 +156,11 @@ var _base_popover_vb: VBoxContainer = null
 # Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
 # [{panel(=Button), price_label, cost_fn}]
 var _afford_items: Array = []
+
+# M2: materiaalipohjaiset botti-rakennuskohteet (IRON_ORE-resepti, ei rahaa).
+# Erillinen lista koska hehku/hinta luetaan bot_managerilta, ei rahasta.
+# [{panel(=Button), price_label}]
+var _bot_build_items: Array = []
 
 # ── Bottien tila maailmassa (diegeettinen overlay, Vaihe 4 kohta 10) ───────
 var bot_status_overlay: Control
@@ -614,10 +620,10 @@ func _build_bot_tray() -> void:
 	var buy_row := HBoxContainer.new()
 	buy_row.add_theme_constant_override("separation", 8)
 	vb.add_child(buy_row)
-	_add_tray_item(buy_row, ICON_BOT_MINER, "Osta Miner\nLouhii merkatut alueet",
-		_bot_price, _buy_bot.bind(ROLE_MINER))
-	_add_tray_item(buy_row, ICON_BOT_HAULER, "Osta Hauler\nKuljettaa saaliin baseen",
-		_bot_price, _buy_bot.bind(ROLE_HAULER))
+	_add_bot_build_item(buy_row, ICON_BOT_MINER, "Rakenna Miner\nLouhii merkatut alueet",
+		_buy_bot.bind(ROLE_MINER))
+	_add_bot_build_item(buy_row, ICON_BOT_HAULER, "Rakenna Hauler\nKuljettaa saaliin baseen",
+		_buy_bot.bind(ROLE_HAULER))
 
 	var role_row := HBoxContainer.new()
 	role_row.add_theme_constant_override("separation", 6)
@@ -1181,6 +1187,28 @@ func _add_tray_item(parent: Control, icon: Texture2D, tooltip: String,
 	_afford_items.append({ "panel": btn, "price_label": price_lbl, "cost_fn": cost_fn })
 
 
+# M2: botti-rakennuskohde. Hinta = next_bot_cost()[IRON_ORE] px, hehkuu amber kun
+# can_build_bot() on tosi. Ei rahaa -> ei _afford_items-listaan.
+func _add_bot_build_item(parent: Control, icon: Texture2D, tooltip: String,
+		on_click: Callable) -> void:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 2)
+	parent.add_child(vb)
+
+	var btn := _make_tool_button(icon, tooltip, 48.0)
+	btn.pressed.connect(on_click)
+	vb.add_child(btn)
+
+	var price_lbl := Label.new()
+	price_lbl.text = ""
+	price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	price_lbl.add_theme_font_size_override("font_size", 12)
+	price_lbl.add_theme_color_override("font_color", COL_MONEY)
+	vb.add_child(price_lbl)
+
+	_bot_build_items.append({ "panel": btn, "price_label": price_lbl })
+
+
 func _update_afford() -> void:
 	for it in _afford_items:
 		var c: int = int(it["cost_fn"].call())
@@ -1199,6 +1227,33 @@ func _update_afford() -> void:
 			else:
 				pl.add_theme_color_override("font_color", COL_BAD)
 				panel.modulate = Color(0.7, 0.7, 0.72)
+	_update_bot_build_items()
+
+
+# M2: paivita botti-rakennuskohteiden hinta (px) ja amber-hehku (can_build_bot).
+func _update_bot_build_items() -> void:
+	if _bot_build_items.is_empty():
+		return
+	var px := _bot_price()   # next_bot_cost()[IRON_ORE], -1 jos backend puuttuu
+	var can_build := _can_build_bot()
+	for it in _bot_build_items:
+		var pl: Label = it["price_label"]
+		var panel: Control = it["panel"]
+		if px < 0:
+			# Backend puuttuu -> harmaa, ei hintaa
+			pl.text = "—"
+			pl.add_theme_color_override("font_color", COL_DIM)
+			panel.modulate = Color(0.55, 0.55, 0.6)
+		elif can_build:
+			# Varaa on -> amber-hehku, kannustaa replikoimaan
+			pl.text = "%d rautaa" % px
+			pl.add_theme_color_override("font_color", COL_MONEY)
+			panel.modulate = COL_ACTIVE
+		else:
+			# Ei tarpeeksi rautaa -> himmea
+			pl.text = "%d rautaa" % px
+			pl.add_theme_color_override("font_color", COL_BAD)
+			panel.modulate = Color(0.7, 0.7, 0.72)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1225,28 +1280,37 @@ func _can_afford(cost: int) -> bool:
 	return int(pixel_world.money) >= cost
 
 
-# Botin hinta next_bot_price():stä; -1 jos backend puuttuu (nappi harmaana)
+# M2: Botin rautamäärä next_bot_cost()[IRON_ORE]:sta; -1 jos backend puuttuu (nappi harmaana)
 func _bot_price() -> int:
 	var bm := _bm()
-	if bm != null and bm.has_method("next_bot_price"):
-		return int(bm.next_bot_price())
+	if bm != null and bm.has_method("next_bot_cost"):
+		var recipe: Dictionary = bm.next_bot_cost()
+		return int(recipe.get(MAT_IRON_ORE, 0))
 	return -1
+
+
+# M2: onko varaa rakentaa botti (inventaarion IRON_ORE kattaa reseptin)?
+func _can_build_bot() -> bool:
+	var bm := _bm()
+	if bm != null and bm.has_method("can_build_bot"):
+		return bool(bm.can_build_bot())
+	return false
 
 
 func _buy_bot(role: int) -> void:
 	var bm := _bm()
-	if bm == null or not bm.has_method("buy_bot"):
+	if bm == null or not bm.has_method("build_bot"):
 		return
-	var price := _bot_price()
-	if price < 0:
+	var need := _bot_price()
+	if need < 0:
 		return
-	if not _can_afford(price):
-		# P1-2: sama "Ei varaa..." -toast kuin rakennuksilla (pixel_world._show_toast) — ei enaa
-		# hiljainen no-op. Osto onnistuu vain PLAYING/FREE_PLAYssa (input lukittu muissa tiloissa).
+	if not _can_build_bot():
+		# M2: ei tarpeeksi rautaa -> toast (ei hiljainen no-op). Osto onnistuu vain
+		# PLAYING/FREE_PLAYssa (input lukittu muissa tiloissa).
 		if pixel_world != null and pixel_world.has_method("_show_toast"):
-			pixel_world._show_toast("Ei varaa bottiin ($%d)" % price)
+			pixel_world._show_toast("Ei tarpeeksi rautaa (tarvitaan %d)" % need)
 		return
-	bm.buy_bot(role)
+	bm.build_bot(role)
 
 
 func _building_cost(key: String) -> int:

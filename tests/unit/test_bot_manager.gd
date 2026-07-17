@@ -67,6 +67,21 @@ class FakeWorld extends Node:
 		for mat_id in cargo:
 			deposit_material(int(mat_id), int(cargo[mat_id]))
 
+	# M2: reseptin (mat_id -> px) kattavuus inventaariosta.
+	func can_afford_materials(recipe: Dictionary) -> bool:
+		for mat_id in recipe:
+			if int(inventory.get(mat_id, 0)) < int(recipe[mat_id]):
+				return false
+		return true
+
+	# M2: atominen kulutus -- mitaan ei vahenneta jos ei kata koko reseptia.
+	func spend_materials(recipe: Dictionary) -> bool:
+		if not can_afford_materials(recipe):
+			return false
+		for mat_id in recipe:
+			inventory[mat_id] = int(inventory.get(mat_id, 0)) - int(recipe[mat_id])
+		return true
+
 	func mvp_write_pixel(x: int, y: int, mat: int) -> void:
 		if x < 0 or x >= SIM_W or y < 0 or y >= SIM_H:
 			return
@@ -299,40 +314,43 @@ func _test_blocked_reactivates_when_neighbor_opens() -> void:
 	_check(w.desig.get_cell(dx, dy) == D_QUEUED, "BLOCKED-solu reaktivoituu QUEUEDiksi (ei jumia)")
 
 
-# --- A1: Osto & nouseva hinta ------------------------------------------------
+# --- A1/M2: Rakennus & nouseva resepti ---------------------------------------
 
-# next_bot_price(): 25 * 1.25^n, n = ostetut (aloitus-2 ei laske).
-# buy_bot(): tarkistaa varan, vahentaa rahan, spawnaa world.base.spawn_pos():iin.
+# next_bot_cost(): { IRON_ORE: ceil(10 * 1.35^n) }, n = rakennetut (aloitus-2 ei laske).
+# build_bot(): tarkistaa inventaarion IRON_ORE:n, kuluttaa reseptin, spawnaa world.base.spawn_pos():iin.
+const MAT_IRON_ORE_T := 12
 func _test_buy_bot_price_and_spawn() -> void:
 	var w := _make_world()
 	var bm := BotManager.new()
 	bm.setup(w)
-	# Alkutila: 2 aloitusbottia EIVAT ole ostettuja -> ensimmainen osto on silti hinnalla 25.
+	# Alkutila: 2 aloitusbottia EIVAT ole rakennettuja -> ensimmainen resepti on silti 10 rautaa.
 	bm.add_bot(Bot.Role.MINER, Vector2(10, 10))
 	bm.add_bot(Bot.Role.HAULER, Vector2(20, 10))
-	_check(bm.next_bot_price() == 25, "ensimmaisen ostettavan botin hinta on 25 (aloitusbotit eivat kasvata), sai %d" % bm.next_bot_price())
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 10, "ensimmaisen rakennettavan botin hinta on 10 rautaa (aloitusbotit eivat kasvata), sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
 
-	# Ei varaa -> osto epaonnistuu, raha ja bottimaara ennallaan.
-	w.money = 24
+	# Ei varaa -> rakennus epaonnistuu, inventaario ja bottimaara ennallaan.
+	w.inventory[MAT_IRON_ORE_T] = 9
 	var before_count := bm.bot_count()
-	_check(bm.buy_bot(Bot.Role.MINER) == false, "buy_bot palauttaa false kun raha ei riita")
-	_check(bm.bot_count() == before_count, "epaonnistunut osto ei spawnaa bottia")
-	_check(w.money == 24, "epaonnistunut osto ei vahenna rahaa")
+	_check(bm.can_build_bot() == false, "can_build_bot() false kun rautaa ei riita")
+	_check(bm.build_bot(Bot.Role.MINER) == false, "build_bot palauttaa false kun rautaa ei riita")
+	_check(bm.bot_count() == before_count, "epaonnistunut rakennus ei spawnaa bottia")
+	_check(int(w.inventory.get(MAT_IRON_ORE_T, 0)) == 9, "epaonnistunut rakennus ei kuluta rautaa")
 
-	# Riittava raha -> osto onnistuu, raha vahenee, botti ilmestyy basen spawn_pos:iin.
-	w.money = 25
-	_check(bm.buy_bot(Bot.Role.MINER) == true, "buy_bot onnistuu kun raha riittaa")
-	_check(w.money == 0, "osto vahensi rahan tasan hinnan verran")
+	# Riittava rauta -> rakennus onnistuu, rauta kuluu, botti ilmestyy basen spawn_pos:iin.
+	w.inventory[MAT_IRON_ORE_T] = 10
+	_check(bm.can_build_bot() == true, "can_build_bot() true kun rautaa riittaa")
+	_check(bm.build_bot(Bot.Role.MINER) == true, "build_bot onnistuu kun rautaa riittaa")
+	_check(int(w.inventory.get(MAT_IRON_ORE_T, 0)) == 0, "rakennus kulutti raudan tasan reseptin verran")
 	_check(bm.bot_count() == before_count + 1, "botti lisattiin laumaan")
 	var spawned: Bot = bm.bots[bm.bots.size() - 1]
 	_check(spawned.pos.is_equal_approx(w.base.spawn_pos()), "uusi botti spawnasi basen spawn_pos:iin")
 
-	# Nouseva hinta: 2. ostettu botti (n=1) -> round(25*1.25) = 31.
-	_check(bm.next_bot_price() == 31, "toisen ostetun botin hinta nousee 31:een, sai %d" % bm.next_bot_price())
-	w.money = 31
-	_check(bm.buy_bot(Bot.Role.HAULER) == true, "toinen osto onnistuu 31:lla")
-	# 3. ostettu botti (n=2) -> round(25*1.25^2) = 39.
-	_check(bm.next_bot_price() == 39, "kolmannen ostetun botin hinta nousee 39:aan, sai %d" % bm.next_bot_price())
+	# Nouseva resepti: 2. rakennettu botti (n=1) -> ceil(10*1.35) = 14.
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 14, "toisen rakennetun botin hinta nousee 14:aan, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
+	w.inventory[MAT_IRON_ORE_T] = 14
+	_check(bm.build_bot(Bot.Role.HAULER) == true, "toinen rakennus onnistuu 14 raudalla")
+	# 3. rakennettu botti (n=2) -> ceil(10*1.35^2) = 19.
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 19, "kolmannen rakennetun botin hinta nousee 19:aan, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
 
 
 # --- A1: Roolinvaihto kesken tyon --------------------------------------------

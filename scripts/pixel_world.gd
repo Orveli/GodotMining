@@ -282,7 +282,8 @@ var _income_window: Array = []        # [{ "t": float, "d": float }] per-frame t
 var _income_time: float = 0.0         # kumulatiivinen aika income-ikkunalle
 var _income_last_total: int = 0       # edellisen framen money_exitien earned_total-summa
 const INCOME_WINDOW_S := 10.0         # liukuvan keskiarvon ikkuna
-# Aloitusraha: 2 aloitusbottia tuottaa ~3 $/s pinnalla; botti maksaa 300 -> eka osto ~2-3 min.
+# Aloitusraha: 0. M2: botit rakennetaan inventaarion IRON_ORE:sta (ei rahasta) -> eka
+# replikaatio (10 rautaa) < 1 min louhinnasta. Raha on toissijainen (myynti/unlockit/upgradet).
 const START_MONEY := 0
 # Demo-kaari: tier-valitavoitteet (milestone) + demo complete. Signaalit UI kuuntelee.
 signal milestone(text: String)
@@ -4886,17 +4887,32 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 			else:
 				sv_val = sell_from_inventory(sv_mat, step.get("px", -1))
 			print("ScenarioRunner: sell_inventory mat=%d arvo=%d money=%d" % [sv_mat, sv_val, money])
-		"buy_bot":
-			# Osta botteja skriptista (bot_manager.buy_bot). role 0=miner 1=hauler, count kpl.
+		"build_bot", "buy_bot":
+			# M2: rakenna botteja inventaarion IRON_ORE:sta (bot_manager.build_bot).
+			# role 0=miner 1=hauler, count kpl. "buy_bot" sailytetaan aliaksena (materiaalipohjainen).
 			var brole: int = step.get("role", 0)
 			var bcount: int = step.get("count", 1)
-			var bought := 0
+			var built := 0
 			if bot_manager != null:
 				for _i in bcount:
-					if bot_manager.buy_bot(brole):
-						bought += 1
-			print("ScenarioRunner: buy_bot role=%d pyydetty=%d ostettu=%d money=%d fleet=%d" % [
-				brole, bcount, bought, money, (bot_manager.bot_count() if bot_manager != null else 0)])
+					if bot_manager.build_bot(brole):
+						built += 1
+			print("ScenarioRunner: build_bot role=%d pyydetty=%d rakennettu=%d iron=%d fleet=%d" % [
+				brole, bcount, built, inventory_amount(MAT_IRON_ORE),
+				(bot_manager.bot_count() if bot_manager != null else 0)])
+		"assert_bot_cost":
+			# M2: assert seuraavan botin IRON_ORE-hinta valilla [min,max].
+			var bc_min: int = step.get("min", 0)
+			var bc_max: int = step.get("max", 999999)
+			var bc_label: String = step.get("label", "")
+			var bc_cost := 0
+			if bot_manager != null and bot_manager.has_method("next_bot_cost"):
+				bc_cost = int(bot_manager.next_bot_cost().get(MAT_IRON_ORE, 0))
+			if bc_cost >= bc_min and bc_cost <= bc_max:
+				print("ScenarioRunner: PASS  [%s] bot_cost=%d [%d, %d]" % [bc_label, bc_cost, bc_min, bc_max])
+			else:
+				print("ScenarioRunner: FAIL  [%s] bot_cost=%d, odotettu [%d, %d]" % [bc_label, bc_cost, bc_min, bc_max])
+				_scenario_failures += 1
 		"assert_fleet":
 			var fmin: int = step.get("min", 0)
 			var fmax: int = step.get("max", 999999)
