@@ -71,12 +71,16 @@ static func find_components_fast(grid: PackedByteArray, width: int, height: int,
 				var cx: int = ci % width
 				var cy: int = ci / width
 				component.append(Vector2i(cx, cy))
-				if cx > 0 and visited[ci - 1] == 0 and grid[ci - 1] == target_material:
-					visited[ci - 1] = 1
-					queue.append(ci - 1)
-				if cx < width - 1 and visited[ci + 1] == 0 and grid[ci + 1] == target_material:
-					visited[ci + 1] = 1
-					queue.append(ci + 1)
+				# PLANEETTA: x wrappaa toroidaalisesti -> x-naapuri on aina olemassa
+				# (sauman yli menevä kivi = yksi komponentti). y-rajat sailyvat.
+				var left_ci: int = cy * width + PlanetGeom.wrap_x(cx - 1, width)
+				if visited[left_ci] == 0 and grid[left_ci] == target_material:
+					visited[left_ci] = 1
+					queue.append(left_ci)
+				var right_ci: int = cy * width + PlanetGeom.wrap_x(cx + 1, width)
+				if visited[right_ci] == 0 and grid[right_ci] == target_material:
+					visited[right_ci] = 1
+					queue.append(right_ci)
 				if cy > 0 and visited[ci - width] == 0 and grid[ci - width] == target_material:
 					visited[ci - width] = 1
 					queue.append(ci - width)
@@ -104,9 +108,12 @@ static func find_components(grid: PackedByteArray, width: int, height: int, targ
 			if grid[idx] != target_material:
 				continue
 
-			# Vasen naapuri
-			if x > 0 and grid[idx - 1] == target_material:
-				uf.union(idx, idx - 1)
+			# Vasen naapuri — PLANEETTA: x wrappaa (x=0 vasen = width-1). Pelkka vasen+yla
+			# riittaa: jokainen vaakanaapuruus (a, a+1) tulee katetuksi kun a+1:n vasen
+			# osoittaa a:han, ja sauma (width-1, 0) kun x=0:n vasen osoittaa width-1:een.
+			var left_idx := row + PlanetGeom.wrap_x(x - 1, width)
+			if grid[left_idx] == target_material:
+				uf.union(idx, left_idx)
 			# Ylänaapuri
 			if y > 0 and grid[idx - width] == target_material:
 				uf.union(idx, idx - width)
@@ -131,6 +138,13 @@ static func find_components(grid: PackedByteArray, width: int, height: int, targ
 # pixels = kappaleen pikselit maailmakoordinaateissa
 # Palauttaa Array of Array[Vector2i] — jokainen on yksi yhtenäinen komponentti
 # Käyttää AABB-pohjaista flat PackedByteArray:ta Dictionary-haun sijaan (merkittävästi nopeampaa)
+#
+# PLANEETTA v1-RAJAUS: taman funktion paikallinen AABB (min_x..max_x) EI wrappaa. Sauman yli
+# menevä kappale saisi min_x=0, max_x=W-1 -> flat_w=W ja kaksi puolikasta AABB:n vastakkaisilla
+# reunoilla, jolloin ne nayttaisivat erillisilta komponenteilta. Skannaus (find_components_fast /
+# find_components) wrappaa oikein, mutta splittauksen AABB-malli olettaa ettei kappale ylitä saumaa.
+# Koska sauma on planeetan takapuolella (alusta keskella), rigid bodyt eivät synny sen lahella
+# normaalipelissa. Taysi toroidaalinen CCL (AABB-origon valinta kappaleen "aukosta") on myohempi tyo.
 static func check_connectivity(pixels: Array[Vector2i]) -> Array:
 	if pixels.is_empty():
 		return []

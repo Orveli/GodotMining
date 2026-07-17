@@ -29,8 +29,10 @@ const MAT_BEDROCK := 19  # Pohjakivi — tuhoamaton, worldgen kirjoittaa reunoih
 const MAT_COPPER := 20  # Kupari — malmi, syvyysvyöhyke keskisyvä
 const MAT_RARE_EARTH := 21  # Rare earth — harvinaisin ja arvokkain malmi, syvimmällä
 
-const SIM_WIDTH := 1664
-const SIM_HEIGHT := 960
+# Planeetta (SPEC_planet §2.2): x = kulma planeetan ympäri (wräppää saumassa),
+# y = syvyys kohti ydintä (ei wräppää). W parillinen (Margolus-invariantti).
+const SIM_WIDTH := 4096
+const SIM_HEIGHT := 448
 const TOTAL := SIM_WIDTH * SIM_HEIGHT
 const W := SIM_WIDTH
 
@@ -391,8 +393,32 @@ var zoom_index: int = 0  # Yhteensopivuus
 var zoom_level: float = 1.0
 var target_zoom: float = 1.0
 var camera_offset: Vector2 = Vector2.ZERO
-var cam_grid_pos: Vector2 = Vector2(832.0, 480.0)
+var cam_grid_pos: Vector2 = Vector2(2048.0, 224.0)
 var cam_vel: Vector2 = Vector2.ZERO
+
+# P6 (SPEC_planet): planeetan ohjaus. A/D pyörittää (planet_camera.angle), W/S liikkuu
+# säteittäin (radius_center), rulla zoomaa (zoom_level). Kulma-/syvyysnopeudet jaetaan
+# zoom_levelillä, jotta pinnan RUUTUnopeus pysyy samana zoomista riippumatta
+# (lähikuvassa hitaampi kulmanopeus). Arvot on säädetty karkeasti — lopullinen tuntuma
+# vaatii ikkunallisen testin (ROTATE_SPEED/DEPTH_SPEED, ks. SPEC §3/P6 riskit).
+const ROTATE_SPEED := 0.6          # rad/s zoom_level=1:llä (planeetan pyörimisnopeus)
+const DEPTH_SPEED := 520.0         # world-px/s zoom_level=1:llä (säteittäinen liike)
+const ZOOM_LEVEL_MIN := 1.0        # koko pallo ruudulla (whole_planet_zoom)
+const ZOOM_LEVEL_MAX := 10.0       # pinnan lähikuva
+const INTRO_ZOOM_LEVEL := 3.0      # laskeutumisintron/aloituksen lähikuvazoom
+
+# P5 (SPEC_planet): polaarirenderin scenepuu + kamera. WorldViewport renderöi
+# terrainin + overlayt grid-avaruudessa; PlanetView vääntää komposiitin polaariin.
+# planet_camera hoitaa hiiri<->grid-muunnokset ja shader-uniformit (P6 ohjaa kenttiä).
+var world_viewport: SubViewport
+var terrain_rect: TextureRect
+var planet_view: TextureRect
+var planet_camera: PlanetCamera
+var planet_warp_mat: ShaderMaterial
+# P6: laskeutumisintron kapseli piirretään ruutu-avaruudessa PlanetView'n päälle
+# (warp-shader näyttää r>r_surface aina taivaana -> grid-avaruuden kapseli ei näkyisi
+# avaruudessa). Node2D ei ole SubViewportissa, joten sen piirto on suoraa ruutupiirtoa.
+var _intro_overlay: Node2D
 
 # === SCENARIO RUNNER ===
 var _scenario_steps: Array = []
@@ -451,9 +477,29 @@ func _ready() -> void:
 	seed_image = Image.create_from_data(W, SIM_HEIGHT, false, Image.FORMAT_R8, color_seed)
 	seed_texture = ImageTexture.create_from_image(seed_image)
 
-	texture = grid_texture
+	# P5 (SPEC_planet §2.3): renderöinti kaksivaiheisena SubViewport-komposiittina.
+	# Terrain + kaikki overlayt renderöidään grid-avaruudessa (1:1, ei kameratransformia)
+	# WorldViewport-SubViewportiin, ja koko komposiitti väännetään KERRAN polaariin
+	# täysruutu-PlanetView'lla (planet_warp.gdshader). pixel_world ITSE ei enää piirrä
+	# maastoa; se pysyy pääikkunan viewportissa input-/logiikkasolmuna, jotta
+	# get_viewport().get_mouse_position() antaa ruutukoordinaatit (ks. _mouse_to_grid).
+	texture = null
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 
+	# Grid-avaruuden render target (koko = sim-ruudukko). UPDATE_ALWAYS: piirtyy joka
+	# frame myös ilman katsojaa (headless-savutesti ja ikkunallinen toimivat samoin).
+	world_viewport = SubViewport.new()
+	world_viewport.name = "WorldViewport"
+	world_viewport.size = Vector2i(W, SIM_HEIGHT)
+	world_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	world_viewport.transparent_bg = false
+	world_viewport.disable_3d = true
+	world_viewport.gui_disable_input = true
+	add_child(world_viewport)
+
+	# Terrain-TextureRect SubViewportin sisässä: grid-data + pixel_render-värjäys
+	# (fog, efektit) grid-avaruudessa. Materiaali on sama shader_mat kuin ennen —
+	# vain kohdesolmu vaihtui selfistä terrain_rectiin.
 	var shader := load("res://shaders/pixel_render.gdshader") as Shader
 	shader_mat = ShaderMaterial.new()
 	shader_mat.shader = shader
@@ -463,7 +509,17 @@ func _ready() -> void:
 	shader_mat.set_shader_parameter("mat_var", PALETTE_VAR_DEFAULT)
 	shader_mat.set_shader_parameter("impact_intensity", 0.0)
 	shader_mat.set_shader_parameter("screen_aspect", float(W) / float(SIM_HEIGHT))
-	material = shader_mat
+
+	terrain_rect = TextureRect.new()
+	terrain_rect.name = "TerrainRect"
+	terrain_rect.texture = grid_texture
+	terrain_rect.material = shader_mat
+	terrain_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	terrain_rect.position = Vector2.ZERO
+	terrain_rect.size = Vector2(W, SIM_HEIGHT)
+	terrain_rect.stretch_mode = TextureRect.STRETCH_SCALE
+	terrain_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	world_viewport.add_child(terrain_rect)
 
 	# Fog of war: alusta valokenttä ja kytke light_tex-uniform (päivitetään _process():ssa).
 	light_field = LightField.new()
@@ -473,10 +529,12 @@ func _ready() -> void:
 	# Fysiikkamoottori
 	physics_world = PhysicsWorld.new()
 
-	# Rakennuskerros (skaalataan grid → screen)
+	# Rakennuskerros — nyt SubViewportin sisässä grid-avaruudessa (scale=1). Overlay-
+	# piirto (botit, designaatio, esikatselu) pysyy grid-koordinaateissa ja vääntyy
+	# polaariin komposiitin mukana ilman erillistä muunnosta.
 	building_layer = Node2D.new()
 	building_layer.name = "BuildingLayer"
-	add_child(building_layer)
+	world_viewport.add_child(building_layer)
 
 	# Rakennuksen esikatselu
 	build_preview = BuildPreview.new()
@@ -504,6 +562,10 @@ func _ready() -> void:
 	bot_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # botti-spritet teravina
 	building_layer.add_child(bot_overlay)
 	bot_overlay.draw.connect(Callable(self, "_draw_bot_overlay"))
+
+	# P5: polaarikamera + PlanetView (täysruutu). Näyttää WorldViewportin komposiitin
+	# planet_warp-shaderilla. Luodaan overlayn jälkeen jotta ViewportTexture on valmis.
+	_setup_planet_view()
 
 	# Toast-ilmoitus (I-näppäin ja muut pikailmoitukset) — lisätään scene rootiin jotta
 	# näkyy kaiken päällä eikä clippaannu TextureRectin sisään
@@ -541,6 +603,52 @@ func _ready() -> void:
 	if should_show_title():
 		sim_speed = 0.0
 		input_locked = true
+
+
+# P5 (SPEC_planet): luo polaarikamera + PlanetView. WorldViewportin komposiitti
+# näytetään täysruutu-TextureRectillä planet_warp-shaderin läpi. PlanetView on
+# klikkiläpäisevä (MOUSE_FILTER_IGNORE) jotta input menee pixel_worldille. Kamera
+# alustetaan koko pallo -näkymään (radius_center=0, zoom=whole_planet); P6 ohjaa
+# angle/radius_center/zoom-kenttiä varsinaisessa ohjauksessa.
+func _setup_planet_view() -> void:
+	var vp_size := get_viewport_rect().size
+	planet_camera = PlanetCamera.new()
+	planet_camera.world_w = float(W)
+	planet_camera.world_h = float(SIM_HEIGHT)
+	planet_camera.screen_size = vp_size
+	planet_camera.angle = 0.0
+	planet_camera.radius_center = 0.0
+	planet_camera.zoom = planet_camera.whole_planet_zoom()
+
+	var warp_shader := load("res://shaders/planet_warp.gdshader") as Shader
+	planet_warp_mat = ShaderMaterial.new()
+	planet_warp_mat.shader = warp_shader
+	planet_warp_mat.set_shader_parameter("world_tex", world_viewport.get_texture())
+	planet_warp_mat.set_shader_parameter("core_color", Color(0.16, 0.13, 0.11))
+	planet_warp_mat.set_shader_parameter("sky_color", Color(0.02, 0.02, 0.05))
+	planet_camera.apply_to_shader(planet_warp_mat)
+
+	planet_view = TextureRect.new()
+	planet_view.name = "PlanetView"
+	planet_view.texture = world_viewport.get_texture()
+	planet_view.material = planet_warp_mat
+	planet_view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	planet_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Täysruutu ankkureilla (0,0..1,1): layout venyttää PlanetView'n ikkunan kokoiseksi.
+	# Ei erillistä size-asetusta (se ylikirjoittuisi layoutissa -> varoitus).
+	planet_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	planet_view.stretch_mode = TextureRect.STRETCH_SCALE
+	planet_view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	add_child(planet_view)
+
+	# P6: laskeutumisintron kapseli-overlay PlanetView'n päälle (ruutu-avaruus). Korkea
+	# z_index -> piirtyy polaarikuvan yli. Ei materiaalia (warp-shader EI saa vaikuttaa
+	# kapseliin). Piirto _draw_landing_capsule():ssa planet_camera.grid_to_screenillä.
+	_intro_overlay = Node2D.new()
+	_intro_overlay.name = "IntroOverlay"
+	_intro_overlay.z_index = 50
+	_intro_overlay.draw.connect(Callable(self, "_draw_landing_capsule"))
+	add_child(_intro_overlay)
 
 
 # Julkaisukehys (T3.1): näytetäänkö boottauksessa title-overlay? Ohitetaan (false):
@@ -1008,9 +1116,10 @@ func _process(delta: float) -> void:
 	# Vaihe 7: Rakennuksen esikatselu
 	_update_build_preview()
 
-	# Päivitä rakennuskerroksen skaalaus (grid → screen)
-	if building_layer and size.x > 0:
-		building_layer.scale = Vector2(size.x / float(W), size.y / float(SIM_HEIGHT))
+	# P5: rakennuskerros on nyt WorldViewportin sisässä grid-avaruudessa (1:1) — ei
+	# grid→screen-skaalausta. Polaarimuunnos tehdään komposiitille PlanetView'ssa.
+	if building_layer and building_layer.scale != Vector2.ONE:
+		building_layer.scale = Vector2.ONE
 
 
 func _handle_input(_delta: float) -> void:
@@ -1201,20 +1310,19 @@ func _handle_explosion_input(event: InputEvent) -> void:
 			explosion_size = maxi(explosion_size - 1, 0)
 			print("Räjähdyskoko: %d (r=%d)" % [explosion_size, EXPLOSION_RADII[explosion_size]])
 		elif not event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			target_zoom = clampf(target_zoom * 1.2, 1.0, 10.0)
+			target_zoom = clampf(target_zoom * 1.2, ZOOM_LEVEL_MIN, ZOOM_LEVEL_MAX)
 		elif not event.shift_pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			target_zoom = clampf(target_zoom / 1.2, 1.0, 10.0)
+			target_zoom = clampf(target_zoom / 1.2, ZOOM_LEVEL_MIN, ZOOM_LEVEL_MAX)
 
 
 func _mouse_to_grid() -> Vector2i:
-	var mp := get_local_mouse_position()
-	# TextureRect:n todellinen koko huomioiden stretch
-	var tex_size := size
-	var gx := int(mp.x / tex_size.x * W)
-	var gy := int(mp.y / tex_size.y * SIM_HEIGHT)
-	if gx < 0 or gx >= W or gy < 0 or gy >= SIM_HEIGHT:
+	# P5: hiiri -> grid delegoi planet_cameran käänteispolaariin. Käytetään pääikkunan
+	# GLOBAALIA hiiripositiota (ei get_local_mouse_positionia): pixel_world on pääikkunan
+	# viewportissa, joten get_viewport().get_mouse_position() antaa ruutupikselit joita
+	# PlanetView/planet_warp käyttää. Palauttaa (-1,-1) taivaalla/ytimessä.
+	if planet_camera == null:
 		return Vector2i(-1, -1)
-	return Vector2i(gx, gy)
+	return planet_camera.screen_to_grid(get_viewport().get_mouse_position())
 
 
 # Materiaalien suomenkieliset näyttönimet hover-inspektointiin (ui.gd:n oikean
@@ -1268,10 +1376,12 @@ func hovered_material_name() -> String:
 # tilapalkit) sijoittamiseen maailmakohteen viereen. UI-juuri (CanvasLayer "UI") ei käytä
 # Camera2D:ia eikä omaa skaalausta, joten globaali transformi vastaa suoraan ruutupikseleitä.
 func grid_to_screen(grid_pos: Vector2) -> Vector2:
-	if size.x <= 0.0 or size.y <= 0.0:
+	# P5: eteenpäin grid -> ruutu delegoi planet_cameralle (polaari). UI-popoverit
+	# (base/kone/vyöhyke) sijoittuvat oikeaan kohtaan pallon pinnalla. UI-juuri
+	# (CanvasLayer) ei skaalaa, joten planet_cameran ruutupikselit kelpaavat suoraan.
+	if planet_camera == null:
 		return grid_pos
-	var local := Vector2(grid_pos.x / float(W) * size.x, grid_pos.y / float(SIM_HEIGHT) * size.y)
-	return get_global_transform() * local
+	return planet_camera.grid_to_screen(grid_pos)
 
 
 # Kokoaa fog-of-war-valonlähteet: base, botit, koneet ja asetellut lamput.
@@ -1406,39 +1516,52 @@ func _update_camera(delta: float) -> void:
 		return
 	size = viewport_size
 
-	# WASD liikuttaa kameraa vapaasti aina
-	var spd := 300.0 / zoom_level
-	if Input.is_key_pressed(KEY_SHIFT): spd *= 3.0
-	var dir := Vector2.ZERO
-	if Input.is_key_pressed(KEY_A): dir.x -= 1.0
-	if Input.is_key_pressed(KEY_D): dir.x += 1.0
-	if Input.is_key_pressed(KEY_W): dir.y -= 1.0
-	if Input.is_key_pressed(KEY_S): dir.y += 1.0
-	cam_vel = cam_vel.lerp(dir * spd, 12.0 * delta)
-	cam_grid_pos += cam_vel * delta
-	cam_grid_pos.x = clampf(cam_grid_pos.x, 0.0, float(W))
-	cam_grid_pos.y = clampf(cam_grid_pos.y, 0.0, float(SIM_HEIGHT))
-
-	# Portaaton zoom — lerp kohti target_zoom
-	zoom_level = lerpf(zoom_level, target_zoom, 15.0 * delta)
-
-	if zoom_level <= 1.01 and target_zoom <= 1.01:
-		scale = Vector2.ONE
-		position = shake_offset
-		camera_offset = Vector2.ZERO
+	if planet_camera == null:
 		return
 
-	# Laske offset niin että cam_grid_pos on ruudun keskellä
-	var nx: float = cam_grid_pos.x / float(W)
-	var ny: float = cam_grid_pos.y / float(SIM_HEIGHT)
-	var ox: float = viewport_size.x * 0.5 - nx * viewport_size.x * zoom_level
-	var oy: float = viewport_size.y * 0.5 - ny * viewport_size.y * zoom_level
-	ox = clampf(ox, viewport_size.x - viewport_size.x * zoom_level, 0.0)
-	oy = clampf(oy, viewport_size.y - viewport_size.y * zoom_level, 0.0)
-	camera_offset = Vector2(ox, oy)
+	# P6: WASD-ohjaus. A/D pyörittää planeettaa (angle, wräppää TAU), W/S liikkuu
+	# säteittäin (radius_center, clamp [r_inner, r_surface]). Nopeudet jaetaan
+	# zoom_levelillä -> pinnan ruutunopeus pysyy samana zoomista riippumatta. Ei ajeta
+	# introssa (kamera kehystetty alustaan), overlay-lukossa eikä skenaariossa.
+	if not _intro_active and not input_locked and not _scenario_active:
+		var zdiv := maxf(zoom_level, 0.001)
+		var rot_dir := 0.0
+		if Input.is_key_pressed(KEY_D):
+			rot_dir += 1.0
+		if Input.is_key_pressed(KEY_A):
+			rot_dir -= 1.0
+		if rot_dir != 0.0:
+			planet_camera.angle = fposmod(planet_camera.angle + ROTATE_SPEED * delta * rot_dir / zdiv, TAU)
+		var depth_dir := 0.0
+		if Input.is_key_pressed(KEY_W):
+			depth_dir += 1.0   # kohti pintaa (radius_center kasvaa)
+		if Input.is_key_pressed(KEY_S):
+			depth_dir -= 1.0   # kohti ydintä (radius_center pienenee)
+		if depth_dir != 0.0:
+			var r_surf := PlanetGeom.r_surface(float(W))
+			var r_inner := r_surf - float(SIM_HEIGHT)
+			planet_camera.radius_center = clampf(
+				planet_camera.radius_center + DEPTH_SPEED * delta * depth_dir / zdiv,
+				r_inner, r_surf)
 
-	scale = Vector2(zoom_level, zoom_level)
-	position = camera_offset + shake_offset * zoom_level
+	# Portaaton zoom — lerp kohti target_zoom (sama tuntuma kuin ennen). Arvo ohjaa
+	# planet_cameran zoomia (ruutupx / world-px), EI tämän Controlin scalea.
+	# zoom_level=1 -> koko pallo (whole_planet_zoom), suuremmat -> lähikuva.
+	zoom_level = lerpf(zoom_level, target_zoom, 15.0 * delta)
+
+	planet_camera.screen_size = viewport_size
+	planet_camera.zoom = planet_camera.whole_planet_zoom() * zoom_level
+	planet_camera.apply_to_shader(planet_warp_mat)
+
+	# pixel_world itse pysyy identiteettitransformissa — polaarikuva piirretään
+	# PlanetView'ssa. Screenshake siirtää PlanetView'ta (ruutu-offset), ei sim-sisältöä.
+	scale = Vector2.ONE
+	position = Vector2.ZERO
+	camera_offset = Vector2.ZERO
+	if planet_view != null:
+		planet_view.position = shake_offset
+	if _intro_overlay != null:
+		_intro_overlay.position = shake_offset
 
 
 func add_trauma(amount: float) -> void:
@@ -1783,6 +1906,18 @@ func start_landing_intro() -> void:
 		return
 	# Kapseli laskeutuu botti-spawnpisteen kohdalle (siihen mihin botit paljastuvat).
 	var land := base.spawn_pos()
+	# P6: kehystä kamera alustan pinnan lähikuvaan. angle asetetaan niin että alustan
+	# sarake osoittaa ruudulla suoraan ylös (eff = -PI/2) -> kapseli putoaa pystysuoraan
+	# eikä kiertoa tarvita. radius_center alustan säteelle (pinta lähelle ruudun keskeä),
+	# zoom snapataan lähikuvaan (ei lerp-sisäänajoa introssa). Post-intro tämä jää myös
+	# pelaajan aloitusnäkymäksi (alusta ruudussa, valmis kaivamaan).
+	if planet_camera != null:
+		var r_surf := PlanetGeom.r_surface(float(W))
+		var theta_land := (land.x / float(W)) * TAU
+		planet_camera.angle = fposmod(theta_land + PI * 0.5, TAU)
+		planet_camera.radius_center = clampf(r_surf - land.y, r_surf - float(SIM_HEIGHT), r_surf)
+		zoom_level = INTRO_ZOOM_LEVEL
+		target_zoom = INTRO_ZOOM_LEVEL
 	_intro_land_y = land.y
 	_intro_capsule_pos = Vector2(land.x, land.y - INTRO_FALL_HEIGHT)
 	_intro_capsule_vel = 0.0
@@ -1793,6 +1928,8 @@ func start_landing_intro() -> void:
 	_intro_time = 0.0
 	if bot_overlay != null:
 		bot_overlay.queue_redraw()
+	if _intro_overlay != null:
+		_intro_overlay.queue_redraw()
 
 
 # Paivita laskeutumissekvenssi (kutsutaan _process():sta joka frame kun _intro_active).
@@ -1822,6 +1959,8 @@ func _update_landing_intro(delta: float) -> void:
 		return
 	if bot_overlay != null:
 		bot_overlay.queue_redraw()
+	if _intro_overlay != null:
+		_intro_overlay.queue_redraw()
 
 
 # Lopeta intro välittömästi (kutsutaan aukeamisen jalkeen TAI skip-klikkauksesta):
@@ -1839,6 +1978,8 @@ func _finish_landing_intro() -> void:
 	_bots_hidden = false
 	if bot_overlay != null:
 		bot_overlay.queue_redraw()
+	if _intro_overlay != null:
+		_intro_overlay.queue_redraw()
 
 
 # Pölyefekti laskeutumisiskussa: viuhkamainen purske GRAVEL/SAND-granulaareja
@@ -2598,6 +2739,9 @@ func _input(event: InputEvent) -> void:
 				if not _debug_hotkey_blocked():
 					load_world()
 			KEY_I: _save_ai_screenshot()
+			KEY_Z:
+				# P6: zoomaa ulos koko palloon (orientaatioapu polaarinäkymässä)
+				target_zoom = ZOOM_LEVEL_MIN
 
 
 # Julkaisukehys (T3.1): peruuttaa aktiivisen työkalutilan (sama logiikka kuin ennen
@@ -4620,38 +4764,42 @@ func _draw_bot_overlay() -> void:
 	# Botit — M5: intron aikana botit ovat piilossa kapselissa (paljastuvat kun kapseli aukeaa).
 	if bot_manager != null and not _bots_hidden:
 		bot_manager.draw_bots(bot_overlay)
-
-	# M5: laskeutumiskapseli (pelkkä overlay-piirto — ei grid-pikseleita).
-	if _intro_active:
-		_draw_landing_capsule()
+	# P6: laskeutumiskapseli EI enää piirry tähän (grid-avaruus warppautuisi taivaaseen);
+	# se piirretään _intro_overlaylle ruutu-avaruudessa, ks. _draw_landing_capsule().
 
 
-# M5: piirrä laskeutumiskapseli sim-pikselikoordinaateissa (bot_overlay-kankaalle,
-# jonka building_layer skaalaa grid->screen). Puhtaasti visuaalinen — ei kirjoita
-# gridiin, joten alustan STONE-perustus ja building_pixels-rekisteri pysyvat ehjina.
+# P6: piirrä laskeutumiskapseli RUUTU-avaruudessa (_intro_overlay, PlanetView'n päällä).
+# Kapselin grid-sijainti (_intro_capsule_pos, y voi olla pinnan yläpuolella = avaruus)
+# projisoidaan planet_camera.grid_to_screenillä ja mitat skaalataan zoomilla, jotta
+# kapseli näyttää tulevan avaruudesta alustalle. Intron kamera on kehystetty niin että
+# alustan sarake osoittaa ruudulla suoraan ylös -> kapseli putoaa pystysuoraan (ei
+# kiertoa). Puhtaasti visuaalinen — ei kirjoita gridiin.
 func _draw_landing_capsule() -> void:
-	if bot_overlay == null or not is_instance_valid(bot_overlay):
+	if not _intro_active:
 		return
-	var c := _intro_capsule_pos
-	# Jet-liekki putoamisen aikana (ei enää laskeutumisen jälkeen).
+	if _intro_overlay == null or not is_instance_valid(_intro_overlay) or planet_camera == null:
+		return
+	var c := planet_camera.grid_to_screen(_intro_capsule_pos)
+	var s := maxf(planet_camera.zoom, 0.001)   # world-px -> ruutu-px skaala
+	# Jet-liekki putoamisen aikana (osoittaa alaspäin pintaa kohti; ei laskeutumisen jälkeen).
 	if not _intro_landed:
 		var t := float(Time.get_ticks_msec()) / 1000.0
-		var flick := 5.0 + sin(t * 40.0) * 3.0
-		var fbase := c + Vector2(0.0, 9.0)
-		bot_overlay.draw_colored_polygon(PackedVector2Array([
-			fbase + Vector2(-3.0, 0.0), fbase + Vector2(3.0, 0.0),
+		var flick := (5.0 + sin(t * 40.0) * 3.0) * s
+		var fbase := c + Vector2(0.0, 9.0 * s)
+		_intro_overlay.draw_colored_polygon(PackedVector2Array([
+			fbase + Vector2(-3.0 * s, 0.0), fbase + Vector2(3.0 * s, 0.0),
 			fbase + Vector2(0.0, flick)]), Color(1.0, 0.55, 0.15, 0.85))
-		bot_overlay.draw_colored_polygon(PackedVector2Array([
-			fbase + Vector2(-1.5, 0.0), fbase + Vector2(1.5, 0.0),
+		_intro_overlay.draw_colored_polygon(PackedVector2Array([
+			fbase + Vector2(-1.5 * s, 0.0), fbase + Vector2(1.5 * s, 0.0),
 			fbase + Vector2(0.0, flick * 0.6)]), Color(1.0, 0.9, 0.5, 0.95))
 	# Runko: tumma reunus + teräskapseli + nokka + amber-jalasrivi + ikkunahehku.
-	bot_overlay.draw_rect(Rect2(c.x - 6.0, c.y - 9.0, 12.0, 18.0), Color(0.05, 0.05, 0.08, 0.95))
-	bot_overlay.draw_rect(Rect2(c.x - 5.0, c.y - 8.0, 10.0, 16.0), Color(0.22, 0.24, 0.30))
-	bot_overlay.draw_colored_polygon(PackedVector2Array([
-		c + Vector2(-5.0, -8.0), c + Vector2(5.0, -8.0), c + Vector2(0.0, -13.0)]),
+	_intro_overlay.draw_rect(Rect2(c.x - 6.0 * s, c.y - 9.0 * s, 12.0 * s, 18.0 * s), Color(0.05, 0.05, 0.08, 0.95))
+	_intro_overlay.draw_rect(Rect2(c.x - 5.0 * s, c.y - 8.0 * s, 10.0 * s, 16.0 * s), Color(0.22, 0.24, 0.30))
+	_intro_overlay.draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-5.0 * s, -8.0 * s), c + Vector2(5.0 * s, -8.0 * s), c + Vector2(0.0, -13.0 * s)]),
 		Color(0.30, 0.32, 0.38))
-	bot_overlay.draw_circle(c + Vector2(0.0, -2.0), 2.6, Color(0.95, 0.72, 0.28, 0.95))
-	bot_overlay.draw_rect(Rect2(c.x - 5.0, c.y + 6.0, 10.0, 2.0), Color(0.88, 0.66, 0.25))
+	_intro_overlay.draw_circle(c + Vector2(0.0, -2.0 * s), 2.6 * s, Color(0.95, 0.72, 0.28, 0.95))
+	_intro_overlay.draw_rect(Rect2(c.x - 5.0 * s, c.y + 6.0 * s, 10.0 * s, 2.0 * s), Color(0.88, 0.66, 0.25))
 
 
 func _save_debug_image(path: String) -> void:
@@ -5484,10 +5632,12 @@ func _step_cpu_ca() -> void:
 	if _ca_bounds.size.x <= 0 or _ca_bounds.size.y <= 0:
 		return
 	# Rajaa iterointi aktiiviselle alueelle (skenaarioissa muu grid on tyhjaa) — muuten koko
-	# 1664x960 skannaus GDScriptissa olisi liian hidas (~1 fps). Kasitellaan alhaalta ylos, jotta
+	# 4096x448 skannaus GDScriptissa olisi liian hidas (~1 fps). Kasitellaan alhaalta ylos, jotta
 	# kukin solu liikkuu korkeintaan yhden askeleen/frame. Vuorotellaan vaakaskannaus symmetrian vuoksi.
-	var x_lo: int = maxi(_ca_bounds.position.x, 1)                       # x-1 pysyy rajoissa
-	var x_hi: int = mini(_ca_bounds.position.x + _ca_bounds.size.x, W - 1)  # exclusive; x+1 pysyy rajoissa
+	# Planeetta: x-naapurit wräppäävät saumassa (PlanetGeom.wrap_x) — peilaa simulation.glsl:aa.
+	# y-rajat sailyvat (below-rivi pysyy [0,SIM_HEIGHT) sisalla).
+	var x_lo: int = maxi(_ca_bounds.position.x, 0)                       # sallii saumasolun x=0
+	var x_hi: int = mini(_ca_bounds.position.x + _ca_bounds.size.x, W)   # exclusive; sallii saumasolun x=W-1
 	var y_lo: int = maxi(_ca_bounds.position.y, 0)
 	var y_hi: int = mini(_ca_bounds.position.y + _ca_bounds.size.y, SIM_HEIGHT - 1)  # exclusive; below pysyy rajoissa
 	if x_lo >= x_hi or y_lo >= y_hi:
@@ -5496,6 +5646,7 @@ func _step_cpu_ca() -> void:
 	var y := y_hi - 1
 	while y >= y_lo:
 		var row := y * W
+		var below_row := row + W
 		var xs := -1 if flip else 1
 		var x := (x_hi - 1) if flip else x_lo
 		var x_end := (x_lo - 1) if flip else x_hi
@@ -5509,25 +5660,32 @@ func _step_cpu_ca() -> void:
 				or mat == MAT_COPPER or mat == MAT_RARE_EARTH
 			var liquid := mat == MAT_WATER or mat == MAT_OIL
 			if granular or liquid:
-				var below := idx + W
+				# x-naapurit wräppäävät saumassa (x=0:n vasen = W-1 jne.)
+				var xl := PlanetGeom.wrap_x(x - 1, W)
+				var xr := PlanetGeom.wrap_x(x + 1, W)
+				var below := below_row + x
 				if grid[below] == MAT_EMPTY:
 					_ca_move(idx, below)
 				else:
-					var dl_ok := grid[below - 1] == MAT_EMPTY
-					var dr_ok := grid[below + 1] == MAT_EMPTY
+					var below_l := below_row + xl
+					var below_r := below_row + xr
+					var dl_ok := grid[below_l] == MAT_EMPTY
+					var dr_ok := grid[below_r] == MAT_EMPTY
 					if dl_ok or dr_ok:
 						var go_left := dl_ok
 						if dl_ok and dr_ok:
 							go_left = (randi() & 1) == 0
-						_ca_move(idx, below - 1 if go_left else below + 1)
+						_ca_move(idx, below_l if go_left else below_r)
 					elif liquid:
-						var l_ok := grid[idx - 1] == MAT_EMPTY
-						var r_ok := grid[idx + 1] == MAT_EMPTY
+						var side_l := row + xl
+						var side_r := row + xr
+						var l_ok := grid[side_l] == MAT_EMPTY
+						var r_ok := grid[side_r] == MAT_EMPTY
 						if l_ok or r_ok:
 							var left2 := l_ok
 							if l_ok and r_ok:
 								left2 = (randi() & 1) == 0
-							_ca_move(idx, idx - 1 if left2 else idx + 1)
+							_ca_move(idx, side_l if left2 else side_r)
 			x += xs
 		y -= 1
 

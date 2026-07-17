@@ -47,6 +47,10 @@ const uint RARE_EARTH  = 21u;  // Rare earth -malmi — putoava jauhe, pysyy kiv
 
 uint get_mat(uint cell) { return cell & 0xFFu; }
 
+// Planet: x wraps around the seam (x=0 and x=W-1 are neighbors). y does NOT wrap.
+// Use this for every x-neighbor index; y-bounds (y < max_y, y > 0u) still apply.
+uint wrap_x(int x) { int w = int(p.width); return uint(((x % w) + w) % w); }
+
 uint hash(uint x) {
     x ^= x >> 17u;
     x *= 0xbf58476du;
@@ -191,7 +195,7 @@ void main() {
     bool coin = (rng & 1u) != 0u;
     int dir = coin ? 1 : -1;
 
-    uint max_x = p.width - 1u;
+    // x-neighbors wrap over the seam (wrap_x); only y-bounds remain.
     uint max_y = p.height - 1u;
 
     // Gravity gun -veto hoidetaan CPU:lla (_pull_pixels) — GPU:lla vain HELD-skipataan yllä
@@ -213,11 +217,11 @@ void main() {
             }
         }
 
-        // Diagonaali alas
+        // Diagonaali alas (x wraps over the seam)
         for (int attempt = 0; attempt < 2; attempt++) {
             int dx = (attempt == 0) ? dir : -dir;
-            uint nx = x + uint(dx);
-            if (nx <= max_x && y < max_y) {
+            uint nx = wrap_x(int(x) + dx);
+            if (y < max_y) {
                 uint diag_idx = (y + 1u) * p.width + nx;
                 uint diag_cell = grid.cells[diag_idx];
                 uint diag_mat = get_mat(diag_cell);
@@ -245,12 +249,12 @@ void main() {
             }
         }
 
-        // Diagonaali alas (vain tyhjään) — signed aritmetiikka
+        // Diagonaali alas (vain tyhjään) — x wraps over the seam
         for (int attempt = 0; attempt < 2; attempt++) {
             int dx = (attempt == 0) ? dir : -dir;
-            int nx_s = int(x) + dx;
-            if (nx_s >= 0 && uint(nx_s) <= max_x && y < max_y) {
-                uint diag_idx = (y + 1u) * p.width + uint(nx_s);
+            uint nx = wrap_x(int(x) + dx);
+            if (y < max_y) {
+                uint diag_idx = (y + 1u) * p.width + nx;
                 uint diag_cell = grid.cells[diag_idx];
                 if (get_mat(diag_cell) == EMPTY) {
                     if (try_atomic_move(idx, diag_idx, my_cell, diag_cell)) return;
@@ -288,11 +292,11 @@ void main() {
             }
         }
 
-        // Diag alas
+        // Diag alas (x wraps over the seam)
         for (int attempt = 0; attempt < 2; attempt++) {
             int dx = (attempt == 0) ? dir : -dir;
-            uint nx = x + uint(dx);
-            if (nx <= max_x && y < max_y) {
+            uint nx = wrap_x(int(x) + dx);
+            if (y < max_y) {
                 uint diag_idx = (y + 1u) * p.width + nx;
                 uint diag_cell = grid.cells[diag_idx];
                 if (get_mat(diag_cell) == EMPTY) {
@@ -302,11 +306,11 @@ void main() {
         }
 
         // Sivulle (nesteet leviävät) — neste skannaa oman nestetyyppinsä läpi löytääkseen reunan
+        // Spread wraps over the seam (x-modulo). Keep break on foreign material so the
+        // ring-scan still stops at an obstacle instead of looping the whole planet.
         uint spread = (mat == WATER) ? p.width : (mat == OIL) ? p.width / 2u : 2u;
         for (uint i = 1u; i <= spread; i++) {
-            int nx_s = int(x) + dir * int(i);
-            if (nx_s < 0 || uint(nx_s) > max_x) break;
-            uint nx = uint(nx_s);
+            uint nx = wrap_x(int(x) + dir * int(i));
             uint side_idx = y * p.width + nx;
             uint side_cell = grid.cells[side_idx];
             uint side_mat = get_mat(side_cell);
@@ -318,9 +322,7 @@ void main() {
             // sama nestelaji: jatka skannausta
         }
         for (uint i = 1u; i <= spread; i++) {
-            int nx_s = int(x) - dir * int(i);
-            if (nx_s < 0 || uint(nx_s) > max_x) break;
-            uint nx = uint(nx_s);
+            uint nx = wrap_x(int(x) - dir * int(i));
             uint side_idx = y * p.width + nx;
             uint side_cell = grid.cells[side_idx];
             uint side_mat = get_mat(side_cell);
@@ -342,26 +344,24 @@ void main() {
             return;
         }
 
-        // Nousee ylöspäin
+        // Nousee ylöspäin (x wraps over the seam)
         if (y > 0u) {
-            int fx = int(x) + int(rng % 3u) - 1;
-            if (fx >= 0 && uint(fx) <= max_x) {
-                uint up_idx = (y - 1u) * p.width + uint(fx);
-                uint up_cell = grid.cells[up_idx];
-                if (get_mat(up_cell) == EMPTY) {
-                    try_atomic_move(idx, up_idx, my_cell, up_cell);
-                }
+            uint fx = wrap_x(int(x) + int(rng % 3u) - 1);
+            uint up_idx = (y - 1u) * p.width + fx;
+            uint up_cell = grid.cells[up_idx];
+            if (get_mat(up_cell) == EMPTY) {
+                try_atomic_move(idx, up_idx, my_cell, up_cell);
             }
         }
 
-        // Sytytä naapurit
+        // Sytytä naapurit (x wraps over the seam)
         uint rng3 = hash(rng + 300u);
         for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
-                int nx = int(x) + dx;
+                uint nx = wrap_x(int(x) + dx);
                 int ny = int(y) + dy;
-                if (nx >= 0 && uint(nx) <= max_x && ny >= 0 && uint(ny) <= max_y) {
-                    uint nidx = uint(ny) * p.width + uint(nx);
+                if (ny >= 0 && uint(ny) <= max_y) {
+                    uint nidx = uint(ny) * p.width + nx;
                     uint ncell = grid.cells[nidx];
                     uint nmat = get_mat(ncell);
 
@@ -396,26 +396,22 @@ void main() {
             return;
         }
 
-        // Nousee ylöspäin
+        // Nousee ylöspäin (x wraps over the seam)
         if (y > 0u) {
-            int sx = int(x) + int(rng % 3u) - 1;
-            if (sx >= 0 && uint(sx) <= max_x) {
-                uint up_idx = (y - 1u) * p.width + uint(sx);
-                uint up_cell = grid.cells[up_idx];
-                if (get_mat(up_cell) == EMPTY) {
-                    if (try_atomic_move(idx, up_idx, my_cell, up_cell)) return;
-                }
+            uint sx = wrap_x(int(x) + int(rng % 3u) - 1);
+            uint up_idx = (y - 1u) * p.width + sx;
+            uint up_cell = grid.cells[up_idx];
+            if (get_mat(up_cell) == EMPTY) {
+                if (try_atomic_move(idx, up_idx, my_cell, up_cell)) return;
             }
         }
 
-        // Sivulle — signed aritmetiikka
-        int snx_s = int(x) + dir;
-        if (snx_s >= 0 && uint(snx_s) <= max_x) {
-            uint side_idx = y * p.width + uint(snx_s);
-            uint side_cell = grid.cells[side_idx];
-            if (get_mat(side_cell) == EMPTY) {
-                try_atomic_move(idx, side_idx, my_cell, side_cell);
-            }
+        // Sivulle (x wraps over the seam)
+        uint snx = wrap_x(int(x) + dir);
+        uint side_idx = y * p.width + snx;
+        uint side_cell = grid.cells[side_idx];
+        if (get_mat(side_cell) == EMPTY) {
+            try_atomic_move(idx, side_idx, my_cell, side_cell);
         }
         return;
     }

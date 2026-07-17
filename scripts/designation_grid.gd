@@ -1,17 +1,18 @@
 # scripts/designation_grid.gd
 # Karkea designaatiogridi: pelaaja maalaa louhittavia alueita, botit varaavat ja louhivat.
 # Yksi solu = 16x16 px (vastaa navigaatiogridin solua 1:1 -> saavutettavuus yksinkertaistuu:
-# designaatiosolu = navsolu, joten "onko OPEN-naapuri" on suora navvertailu). Grid 104x60 = 6240 solua.
-# Yksi tavu per solu -> ~6 KB, ladattavissa kokonaan overlay-piirtoon.
+# designaatiosolu = navsolu, joten "onko OPEN-naapuri" on suora navvertailu). Grid 256x28 = 7168 solua.
+# Yksi tavu per solu -> ~7 KB, ladattavissa kokonaan overlay-piirtoon.
+# Planeetta: x-akseli jaksollinen (sauma x=0 <-> x=GW-1); get/set/paint wrapaavat x:ssa, y ei.
 class_name DesignationGrid
 extends RefCounted
 
 const CELL := 16           # solun sivu pikseleina
-const GW := 104            # soluja leveyssuunnassa (104*16 = 1664 px)
-const GH := 60             # soluja korkeussuunnassa (60*16 = 960 px)
+const GW := 256            # soluja leveyssuunnassa (256*16 = 4096 px); x wrappaa sauman yli
+const GH := 28             # soluja korkeussuunnassa (28*16 = 448 px); y ei wrappaa
 
-const PX_W := GW * CELL    # 1664 — designoitavan alueen leveys pikseleina
-const PX_H := GH * CELL    # 960  — designoitavan alueen korkeus pikseleina
+const PX_W := GW * CELL    # 4096 — designoitavan alueen leveys pikseleina
+const PX_H := GH * CELL    # 448  — designoitavan alueen korkeus pikseleina
 
 # Solun tilat. Numerointi lukittu rajapintakontraktiin.
 enum { D_NONE = 0, D_QUEUED = 1, D_BLOCKED = 2, D_CLAIMED = 3, D_MINING = 4 }
@@ -32,17 +33,20 @@ func _init() -> void:
 
 
 func get_cell(dx: int, dy: int) -> int:
-	# Rajojen ulkopuoli tulkitaan tyhjaksi (D_NONE), ei kaadu.
-	if dx < 0 or dx >= GW or dy < 0 or dy >= GH:
+	# x wrappaa (jaksollinen); y-rajojen ulkopuoli tulkitaan tyhjaksi (D_NONE), ei kaadu.
+	if dy < 0 or dy >= GH:
 		return D_NONE
+	dx = PlanetGeom.wrap_x(dx, GW)
 	return cells[dy * GW + dx]
 
 
 func set_cell(dx: int, dy: int, v: int) -> void:
-	# Aseta yksittaisen solun tila. Ei tee mitaan jos koordinaatti on rajojen ulkopuolella
+	# Aseta yksittaisen solun tila. Ei tee mitaan jos y on rajojen ulkopuolella
 	# tai arvo ei muutu (talloin `version` ei myoskaan kasva -> ei turhia overlay-redrawta).
-	if dx < 0 or dx >= GW or dy < 0 or dy >= GH:
+	# x wrappaa (jaksollinen).
+	if dy < 0 or dy >= GH:
 		return
+	dx = PlanetGeom.wrap_x(dx, GW)
 	var idx := dy * GW + dx
 	if cells[idx] == v:
 		return
@@ -66,21 +70,27 @@ func paint_px_rect(r: Rect2i, add: bool, mineable_check: Callable = Callable()) 
 	var px1 := r.position.x + r.size.x - 1
 	var py1 := r.position.y + r.size.y - 1
 
-	# Kokonaan gridin ulkopuolella oleva suorakulmio ei tee mitaan.
-	if px1 < 0 or py1 < 0 or px0 >= PX_W or py0 >= PX_H:
+	# Vain y rajaa; x wrappaa (sauman yli vedetyt kaivuulaatikot sallitaan).
+	if py1 < 0 or py0 >= PX_H:
 		return
 
-	# Pikselit -> solut, clampattuna gridin sisalle. Kokonaislukujako katkaisee kohti
-	# nollaa; clampi hoitaa negatiiviset ja ylivuodot oikein.
-	var cx0 := clampi(px0 / CELL, 0, GW - 1)
 	var cy0 := clampi(py0 / CELL, 0, GH - 1)
-	var cx1 := clampi(px1 / CELL, 0, GW - 1)
 	var cy1 := clampi(py1 / CELL, 0, GH - 1)
+
+	# x-solujen span voi olla negatiivinen tai >= GW ennen wrappia; floori sietaa negatiivit.
+	# Sauman yli vedettaessa iteroidaan wrapaten (cx = wrap_x(ccx, GW)).
+	var ccx0 := floori(float(px0) / float(CELL))
+	var ccx1 := floori(float(px1) / float(CELL))
+	# Jos veto peittaa koko renkaan, rajaa yhteen kierrokseen (ei paallekkaista maalausta).
+	if ccx1 - ccx0 >= GW - 1:
+		ccx0 = 0
+		ccx1 = GW - 1
 
 	var changed := false
 	for cy in range(cy0, cy1 + 1):
 		var row := cy * GW
-		for cx in range(cx0, cx1 + 1):
+		for ccx in range(ccx0, ccx1 + 1):
+			var cx := PlanetGeom.wrap_x(ccx, GW)
 			var idx := row + cx
 			if add:
 				if cells[idx] == D_NONE and (not mineable_check.is_valid() or mineable_check.call(cx, cy)):
@@ -102,7 +112,7 @@ func cell_px_rect(dx: int, dy: int) -> Rect2i:
 
 func any_active() -> bool:
 	# True jos yksikin solu on muussa kuin D_NONE-tilassa. Skannaus katkeaa
-	# ensimmaiseen aktiiviseen soluun (nopea yleistapaus) — worst case ~6240 tavua.
+	# ensimmaiseen aktiiviseen soluun (nopea yleistapaus) — worst case ~7168 tavua.
 	for i in cells.size():
 		if cells[i] != D_NONE:
 			return true

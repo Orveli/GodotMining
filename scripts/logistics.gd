@@ -220,7 +220,9 @@ func choose_dump(cargo: Dictionary, from_px: Vector2) -> Dictionary:
 			continue
 		var rect: Rect2i = z["rect"]
 		var center := _rect_center(rect)
-		var dist := from_px.distance_squared_to(center)
+		# Planeetta: x jaksollinen -> toroidaalinen etaisyys (lyhin sauman yli).
+		# torus_dist on lineaarinen (ei nelio), mutta tie-break-jarjestys sailyy monotonisena.
+		var dist := PlanetGeom.torus_dist(from_px, center, float(NavGrid.SIM_W))
 		# Ensisijaisesti suurin hyvaksytty osuus, tie-break lyhin etaisyys.
 		if acc > best_accepted or (acc == best_accepted and dist < best_dist):
 			best = {
