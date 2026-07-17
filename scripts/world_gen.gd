@@ -421,10 +421,9 @@ static func _carve_circle(grid: PackedByteArray, w: int, h: int,
 		for dx in range(-radius, radius + 1):
 			if dx * dx + dy * dy > radius * radius:
 				continue
-			var px := cx + dx
+			# x wräppää sauman yli (sylinteri); ympyrätarkistus offsetista (dx,dy).
+			var px := _wrap_x(cx + dx, w)
 			var py := cy + dy
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
 			if py < 0 or py >= h:
 				continue
 			var pidx := py * w + px
@@ -532,10 +531,9 @@ static func _place_single_deposit(grid: PackedByteArray, w: int, h: int,
 	var scan := r + 4
 	for dy in range(-scan, scan + 1):
 		for dx in range(-scan, scan + 1):
-			var px := cx + dx
+			# x wräppää sauman yli (sylinteri); etäisyys lasketaan offsetista.
+			var px := _wrap_x(cx + dx, w)
 			var py := cy + dy
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
 			if py < 0 or py >= h:
 				continue
 			var pidx := py * w + px
@@ -679,10 +677,10 @@ static func _place_deposit_set(grid: PackedByteArray, w: int, h: int,
 		var scan := int(maxf(ax, ay)) + 6
 		for dy in range(-scan, scan + 1):
 			for dx in range(-scan, scan + 1):
-				var px := cx + dx
+				# x wräppää sauman yli (sylinteri); elliptinen etäisyys lasketaan
+				# offsetista (dx,dy), joten wräppäys ei vääristä muotoa.
+				var px := _wrap_x(cx + dx, w)
 				var py := cy + dy
-				if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-					continue
 				if py < 0 or py >= h:
 					continue
 				var pidx := py * w + px
@@ -768,13 +766,14 @@ static func _walk_vein(grid: PackedByteArray, w: int, h: int,
 		cx += cos(heading)
 		cy += sin(heading)
 
-		# Clamp reunoihin — lopeta jos suoni ajautuu reunan tai pohjan ulkopuolelle
-		if cx < float(EDGE_THICKNESS + 2) or cx >= float(w - EDGE_THICKNESS - 2):
-			break
+		# x wräppää sauman yli (sylinterimaailma) — suoni jatkuu ehjänä molemmin
+		# puolin saumaa, ei katkea reunaan. y ei wräppää.
+		cx = fposmod(cx, float(w))
+		# Lopeta jos suoni saavuttaa pinnan yläpuolen tai pohjan/ytimen.
 		if cy < 0.0 or cy >= float(h - EDGE_THICKNESS - 2):
 			break
-		# Lopeta bedrockissa
-		if grid[int(cy) * w + int(cx)] == MAT_BEDROCK:
+		# Lopeta bedrockissa (ydinrengas tai pohja)
+		if grid[int(cy) * w + _wrap_x(int(cx), w)] == MAT_BEDROCK:
 			break
 
 
@@ -791,14 +790,15 @@ static func _carve_vein_disc(grid: PackedByteArray, w: int, h: int,
 		if py < 0 or py >= h:
 			continue
 		for dx in range(-scan, scan + 1):
-			var px := icx + dx
-			if px < EDGE_THICKNESS or px >= w - EDGE_THICKNESS:
-				continue
+			# x wräppää sauman yli (sylinteri); vain indeksointi wräpätään.
+			var px := _wrap_x(icx + dx, w)
 			var pidx := py * w + px
 			if grid[pidx] != MAT_STONE:
 				continue
 
-			var fdx := float(px) - cx
+			# Etäisyys lasketaan wräppäämättömästä paikallisesta offsetista
+			# (icx+dx), jotta sauman yli osuvat solut saavat oikean etäisyyden.
+			var fdx := float(icx + dx) - cx
 			var fdy := float(py) - cy
 			var dist := sqrt(fdx * fdx + fdy * fdy)
 
