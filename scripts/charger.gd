@@ -1,7 +1,8 @@
 # Latauspaikan datamalli (M3 - SPEC_seed_ship). RefCounted-data jonka BotManager omistaa
 # (bot_manager.chargers). Yksi Charger tarjoaa yhden tai useamman slotin (dokkauspisteen).
 # coal_buffer antaa hiilibuustin (6x nopeampi lataus); tyhjana slotti lataa ilmaisella
-# trickle-tahdilla. M4:n latausrivisto-moduuli kasvattaa slot_countia (CHARGER_BUILT_SLOTS).
+# trickle-tahdilla. M4:n latausrivisto-moduuli luo UUDEN Chargerin (CHARGER_BUILT_SLOTS
+# slottia + yhta monta dokkauspistetta) — olemassa olevan slot_countia ei kasvateta.
 # ASCII-only-kommentit (bottisim-tiedosto).
 class_name Charger
 extends RefCounted

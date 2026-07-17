@@ -942,8 +942,9 @@ func _st_carry(b: Bot, delta: float) -> void:
 # Kerros 3: AJALLINEN dumppi. Kuorma purkautuu DUMP_RATE * _crowd_factor px/s tahtiin
 # (ruuhkainen dropoff hidastuu -> ruuhka maksaa oikeasti). Joka tikilla sijoitetaan enintaan
 # int(work_accum) px kohteeseen; kun kohde tayttyy tai kuorma tyhjenee, dump paattyy.
-# SAILYVYYSINVARIANTTI (joka polku): jokainen kuorma-px joko kirjoitetaan maailmaan TAI myydaan
-# accept_cargo:lla — kuormaa ei koskaan kadoteta eika tuplata.
+# SAILYVYYSINVARIANTTI (joka polku): jokainen kuorma-px joko kirjoitetaan maailmaan TAI
+# reititetaan world.deposit_cargo():lla (SELL -> raha, STORE -> inventaario, moduulin fill)
+# — kuormaa ei koskaan kadoteta eika tuplata.
 func _st_dump(b: Bot, delta: float) -> void:
 	# Turvavahti ENSIN: dump ei saa kestaa loputtomiin (esim. kohde jumissa) -> myy jaljella
 	# oleva kuorma baseen, siivoa ja palaa IDLEen. DUMP_MAX_TIME mitoitettu niin etta taysi

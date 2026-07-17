@@ -303,11 +303,11 @@ var _peak_iron_ore: int = 0           # inventory piti joskus >= tama (moduuli 2
 # Logistiikan datamalli (pickup/dump/base-filtteri). bot_manager poimii taman
 # world.get("logistics"):lla. Luodaan _init_bot_sim():ssa ennen bot_manager.setupia.
 var logistics: Logistics
-# Tulomittari: 10 s liukuva keskiarvo money_exitien earned_total-deltasta (UI:n $/s).
+# Tulomittari: 10 s liukuva keskiarvo total_revenue-deltasta (UI:n $/s; vain myyntitulot).
 var income_per_s: float = 0.0
 var _income_window: Array = []        # [{ "t": float, "d": float }] per-frame tulodeltat
 var _income_time: float = 0.0         # kumulatiivinen aika income-ikkunalle
-var _income_last_total: int = 0       # edellisen framen money_exitien earned_total-summa
+var _income_last_total: int = 0       # edellisen framen total_revenue-arvo
 const INCOME_WINDOW_S := 10.0         # liukuvan keskiarvon ikkuna
 # Aloitusraha: 0. M2: botit rakennetaan inventaarion IRON_ORE:sta (ei rahasta) -> eka
 # replikaatio (10 rautaa) < 1 min louhinnasta. Raha on toissijainen (myynti/unlockit/upgradet).
@@ -2069,10 +2069,10 @@ func _fire_milestone(key: String, text: String) -> void:
 func _update_demo_arc() -> void:
 	if desig != null and desig.any_active():
 		_fire_milestone("first_desig", "Ensimmäinen louhinta-alue merkattu!")
-	if money >= 100:
-		_fire_milestone("m100", "$100 kasassa — kohta ensimmäinen lisäbotti!")
+	if inventory_amount(MAT_IRON_ORE) >= 10:
+		_fire_milestone("iron10", "10 rautaa varastossa — ensimmäinen replikaatio odottaa!")
 	if bot_manager != null and bot_manager.bot_count() > 2:
-		_fire_milestone("first_bot", "Ensimmäinen ostettu botti — lauma kasvaa!")
+		_fire_milestone("first_bot", "Ensimmäinen rakennettu botti — parvi kasvaa!")
 	if furnaces.size() + crushers.size() > 0:
 		_fire_milestone("first_machine", "Ensimmäinen jalostuskone rakennettu!")
 	if _refined_first:

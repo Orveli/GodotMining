@@ -1,11 +1,13 @@
 # MoneyExit — kaksoisroolissa.
 #
-# 1) Alkuperäinen rooli (säilyy): itsenäinen "kassa"-rakennus, joka syö
-#    intake-aukosta valuvat pikselit rahaksi (update_exit). Toimii jatkossa
-#    liukuhihnaintegraationa — hihna tuo materiaalin intake-aukolle.
+# 1) Alkuperäinen rooli: itsenäinen intake-rakennus, joka kuluttaa aukosta
+#    valuvat pikselit (update_exit palauttaa kulutetut mat->px; kutsuja
+#    reitittää ne world.deposit_cargo():lla politiikan mukaan rahaksi tai
+#    inventaarioon). Toimii liukuhihnaintegraationa — hihna tuo materiaalin
+#    intake-aukolle.
 # 2) Base-rooli (bottisimulaatio): sama instanssi toimii tehtaan basena.
-#    - Haulerit purkavat kuormansa tänne → accept_cargo() summaa arvon
-#      PRICES-taulusta (kutsuja lisää tuloksen world.moneyyn).
+#    - Haulerit purkavat kuormansa tänne (reititys world.deposit_cargo:ssa);
+#      accept_cargo() on säilytetty arvonlaskuapurina (telemetria/testit).
 #    - Bottien spawn-piste (spawn_pos) ja haulerin dump-lentokohde (intake_pos).
 #    Molemmat roolit jakavat saman PRICES-hinnaston.
 class_name MoneyExit
@@ -42,8 +44,8 @@ var grid_pos: Vector2i = Vector2i.ZERO
 var structure_pixels: Array[Vector2i] = []
 var intake_x: Array[int] = []
 var total_earned: int = 0
-# Kumulatiivinen kokonaistulo — kasvatetaan SEKA pikselisyonnista (update_exit) ETTA
-# bottien purkamista (accept_cargo). Lane G laskee tasta liukuvan $/s-mittarin.
+# Vestigiaalinen telemetrialaskuri (M1 jalkeen $/s-mittari lukee pixel_worldin
+# total_revenue-kenttaa; tama kasvaa enaa vain accept_cargo-apurikutsuista).
 var earned_total: int = 0
 var broken: bool = false
 var _flash_timer: float = 0.0
