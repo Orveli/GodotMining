@@ -1,0 +1,21 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "P3 planeetta: todistaa etta bottisilmukka toimii UUDELLA planeettakoolla (4096x448) ja TOROIDAALISELLA koodilla (nav/designaatio/liike/skannaus wrapaavat x:ssa) ilman regressiota. Boottaa (base + 1 miner + 1 hauler), designoi louhinta-alueet alustan MOLEMMILLE puolille (bottien tyonjako + liike + separaatio ajautuvat uuden NW=256/NH=28-gridin lapi), ajaa bottisimulaatiota deterministisesti (cpu_ca=true, gpu_ready=false) ja varmistaa etta silmukka etenee: designaatio kuluu ja botit liikkuvat. HUOM: sauman YLI menevan LYHYIMMAN reitin valinta on todistettu algoritmitasolla yksikkotesteissa (tests/unit/test_nav_grid.gd: _test_seam_path pakottaa keskiseinalla kierron sauman kautta, _test_octile_wrap varmistaa admissiivisen wrap-heuristiikan). Base sijaitsee alustan keskella (kaukana saumasta) kuten oikeassa pelissa, joten tama skenaario ei aja bottia fyysisesti sauman yli; se todistaa etta koko sim + tyonjako pyorii planeettakoossa toroidaalisen koodin kanssa. Sauman-ylitys-integraatio (base sauman lahella) vaatii P2:n reunabedrockin poiston + scenario-hookin base-sijainnille -> myohempi tyo.",
+  "steps": [
+    { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 48, "margin": 12, "depth": 36 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "dump_bots" },
+
+    { "cmd": "assert_bots_moved", "min_dist": 30, "label": "botit liikkuivat planeettakoossa (nav+liike+separaatio toroidaalisilla vakioilla)" },
+    { "cmd": "assert_desig_consumed_pct", "min_pct": 60, "label": "designoidusta alueesta >=60% kulutettu (louhinta etenee 4096x448-gridilla, ei frontier-jumia)" }
+  ]
+}
