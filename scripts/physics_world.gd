@@ -258,49 +258,6 @@ func step(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) ->
 		# (update_sleep snappasi position, write käyttää snapattua pos)
 
 
-# === AUKOTON RASTERIZATION ===
-# Forward transform + aukkojen täyttö vierekkäisten pikselien välillä
-# Palauttaa Dictionary[Vector2i, int]: maailmapos → lokaali-indeksi (-1 = aukontäyttö)
-
-func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
-	body._ensure_rot_cache()
-	var result := {}
-	var local_to_world := {}
-	var px := roundi(body.position.x)
-	var py := roundi(body.position.y)
-
-	for i in body.local_pixels.size():
-		var rot := body._rot_cache[i]
-		var wp := Vector2i(rot.x + px, rot.y + py)
-		result[wp] = i
-		local_to_world[body.local_pixels[i]] = wp
-
-	# Aukontäyttö — sama kuin ennen, käyttää local_to_world-mappingia
-	var local_set := {}
-	for lp in body.local_pixels:
-		local_set[lp] = true
-
-	for lp in body.local_pixels:
-		for dir in [Vector2i(1, 0), Vector2i(0, 1)]:
-			var neighbor: Vector2i = lp + dir
-			if not local_set.has(neighbor):
-				continue
-			if not local_to_world.has(neighbor):
-				continue
-			var wp_a: Vector2i = local_to_world[lp]
-			var wp_b: Vector2i = local_to_world[neighbor]
-			var mdist := absi(wp_b.x - wp_a.x) + absi(wp_b.y - wp_a.y)
-			if mdist > 1:
-				var mid1 := Vector2i(wp_a.x, wp_b.y)
-				var mid2 := Vector2i(wp_b.x, wp_a.y)
-				if not result.has(mid1):
-					result[mid1] = -1
-				if mid2 != mid1 and not result.has(mid2):
-					result[mid2] = -1
-
-	return result
-
-
 # === APUFUNKTIOT ===
 
 func _is_liquid(mat: int) -> bool:
@@ -308,47 +265,67 @@ func _is_liquid(mat: int) -> bool:
 
 
 # === ERASE / WRITE ===
+# Iteroivat kappaleen aukotonta täytettyä muotoa (flat filled-cache).
+# Maailmapikseli = filled-offset + pyöristetty positio.
 
 func _erase_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArray, w: int, h: int) -> void:
-	var filled := _get_filled_world_pixels(body)
-	for wp_key in filled:
-		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
-			if body_map[idx] == body.body_id:
+	body._ensure_filled_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var fox := body.filled_ox
+	var foy := body.filled_oy
+	var bid := body.body_id
+	for k in fox.size():
+		var wx := fox[k] + px
+		var wy := foy[k] + py
+		if wx >= 0 and wx < w and wy >= 0 and wy < h:
+			var idx := wy * w + wx
+			if body_map[idx] == bid:
 				grid[idx] = 0
 				seed[idx] = 0
 				body_map[idx] = 0
 
 
 func _write_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArray, w: int, h: int) -> int:
-	var filled := _get_filled_world_pixels(body)
+	body._ensure_filled_cache()
+	var px := roundi(body.position.x)
+	var py := roundi(body.position.y)
+	var fox := body.filled_ox
+	var foy := body.filled_oy
+	var fsrc := body.filled_src
+	var seeds := body.pixel_seeds
+	var seeds_n := seeds.size()
+	var mat := body.material
+	var bid := body.body_id
 	var written := 0
-	for wp_key in filled:
-		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
-			if grid[idx] == 0 or _is_liquid(grid[idx]):
+	for k in fox.size():
+		var wx := fox[k] + px
+		var wy := foy[k] + py
+		if wx >= 0 and wx < w and wy >= 0 and wy < h:
+			var idx := wy * w + wx
+			var cur := grid[idx]
+			if cur == 0 or _is_liquid(cur):
 				# Syrjäytä neste viereiseen tyhjään soluun
-				if _is_liquid(grid[idx]):
-					var liq_mat := grid[idx]
+				if _is_liquid(cur):
+					var liq_mat := cur
 					var liq_seed := seed[idx]
 					for disp in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, -1), Vector2i(1, -1)]:
-						var np := Vector2i(wp.x + disp.x, wp.y + disp.y)
-						if np.x >= 0 and np.x < w and np.y >= 0 and np.y < h:
-							var nidx := np.y * w + np.x
+						var nx: int = wx + disp.x
+						var ny: int = wy + disp.y
+						if nx >= 0 and nx < w and ny >= 0 and ny < h:
+							var nidx := ny * w + nx
 							if grid[nidx] == 0 and body_map[nidx] == 0:
 								grid[nidx] = liq_mat
 								seed[nidx] = liq_seed
 								break
-				grid[idx] = body.material
-				body_map[idx] = body.body_id
-				var pi: int = filled[wp]
-				if pi >= 0 and pi < body.pixel_seeds.size():
-					seed[idx] = body.pixel_seeds[pi]
-				elif body.pixel_seeds.size() > 0:
+				grid[idx] = mat
+				body_map[idx] = bid
+				var pi := fsrc[k]
+				if pi >= 0 and pi < seeds_n:
+					seed[idx] = seeds[pi]
+				elif seeds_n > 0:
 					# Aukontäytön seed — ota naapurilta
-					seed[idx] = body.pixel_seeds[0]
+					seed[idx] = seeds[0]
 				written += 1
 	return maxi(body.local_pixels.size() - written, 0)
 

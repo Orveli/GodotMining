@@ -131,4 +131,13 @@ func _run_benchmark(body_count: int) -> void:
 	print("--- Kuorma: %d kappaletta ---" % body_count)
 	print("  Kokonaisaika: %.2f ms  (%d framea)" % [total_ms, FRAMES])
 	print("  ms/frame:     %.3f" % ms_per_frame)
-	print("  Kappaleita lopussa: %d\n" % alive)
+	print("  Kappaleita lopussa: %d  loppuhash=%d\n" % [alive, _grid_hash()])
+
+
+func _grid_hash() -> int:
+	# Yksinkertainen deterministinen tarkistussumma gridille
+	var acc := 1469598103934665603  # FNV-tyyppinen
+	for i in TOTAL:
+		if grid[i] != 0:
+			acc = (acc * 1099511628211 + i * 131 + grid[i]) & 0x7FFFFFFFFFFFFFFF
+	return acc
