@@ -1,0 +1,12 @@
+{
+  "auto_exit": true,
+  "steps": [
+    { "cmd": "clear" },
+    { "cmd": "fill_rect", "x": 0, "y": 235, "w": 416, "h": 5, "mat": 3 },
+    { "cmd": "fill_rect", "x": 100, "y": 20, "w": 30, "h": 30, "mat": 1 },
+    { "cmd": "fill_rect", "x": 200, "y": 20, "w": 30, "h": 30, "mat": 11 },
+    { "cmd": "fill_rect", "x": 300, "y": 20, "w": 20, "h": 20, "mat": 18 },
+    { "cmd": "run_frames", "n": 200 },
+    { "cmd": "hash_grid", "label": "stone_stacks" }
+  ]
+}
