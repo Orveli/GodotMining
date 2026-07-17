@@ -1,5 +1,14 @@
 # Fysiikkamaailma — hallinnoi rigid body -kappaleita
 # Erase all → forces → integrate → env collision → body-body → write all
+#
+# PLANEETTA v1-RAJAUS: x-akseli wrappaa toroidaalisesti [0, W). Poistettu x-reunan
+# "kova seina" -tormays (env collision ei enaa kimpoa saumasta) ja rasterointi/erase/
+# write wrappaavat x-indeksin modulo-W -> kappale ei katoa jos se ajautuu saumaan.
+# EI toteutettu v1:ssa: toroidaaliset etaisyydet (impulssi/attraction/throw), tipping/
+# split-reunaehtojen sauman-yli-tarkkuus. Naapurihaut jotka rajaavat x:n pois [0,W)
+# alueelta (tipping, is_body_damaged, split-selviytyjat) skippaavat sauman-yli-pikselit
+# turvallisesti (ei kraasi), joten sauman paalla lepaava iso rigid body voi kayttaytya
+# epatarkasti. Koska sauma on planeetan takapuolella, tama ei nay normaalipelissa.
 class_name PhysicsWorld
 
 const GRAVITY := Vector2(0, 0.6)  # pikseliä/frame²
@@ -263,6 +272,10 @@ func step(grid: PackedByteArray, color_seed: PackedByteArray, w: int, h: int) ->
 # Palauttaa Dictionary[Vector2i, int]: maailmapos → lokaali-indeksi (-1 = aukontäyttö)
 
 func _get_filled_world_pixels(body: RigidBodyData) -> Dictionary:
+	# PLANEETTA: maailmapikselit lasketaan wrappaamattomassa jatkuvassa avaruudessa jotta
+	# aukontaytto (midpoint-geometria) toimii oikein myos sauman yli. x-wrap modulo-W
+	# tehdaan vasta indeksointihetkella kutsujissa (_erase_body / _write_body) -> kappale
+	# ei katoa saumaan mutta gap-fill sailyy ehjana.
 	body._ensure_rot_cache()
 	var result := {}
 	var local_to_world := {}
@@ -313,8 +326,9 @@ func _erase_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArr
 	var filled := _get_filled_world_pixels(body)
 	for wp_key in filled:
 		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
+		# PLANEETTA: x wrappaa (kappale ei katoa saumassa), y-rajat sailyvat.
+		if wp.y >= 0 and wp.y < h:
+			var idx: int = wp.y * w + PlanetGeom.wrap_x(wp.x, w)
 			if body_map[idx] == body.body_id:
 				grid[idx] = 0
 				seed[idx] = 0
@@ -326,8 +340,9 @@ func _write_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArr
 	var written := 0
 	for wp_key in filled:
 		var wp: Vector2i = wp_key
-		if wp.x >= 0 and wp.x < w and wp.y >= 0 and wp.y < h:
-			var idx: int = wp.y * w + wp.x
+		# PLANEETTA: x wrappaa (kappale ei katoa saumassa), y-rajat sailyvat.
+		if wp.y >= 0 and wp.y < h:
+			var idx: int = wp.y * w + PlanetGeom.wrap_x(wp.x, w)
 			if grid[idx] == 0 or _is_liquid(grid[idx]):
 				# Syrjäytä neste viereiseen tyhjään soluun
 				if _is_liquid(grid[idx]):
@@ -335,8 +350,8 @@ func _write_body(body: RigidBodyData, grid: PackedByteArray, seed: PackedByteArr
 					var liq_seed := seed[idx]
 					for disp in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, -1), Vector2i(1, -1)]:
 						var np := Vector2i(wp.x + disp.x, wp.y + disp.y)
-						if np.x >= 0 and np.x < w and np.y >= 0 and np.y < h:
-							var nidx := np.y * w + np.x
+						if np.y >= 0 and np.y < h:
+							var nidx := np.y * w + PlanetGeom.wrap_x(np.x, w)
 							if grid[nidx] == 0 and body_map[nidx] == 0:
 								grid[nidx] = liq_mat
 								seed[nidx] = liq_seed
@@ -365,9 +380,10 @@ class CollisionResult:
 func _check_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: int) -> bool:
 	var world_pixels := body.get_world_pixels()
 	for wp in world_pixels:
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+		# PLANEETTA: x-reunalla ei ole seinaa (wrappaa); vain y-rajat = tormays.
+		if wp.y < 0 or wp.y >= h:
 			return true
-		var mat := grid[wp.y * w + wp.x]
+		var mat := grid[wp.y * w + PlanetGeom.wrap_x(wp.x, w)]
 		if mat != 0 and not _is_liquid(mat):
 			return true
 	return false
@@ -382,23 +398,24 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 	for wp in world_pixels:
 		var colliding := false
 
-		if wp.x < 0 or wp.x >= w or wp.y < 0 or wp.y >= h:
+		# PLANEETTA: x-reunalla ei ole seinaa (wrappaa); vain y-rajat = tormays (seina).
+		if wp.y < 0 or wp.y >= h:
 			colliding = true
-			if wp.x < 0: accumulated_normal += Vector2(1, 0)
-			elif wp.x >= w: accumulated_normal += Vector2(-1, 0)
 			if wp.y < 0: accumulated_normal += Vector2(0, 1)
-			elif wp.y >= h: accumulated_normal += Vector2(0, -1)
+			else: accumulated_normal += Vector2(0, -1)
 		else:
-			var idx := wp.y * w + wp.x
+			var gx := PlanetGeom.wrap_x(wp.x, w)
+			var idx := wp.y * w + gx
 			var hit_mat := grid[idx]
 			if hit_mat != 0 and not _is_liquid(hit_mat):
 				colliding = true
 				# Tunnista osuiko nukkuvaan kappaleeseen
 				if body_map[idx] != 0 and result.hit_body_id == 0:
 					result.hit_body_id = body_map[idx]
+				# x-naapurit wrappaavat (aina olemassa), y-naapurit rajattu.
 				var local_normal := Vector2.ZERO
-				if wp.x > 0 and grid[idx - 1] == 0: local_normal.x -= 1.0
-				if wp.x < w - 1 and grid[idx + 1] == 0: local_normal.x += 1.0
+				if grid[wp.y * w + PlanetGeom.wrap_x(wp.x - 1, w)] == 0: local_normal.x -= 1.0
+				if grid[wp.y * w + PlanetGeom.wrap_x(wp.x + 1, w)] == 0: local_normal.x += 1.0
 				if wp.y > 0 and grid[idx - w] == 0: local_normal.y -= 1.0
 				if wp.y < h - 1 and grid[idx + w] == 0: local_normal.y += 1.0
 				accumulated_normal += local_normal
@@ -793,10 +810,12 @@ func _split_if_needed(body_id: int, grid: PackedByteArray, color_seed: PackedByt
 		if comp_pixels.size() >= MIN_BODY_SIZE:
 			var new_body := create_body(comp_pixels, comp_seeds, body.material)
 			if new_body:
-				# Reunaa koskettavat palat pysyvät staattisina (vasen/oikea/ala — ei ylä)
+				# Reunaa koskettavat palat pysyvät staattisina.
+				# PLANEETTA: x-reuna EI ole enaa maailman reuna (wrappaa) -> pala ei
+				# jaady staattiseksi x:n takia. Vain ydin (y-alareuna) on ankkuri.
 				var touches_edge := false
 				for p in comp_pixels:
-					if p.x <= 0 or p.x >= w - 1 or p.y >= h - 1:
+					if p.y >= h - 1:
 						touches_edge = true
 						break
 				if touches_edge:
