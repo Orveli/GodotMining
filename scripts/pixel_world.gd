@@ -271,6 +271,11 @@ var bot_manager: BotManager           # bottien tilakone + tyonjako
 var bot_overlay: Node2D               # designaatio- + botti-piirto (building_layerin lapsi)
 var designation_mode: bool = false    # V-nappain: louhinta-alueen maalaus paalla/pois
 var _bot_logic_accum: float = 0.0     # kumuloitu delta bottien logiikkatikkia varten
+# === HAAMUMODUULIT (M4 — SPEC_seed_ship) ===
+# Moduuliketju: latausrivisto + jalostamo-liitanta. Haamu paljastuu toiminta-/resurssitriggerista,
+# tayttyy haulerien tuomana tai klikkaamalla, valmistuessa kirjautuu gridiin + avaa unlockin.
+var base_modules: BaseModules         # moduuliketjun data + haamun piirto (building_layerin lapsi)
+var _peak_iron_ore: int = 0           # inventory piti joskus >= tama (moduuli 2 -trigger)
 
 # === DEMO-KAARI & TALOUS (Lane G) ===
 # Logistiikan datamalli (pickup/dump/base-filtteri). bot_manager poimii taman
@@ -1189,6 +1194,17 @@ func _collect_light_emitters() -> Array:
 		for ch in bot_manager.chargers:
 			for sp in ch.slot_positions:
 				emitters.append({"position": Vector2i(sp), "radius": 50.0, "intensity": 0.8})
+	# Haamumoduulit (M4) — valmis moduuli hehkuu kuten kone
+	if base_modules != null and is_instance_valid(base_modules):
+		for bm_mod in base_modules.modules:
+			if bm_mod.built and not bm_mod.structure_pixels.is_empty():
+				var sx := 0
+				var sy := 0
+				for p: Vector2i in bm_mod.structure_pixels:
+					sx += p.x
+					sy += p.y
+				var n := bm_mod.structure_pixels.size()
+				emitters.append({"position": Vector2i(sx / n, sy / n), "radius": 55.0, "intensity": 0.8})
 	# Koneet (uunit, murskaajat, porat) — keskikokoinen valo
 	for m in furnaces:
 		if is_instance_valid(m):
@@ -1602,6 +1618,13 @@ func _init_bot_sim() -> void:
 	# M3: basen sisaanrakennettu latauspaikka (1 slotti). Dokkauspiste basen kyljessa,
 	# hieman spawn-pisteen sivussa jottei mene bottien IDLE-leijunnan paalle.
 	bot_manager.make_base_charger(base.spawn_pos() + Vector2(22.0, 0.0))
+	# M4: haamumoduuliketju basen kylkeen (latausrivisto vasemmalle, jalostamo oikealle).
+	if base_modules != null and is_instance_valid(base_modules):
+		base_modules.queue_free()
+	base_modules = BaseModules.new()
+	base_modules.setup(base.grid_pos, MoneyExit.EXIT_W, MoneyExit.EXIT_H, W, SIM_HEIGHT)
+	building_layer.add_child(base_modules)
+	_peak_iron_ore = 0
 	# Nollaa talous- ja demo-kaaren tila uuteen peliin
 	money = START_MONEY
 	# Inventaario & politiikat (M1): rakennusaineet varastoon, roska myyntiin.
@@ -1669,6 +1692,17 @@ func _price_for(mat_id: int) -> int:
 func deposit_material(mat_id: int, px: int) -> void:
 	if px <= 0:
 		return
+	# M4: reititä aktiivisen haamumoduulin täyttö ENNEN inventaario/myynti-jakoa. Haulerien tuoma
+	# tarvemateriaali kuluu moduulin täyttölaskuriin (näkyvä haamu täyttyy) eikä kasaudu varastoon.
+	if base_modules != null and is_instance_valid(base_modules):
+		var gm := base_modules.active_module()
+		if gm != null and gm.req.has(mat_id):
+			var used := base_modules.add_fill(gm, mat_id, px)
+			if base_modules.is_complete(gm):
+				_complete_module(gm)
+			px -= used
+			if px <= 0:
+				return
 	var policy: int = int(material_policy.get(mat_id, POLICY_SELL))
 	if policy == POLICY_STORE:
 		inventory[mat_id] = int(inventory.get(mat_id, 0)) + px
@@ -1866,6 +1900,7 @@ func _update_economy(delta: float) -> void:
 	if base == null or not is_instance_valid(base):
 		return
 	_update_income(delta)
+	_update_base_modules()
 	_update_demo_arc()
 
 
@@ -1925,9 +1960,113 @@ func _update_demo_arc() -> void:
 		_fire_milestone("m1000", "$1000 — tehdas rullaa!")
 	if money >= 5000:
 		_fire_milestone("m5000", "$5000 — kohti demo-maalia!")
-	if not _demo_completed and (money >= 10000 or _rare_earth_sold):
+	# M4: demo complete kun raha >= 10000 TAI koko moduuliketju rakennettu (SPEC 4.2).
+	# _rare_earth_sold jää milestone-laukaisijaksi (rivi ylempänä), ei enää demo-ehdoksi.
+	if not _demo_completed and (money >= 10000 or _all_modules_built()):
 		_demo_completed = true
 		demo_complete.emit()
+
+
+# ============================================================
+#  HAAMUMODUULIT (M4 — SPEC_seed_ship). Trigger-tilakone + valmistuminen.
+# ============================================================
+
+# Paivita haamujen paljastus joka frame (toiminta-/resurssitriggerit) ja tarkista
+# valmistuuko aktiivinen moduuli (haulerien tuoma tayttö saattoi täyttää sen).
+func _update_base_modules() -> void:
+	if base_modules == null or not is_instance_valid(base_modules):
+		return
+	_peak_iron_ore = maxi(_peak_iron_ore, inventory_amount(MAT_IRON_ORE))
+	var fleet := bot_manager.bot_count() if bot_manager != null else 0
+	var waiting := 0
+	if bot_manager != null:
+		waiting = int(bot_manager.get_fleet_stats().get("waiting_charger", 0))
+	base_modules.update_reveal(fleet, waiting, _peak_iron_ore)
+	# Turvatarkistus: jos aktiivinen haamu on jo tayttynyt (esim. fill_module + auto-fill), rakenna.
+	var gm := base_modules.active_module()
+	if gm != null and gm.is_complete():
+		_complete_module(gm)
+
+
+# Rakenna valmis haamumoduuli: kirjoita rakenne gridiin (nakyva kasvu), rekisteroi
+# building_pixels-suojaukseen ja aja unlock-hook (charger-lisays tai jalostamo-nakyvyys).
+func _complete_module(m: BaseModules.Module) -> void:
+	if m == null or m.built:
+		return
+	base_modules.mark_built(m)
+	for p: Vector2i in m.structure_pixels:
+		if p.x < 0 or p.x >= W or p.y < 0 or p.y >= SIM_HEIGHT:
+			continue
+		var idx := p.y * W + p.x
+		if grid[idx] == MAT_BEDROCK:
+			continue
+		grid[idx] = MAT_STONE
+		color_seed[idx] = 100 + randi() % 30   # vihertava kivi kuten base
+	_register_building_pixels(m.structure_pixels)
+	paint_pending = true
+	# Unlock-hook moduulin id:n mukaan
+	match m.id:
+		1:
+			_unlock_charger_array(m)
+		2:
+			# Jalostamo-liitanta: UI paljastaa furnace/crusher-napit (lukee is_module_built(2)).
+			_fire_milestone("module_refinery", "Jalostamo-liitanta valmis — uunit ja murskaimet auki!")
+	if base_modules != null:
+		base_modules.queue_redraw()
+
+
+# Latausrivisto-moduulin unlock: uusi Charger jossa 2 ERILLISTA dokkauspistetta
+# (slot_count == slot_positions.size() == CHARGER_BUILT_SLOTS). ALA kasvata basen chargerin
+# slot_countia (M3-raportti) — luodaan itsenainen charger ja rekisteroidaan.
+func _unlock_charger_array(m: BaseModules.Module) -> void:
+	if bot_manager == null:
+		return
+	var ch := Charger.new()
+	ch.slot_count = BotManager.CHARGER_BUILT_SLOTS
+	var docks: Array[Vector2] = m.docks.duplicate()
+	# Varmista etta dokkauspisteita on tasan slot_count kpl (fallback jos setup jatti vajaan).
+	while docks.size() < ch.slot_count:
+		docks.append(m.docks[0] if not m.docks.is_empty() else base.spawn_pos())
+	ch.slot_positions = docks.slice(0, ch.slot_count)
+	bot_manager.add_charger(ch)
+	_fire_milestone("module_charger", "Latausrivisto valmis — latausjono purkautuu!")
+
+
+# Kaikki moduuliketjun moduulit rakennettu? _update_demo_arc kayttaa demo-completeen.
+func _all_modules_built() -> bool:
+	return base_modules != null and is_instance_valid(base_modules) and base_modules.all_built()
+
+
+# Syota moduulin n tayttolaskuria suoraan (ScenarioRunner fill_module + klikkaus-rakennus).
+# Rakentaa moduulin jos tayttyy. Palauttaa true jos moduuli valmistui talla kutsulla.
+func _module_fill(n: int, mat_id: int, px: int) -> bool:
+	if base_modules == null or not is_instance_valid(base_modules):
+		return false
+	var m := base_modules.module_at(n)
+	if m == null or m.built:
+		return false
+	m.revealed = true   # fill paljastaa haamun (testi-/klikkauspolku ei odota trigger-ehtoa)
+	base_modules.add_fill(m, mat_id, px)
+	if m.is_complete():
+		_complete_module(m)
+		return true
+	return false
+
+
+# Klikkaus-rakennus: rakenna haamumoduuli inventaarion materiaaleista (jaljella oleva resepti).
+# false jos ei varaa. UI kutsuu kun pelaaja klikkaa haamua.
+func try_build_module(n: int) -> bool:
+	if base_modules == null or not is_instance_valid(base_modules):
+		return false
+	var m := base_modules.module_at(n)
+	if m == null or m.built:
+		return false
+	var recipe := m.remaining_recipe()
+	if not recipe.is_empty():
+		if not spend_materials(recipe):
+			return false
+	_complete_module(m)
+	return true
 
 
 # ============================================================
@@ -3370,6 +3509,14 @@ func _hit_test_world_target(coords: Vector2i) -> Dictionary:
 			for sp in ch.slot_positions:
 				if Rect2i(Vector2i(sp) - Vector2i(6, 6), Vector2i(12, 12)).has_point(coords):
 					return {"kind": "charger", "charger": ch}
+	# Haamumoduulit (M4): klikkaus paljastetun (rakentamattoman) haamun paalla -> rakennus-popover.
+	if base_modules != null and is_instance_valid(base_modules):
+		for gm in base_modules.modules:
+			if gm.built or not gm.revealed or gm.structure_pixels.is_empty():
+				continue
+			for p: Vector2i in gm.structure_pixels:
+				if p == coords:
+					return {"kind": "module", "module_id": gm.id}
 	# Vyöhykkeet — pois lukien koneiden omat auto-rekisteröidyt intake/output-vyöhykkeet
 	# (niitä ei saa poistaa/suodattaa yleisellä vyöhykepopoverilla, ne kuuluvat koneelle).
 	if logistics != null:
@@ -5036,6 +5183,40 @@ func _scenario_execute_step(step: Dictionary) -> bool:
 				print("ScenarioRunner: PASS  [%s] waiting_charger=%d >= %d" % [wc_label, wc_n, wc_min])
 			else:
 				print("ScenarioRunner: FAIL  [%s] waiting_charger=%d, odotettu >= %d" % [wc_label, wc_n, wc_min])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"fill_module":
+			# M4: syota moduulin n haamun tayttolaskuria (mat/px). Rakentaa jos tayttyy.
+			var fm_n: int = step.get("n", 1)
+			var fm_mat: int = step.get("mat", MAT_IRON_ORE)
+			var fm_px: int = step.get("px", 0)
+			var fm_built := _module_fill(fm_n, fm_mat, fm_px)
+			print("ScenarioRunner: fill_module n=%d mat=%d px=%d built=%s" % [fm_n, fm_mat, fm_px, str(fm_built)])
+		"assert_module_built":
+			# M4: assert etta moduuli n on rakennettu.
+			var am_n: int = step.get("n", 1)
+			var am_label: String = step.get("label", "")
+			var am_ok := base_modules != null and is_instance_valid(base_modules) and base_modules.is_module_built(am_n)
+			if am_ok:
+				print("ScenarioRunner: PASS  [%s] moduuli %d rakennettu" % [am_label, am_n])
+			else:
+				print("ScenarioRunner: FAIL  [%s] moduuli %d EI rakennettu" % [am_label, am_n])
+				_scenario_failures += 1
+			_scenario_tests += 1
+		"assert_charger_slots":
+			# M4: assert latausslottien kokonaismaara (kaikki chargerit) valilla [min,max].
+			# Todistaa latausrivisto-moduulin unlockin (base 1 slotti + rivisto 2 = 3).
+			var cs_min: int = step.get("min", 0)
+			var cs_max: int = step.get("max", 999999)
+			var cs_label: String = step.get("label", "")
+			var cs_total := 0
+			if bot_manager != null:
+				for ch in bot_manager.chargers:
+					cs_total += ch.slot_count
+			if cs_total >= cs_min and cs_total <= cs_max:
+				print("ScenarioRunner: PASS  [%s] charger_slots=%d [%d, %d]" % [cs_label, cs_total, cs_min, cs_max])
+			else:
+				print("ScenarioRunner: FAIL  [%s] charger_slots=%d, odotettu [%d, %d]" % [cs_label, cs_total, cs_min, cs_max])
 				_scenario_failures += 1
 			_scenario_tests += 1
 		"mvp_shot":

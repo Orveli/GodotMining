@@ -1,0 +1,16 @@
+{
+  "auto_exit": true,
+  "cpu_ca": true,
+  "_doc": "M4 E2E: haamumoduulien tayttö + valmistuminen + unlock-hookit deterministisesti. fill_module syöttää moduulin täyttölaskuria suoraan (bypassaa trigger-ehdon testiä varten) ja rakentaa moduulin kun se täyttyy. Moduuli 1 (30 IRON_ORE) -> uusi Charger 2 slottia (base 1 + rivistö 2 = 3). Moduuli 2 (40 IRON_ORE + 20 COAL, kaksi fill_module-syöttöä) -> jalostamo-liitäntä valmis (furnace/crusher-disclosure UI:ssa). Ei vaadi CA:ta eikä bottisimulaatiota — koskettaa base_modules-tilaa suoraan. cpu_ca:true varmistaa headless-ajon ilman GPU:ta.",
+  "steps": [
+    { "cmd": "assert_charger_slots", "min": 1, "max": 1, "label": "lähtötila: vain basen 1 slotti" },
+
+    { "cmd": "fill_module", "n": 1, "mat": 12, "px": 30 },
+    { "cmd": "assert_module_built", "n": 1, "label": "moduuli 1 rakentui 30 raudalla" },
+    { "cmd": "assert_charger_slots", "min": 3, "max": 3, "label": "latausrivistö lisäsi 2 slottia (yht. 3)" },
+
+    { "cmd": "fill_module", "n": 2, "mat": 12, "px": 40 },
+    { "cmd": "fill_module", "n": 2, "mat": 16, "px": 20 },
+    { "cmd": "assert_module_built", "n": 2, "label": "moduuli 2 rakentui kun rauta+hiili täynnä" }
+  ]
+}

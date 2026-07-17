@@ -157,6 +157,10 @@ var _base_popover_vb: VBoxContainer = null
 # Latauspaikka-popover (M3): VBox + charger-viittaus, jotta hiilensyöttö voi rakentaa sisällön uudelleen.
 var _charger_popover_vb: VBoxContainer = null
 var _charger_popover_charger: Object = null
+# Haamumoduulit (M4): furnace/crusher-tray-itemit piilossa kunnes jalostamo-moduuli valmis
+# (progressive disclosure). Viittaukset talletetaan _build_build_trayssa.
+var _furnace_tray_item: Control = null
+var _crusher_tray_item: Control = null
 
 # Ostettavat/rakennettavat kohteet joiden hinta/varaa-tila päivittyy:
 # [{panel(=Button), price_label, cost_fn}]
@@ -561,12 +565,15 @@ func _build_build_tray() -> void:
 	hb.add_theme_constant_override("separation", 10)
 	build_tray_panel.add_child(hb)
 
-	_add_tray_item(hb, ICON_BUILD_FURNACE, "Sulatusuuni\nHiekka→lasi, malmi→harkko",
+	# M4 progressive disclosure: furnace/crusher piilossa kunnes jalostamo-moduuli valmis.
+	_furnace_tray_item = _add_tray_item(hb, ICON_BUILD_FURNACE, "Sulatusuuni\nHiekka→lasi, malmi→harkko",
 		func() -> int: return _building_cost("furnace"),
 		func() -> void: _buy_building(pixel_world.BUILD_FURNACE, _building_cost("furnace")))
-	_add_tray_item(hb, ICON_BUILD_CRUSHER, "Murskain\nKivi/sora→hiekka",
+	_crusher_tray_item = _add_tray_item(hb, ICON_BUILD_CRUSHER, "Murskain\nKivi/sora→hiekka",
 		func() -> int: return _building_cost("crusher"),
 		func() -> void: _buy_building(pixel_world.BUILD_CRUSHER, _building_cost("crusher")))
+	_furnace_tray_item.visible = false
+	_crusher_tray_item.visible = false
 	_add_tray_item(hb, ICON_BUILD_CONVEYOR, "Kuljetushihna\nSiirtää materiaalia ilman bottia",
 		func() -> int: return _building_cost("conveyor"),
 		func() -> void: _buy_building(pixel_world.BUILD_CONVEYOR_START, _building_cost("conveyor")))
@@ -808,6 +815,8 @@ func _on_world_object_clicked(kind: String, data: Dictionary) -> void:
 			_open_machine_popover(kind, data.get("obj"))
 		"charger":
 			_open_charger_popover(data.get("charger"))
+		"module":
+			_open_module_popover(int(data.get("module_id", 0)))
 		"zone":
 			_open_zone_popover(data.get("zone", {}))
 
@@ -928,6 +937,83 @@ func _refresh_base_popover() -> void:
 		return
 	_clear_children(_base_popover_vb)
 	_fill_base_popover.call_deferred(_base_popover_vb)
+
+
+# ── Haamumoduuli-popover (M4): näyttää täyttötarpeen ja [Rakenna] ──
+# Haamu täyttyy joko haulerien tuomana (auto-fill deposit_materialissa) TAI klikkaamalla tästä
+# jos inventaariossa on varaa (try_build_module -> spend_materials jäljellä olevalla reseptillä).
+func _open_module_popover(module_id: int) -> void:
+	if pixel_world.base_modules == null or not is_instance_valid(pixel_world.base_modules):
+		return
+	var m: Object = pixel_world.base_modules.module_at(module_id)
+	if m == null or m.built:
+		return
+	_close_context_popover()
+	_close_build_tray()
+	_close_bot_tray()
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _frame_or_flat_panel())
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 4)
+	panel.add_child(vb)
+
+	vb.add_child(_label("Moduuli: %s" % String(m.mod_name), 13, COL_TEXT))
+	vb.add_child(_label("Haamu — täytä rakentaaksesi", 10, COL_DIM))
+	for mat_id in m.req:
+		var need := int(m.req[mat_id])
+		var have := int(m.fill.get(mat_id, 0))
+		var nm := String(MAT_NAMES.get(int(mat_id), "?"))
+		vb.add_child(_label("%s  %d / %d px" % [nm, have, need], 11, COL_TEXT))
+
+	var recipe: Dictionary = m.remaining_recipe()
+	var can_afford: bool = recipe.is_empty() or pixel_world.can_afford_materials(recipe)
+	var build_btn := _make_btn("Rakenna", 12)
+	build_btn.disabled = not can_afford
+	build_btn.pressed.connect(_on_module_build.bind(module_id))
+	vb.add_child(build_btn)
+	if not can_afford:
+		vb.add_child(_label("Ei tarpeeksi materiaalia varastossa", 10, COL_BAD))
+
+	get_parent().add_child(panel)
+	_context_popover = panel
+	_context_popover_kind = "module"
+	_register_panel(panel)
+	# Ankkuroi moduulin rakenteen keskikohtaan
+	var cx := 0.0
+	var cy := 0.0
+	var n := int(m.structure_pixels.size())
+	if n > 0:
+		for p: Vector2i in m.structure_pixels:
+			cx += float(p.x)
+			cy += float(p.y)
+		cx /= float(n)
+		cy /= float(n)
+	var anchor: Vector2 = pixel_world.grid_to_screen(Vector2(cx, cy))
+	_position_popover(panel, anchor)
+	_animate_popover_in(panel)
+	_popover_just_opened = true
+
+
+func _on_module_build(module_id: int) -> void:
+	if pixel_world.try_build_module(module_id):
+		_close_context_popover()
+
+
+# M4 progressive disclosure: furnace/crusher-napit näkyviin kun jalostamo-moduuli (2) valmis.
+# EI koskaan piilota jo rakennettua konetta — jos furnace/crusher on jo pelissä, näytä napit silti.
+func _update_disclosure() -> void:
+	if _furnace_tray_item == null or not is_instance_valid(_furnace_tray_item):
+		return
+	var reveal := false
+	if pixel_world.base_modules != null and is_instance_valid(pixel_world.base_modules):
+		reveal = pixel_world.base_modules.is_module_built(2)
+	# Turvasaanto: jos kone on jo olemassa (esim. debug/place_building), pidä napit näkyvissä.
+	if not reveal:
+		if pixel_world.furnaces.size() > 0 or pixel_world.crushers.size() > 0:
+			reveal = true
+	_furnace_tray_item.visible = reveal
+	_crusher_tray_item.visible = reveal
 
 
 # ── Latauspaikka-popover (M3): slotit + hiilipuskuri + [Syötä hiiltä] ──
@@ -1254,7 +1340,7 @@ func _handle_popover_outside_click() -> void:
 # ═══════════════════════════════════════════════════════════════════════════
 
 func _add_tray_item(parent: Control, icon: Texture2D, tooltip: String,
-		cost_fn: Callable, on_click: Callable) -> void:
+		cost_fn: Callable, on_click: Callable) -> Control:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 2)
 	parent.add_child(vb)
@@ -1271,6 +1357,7 @@ func _add_tray_item(parent: Control, icon: Texture2D, tooltip: String,
 	vb.add_child(price_lbl)
 
 	_afford_items.append({ "panel": btn, "price_label": price_lbl, "cost_fn": cost_fn })
+	return vb
 
 
 # M2: botti-rakennuskohde. Hinta = next_bot_cost()[IRON_ORE] px, hehkuu amber kun
@@ -1921,6 +2008,7 @@ func _process(delta: float) -> void:
 		_maybe_rebuild_bot_list()
 		_update_machine_popover()   # Vaihe 5 kohta 4: ~5 Hz > pyydetty ~2 Hz, riittää
 		_update_activity_hints(step)   # P0-1c + P0-3: toimettomuus-herateet
+		_update_disclosure()   # M4: furnace/crusher-nappien näkyvyys jalostamo-moduulin takana
 
 	# Materiaaliskanneri harvakseltaan — vain debug-tilassa (F3)
 	if _debug_visible:
