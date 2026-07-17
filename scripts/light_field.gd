@@ -165,16 +165,20 @@ func _apply_emitters(emitters: Array) -> void:
 		var ecy := float(pos.y) / float(DS)
 		var erad := radius / float(DS)
 
-		# Käsitellään vain emitterin bounding box DS-tilassa (halpa, ei koko puskuria).
-		var x0 := maxi(0, int(floor(ecx - erad)))
-		var x1 := mini(lw - 1, int(ceil(ecx + erad)))
+		# Kasitellaan vain emitterin bounding box DS-tilassa (halpa, ei koko puskuria).
+		# PLANEETTA: x-akseli wrappaa. x-boundingbox iteroidaan clamppaamatta ja jokainen
+		# sarake wrapataan [0, lw) -valille -> reunaemitteri valaisee sauman yli. Etaisyys
+		# lasketaan wrap_dx:lla valosolu-avaruudessa (lyhin suunta). y ei wrappaa (ydin-akseli).
+		var xr0 := int(floor(ecx - erad))
+		var xr1 := int(ceil(ecx + erad))
 		var y0 := maxi(0, int(floor(ecy - erad)))
 		var y1 := mini(lh - 1, int(ceil(ecy + erad)))
 
 		for y in range(y0, y1 + 1):
-			for x in range(x0, x1 + 1):
-				var dx := float(x) - ecx
-				var dy := float(y) - ecy
+			var dy := float(y) - ecy
+			for xx in range(xr0, xr1 + 1):
+				var x := PlanetGeom.wrap_x(xx, lw)
+				var dx := PlanetGeom.wrap_dx(ecx, float(x), float(lw))
 				var dist := sqrt(dx * dx + dy * dy)
 				if dist > erad:
 					continue
@@ -195,16 +199,18 @@ const _ONE_THIRD := 1.0 / 3.0
 func _blur_3x3() -> void:
 	if lw < 2 or lh < 2:
 		return  # Liian pieni puskuri reunapareille — ei realistinen sim-koko, mutta turvatarkistus
-	# Vaakapassi: _light_f -> _blur_f. Reunasarakkeet (x=0, x=lw-1) käsitellään
-	# erikseen ennen/jälkeen haarautumatonta keskiosaa.
+	# Vaakapassi: _light_f -> _blur_f. Reunasarakkeet (x=0, x=lw-1) kasitellaan
+	# erikseen ennen/jalkeen haarautumatonta keskiosaa.
+	# PLANEETTA: x wrappaa toroidaalisesti -> reunasarakkeen naapuri on vastakkainen
+	# reuna (ei clamp), jolloin valo ei katkea saumaan. row_base = x=0, last = x=lw-1.
 	for y in lh:
 		var row_base := y * lw
-		_blur_f[row_base] = (_light_f[row_base] + _light_f[row_base + 1]) * 0.5
+		var last := row_base + lw - 1
+		_blur_f[row_base] = (_light_f[last] + _light_f[row_base] + _light_f[row_base + 1]) * _ONE_THIRD
 		for x in range(1, lw - 1):
 			var p := row_base + x
 			_blur_f[p] = (_light_f[p - 1] + _light_f[p] + _light_f[p + 1]) * _ONE_THIRD
-		var last := row_base + lw - 1
-		_blur_f[last] = (_light_f[last - 1] + _light_f[last]) * 0.5
+		_blur_f[last] = (_light_f[last - 1] + _light_f[last] + _light_f[row_base]) * _ONE_THIRD
 
 	# Pystypassi: _blur_f -> _light_f. Reunarivit (y=0, y=lh-1) käsitellään
 	# omina tapauksinaan, jolloin sisärivien x-silmukka on täysin haarautumaton.
