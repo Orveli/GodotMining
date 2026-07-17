@@ -409,21 +409,22 @@ func _find_env_collision(body: RigidBodyData, grid: PackedByteArray, w: int, h: 
 # === KAPPALE-KAPPALE TÖRMÄYS ===
 
 func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
-	var a_pixels := a.get_world_pixels()
-	var b_pixels := b.get_world_pixels()
+	# HUOM: tätä funktiota ei tällä hetkellä kutsuta mistään (kappale-kappale-
+	# vuorovaikutus hoidetaan sekventiaalisella erase→write + body_map -tunnistuksella
+	# step():ssä). Optimoitu silti flat-rakenteisiin: iteroi rot-offsetteja ja käyttää
+	# b:n pikseleille flat-bittikarttaa Dictionaryn sijaan. Semantiikka ennallaan.
+	a._ensure_rot_cache()
+	b._ensure_rot_cache()
+	var apx := roundi(a.position.x); var apy := roundi(a.position.y)
+	var bpx := roundi(b.position.x); var bpy := roundi(b.position.y)
+	var a_rox := a.rot_ox; var a_roy := a.rot_oy
+	var b_rox := b.rot_ox; var b_roy := b.rot_oy
 
-	# AABB-broadphase
-	var a_min_x := 99999; var a_max_x := -99999
-	var a_min_y := 99999; var a_max_y := -99999
-	for wp in a_pixels:
-		a_min_x = mini(a_min_x, wp.x); a_max_x = maxi(a_max_x, wp.x)
-		a_min_y = mini(a_min_y, wp.y); a_max_y = maxi(a_max_y, wp.y)
-
-	var b_min_x := 99999; var b_max_x := -99999
-	var b_min_y := 99999; var b_max_y := -99999
-	for wp in b_pixels:
-		b_min_x = mini(b_min_x, wp.x); b_max_x = maxi(b_max_x, wp.x)
-		b_min_y = mini(b_min_y, wp.y); b_max_y = maxi(b_max_y, wp.y)
+	# AABB-broadphase (maailmakoordinaatit = rot-AABB + pyöristetty positio)
+	var a_min_x := a.rot_min_x + apx; var a_max_x := a.rot_max_x + apx
+	var a_min_y := a.rot_min_y + apy; var a_max_y := a.rot_max_y + apy
+	var b_min_x := b.rot_min_x + bpx; var b_max_x := b.rot_max_x + bpx
+	var b_min_y := b.rot_min_y + bpy; var b_max_y := b.rot_max_y + bpy
 
 	# AABB ei osu → ei törmäystä
 	if a_max_x < b_min_x - 1 or b_max_x < a_min_x - 1:
@@ -431,33 +432,43 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 	if a_max_y < b_min_y - 1 or b_max_y < a_min_y - 1:
 		return
 
-	# Narrowphase: pikseli-overlap tai kosketus (etäisyys ≤ 1)
-	var b_set := {}
-	for wp in b_pixels:
-		b_set[wp] = true
+	# Narrowphase: b:n pikselit flat-bittikartalle b:n AABB:n yli
+	var bw := b_max_x - b_min_x + 1
+	var bh := b_max_y - b_min_y + 1
+	var b_set := PackedByteArray()
+	b_set.resize(bw * bh)
+	for i in b_rox.size():
+		b_set[(b_roy[i] + bpy - b_min_y) * bw + (b_rox[i] + bpx - b_min_x)] = 1
 
-	var contact_points: Array[Vector2] = []
+	# Overlap tai kosketus (etäisyys ≤ 1)
+	var contact_sum := Vector2.ZERO
+	var contact_count := 0
 	var overlap := false
-	for wp in a_pixels:
+	for i in a_rox.size():
+		var ax := a_rox[i] + apx
+		var ay := a_roy[i] + apy
 		# Suora overlap
-		if b_set.has(wp):
-			contact_points.append(Vector2(wp))
+		if ax >= b_min_x and ax <= b_max_x and ay >= b_min_y and ay <= b_max_y \
+				and b_set[(ay - b_min_y) * bw + (ax - b_min_x)] == 1:
+			contact_sum += Vector2(ax, ay)
+			contact_count += 1
 			overlap = true
 		else:
 			# Kosketus (vierekkäiset pikselit)
 			for dir in [Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 0), Vector2i(-1, 0)]:
-				if b_set.has(wp + dir):
-					contact_points.append(Vector2(wp) + Vector2(dir) * 0.5)
+				var nx: int = ax + dir.x
+				var ny: int = ay + dir.y
+				if nx >= b_min_x and nx <= b_max_x and ny >= b_min_y and ny <= b_max_y \
+						and b_set[(ny - b_min_y) * bw + (nx - b_min_x)] == 1:
+					contact_sum += Vector2(ax, ay) + Vector2(dir) * 0.5
+					contact_count += 1
 					break
 
-	if contact_points.is_empty():
+	if contact_count == 0:
 		return
 
 	# Kontaktipiste
-	var contact := Vector2.ZERO
-	for p in contact_points:
-		contact += p
-	contact /= float(contact_points.size())
+	var contact := contact_sum / float(contact_count)
 
 	# Törmäysnormaali (A:sta B:hen)
 	var normal := (b.position - a.position)
@@ -506,7 +517,7 @@ func _resolve_body_collision(a: RigidBodyData, b: RigidBodyData) -> void:
 
 	# Erota kappaleet (pehmeä penetraation korjaus)
 	if overlap:
-		var depth := minf(float(contact_points.size()) * 0.3, 2.0)
+		var depth := minf(float(contact_count) * 0.3, 2.0)
 		var total_mass := a.mass + b.mass
 		a.position -= normal * depth * (b.mass / maxf(total_mass, 1.0))
 		b.position += normal * depth * (a.mass / maxf(total_mass, 1.0))
