@@ -119,6 +119,9 @@ const CHARGER_BASE_SLOTS := 1      # basen sisaanrakennettu latauspaikka
 const CHARGER_BUILT_SLOTS := 2     # rakennettava latausrivisto-moduuli (M4) lisaa slotit
 const SLOT_KEY_STRIDE := 1000      # globaali slot-avain = charger.id * STRIDE + slotti-indeksi
 
+# Botin kiintea rakennushinta: aina BOT_COST_IRON rautamalmia (IRON_ORE), ei nousevaa kerrointa.
+const BOT_COST_IRON := 100
+
 # 8 suuntaa (nav-naapurit)
 const NAV_DIRS: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -149,7 +152,7 @@ var _crowd_index: Dictionary = {}
 var logistics: Logistics = null
 
 # Osto & tunnisteet
-var _bought_count: int = 0                 # ostettujen bottien maara (aloitus-2 EI laske) -> hinnankorotus
+var _bought_count: int = 0                 # rakennettujen bottien maara (aloitus-2 EI laske); tilasto, ei enaa hintaan
 var _next_id: int = 0                       # monotoninen bot-id-jakaja
 
 # M3: latauspaikat. pixel_world._init_bot_sim luo base-chargerin; M4 lisaa latausrivisto-moduulin.
@@ -240,13 +243,10 @@ func add_bot(role: int, p: Vector2) -> Bot:
 #  Osto, roolinvaihto, upgrade, tilastot (A1 + A2 — API_CONTRACT_demo.md)
 # ============================================================
 
-# M2: Botti rakennetaan inventaarion IRON_ORE:sta rahan sijaan. Resepti kasvaa
-# rakennettujen bottien maaran (_bought_count) mukaan: cost_px = ceil(10 * 1.35^n).
-# Aloitusbotit (2 kpl) eivat kasvata kerrointa -> ensimmainen rakennettu (3. botti) = 10 px.
-# Progressio: 10, 14, 19, 26, 35, 47, ...
+# M2: Botti rakennetaan inventaarion IRON_ORE:sta rahan sijaan. Kiintea hinta: jokainen
+# rakennettava botti maksaa aina BOT_COST_IRON rautamalmia — ei nousevaa kerrointa.
 func next_bot_cost() -> Dictionary:
-	var px := int(ceil(10.0 * pow(1.35, float(_bought_count))))
-	return { MAT_IRON_ORE: px }
+	return { MAT_IRON_ORE: BOT_COST_IRON }
 
 
 # Onko varaa rakentaa (world.inventory kattaa reseptin)?

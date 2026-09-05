@@ -1,23 +1,23 @@
 {
   "auto_exit": true,
   "cpu_ca": true,
-  "_doc": "G2: 10 bottia yhtaaikaa toissa ilman jumeja. Rakentaa 8 lisabottia (6 miner + 2 hauler -> 10 yhteensa) inventaarion IRON_ORE:sta (M2 build_bot), designoi leveahkon alueen ja ajaa bottisimulaatiota. Todistaa: (1) lauma kasvoi 10:een, (2) KAIKKI botit liikkuivat >30px spawnista (ei deadlockia/jumia), (3) designoitu alue kuluu mittakaavassa 10 botilla (frontier + BLOCKED-reaktivointi skaalautuu). Headless (gpu_ready=false) + cpu_ca=true kuten mvp_core_loop. M2: seed-inventaario 1000 IRON_ORE kattaa 8 botin nousevat reseptit (yht. ~300 px). M3/M4: 10 botin lauma ylittaa yhden base-slotin latauskapasiteetin (90 s tyo + 60 s trickle-jono) -> ilman hiilta tyo pysahtyy ajon loppupuoliskolla ja kulutus jaa ~55 %:iin. feed_coal buustaa laturin 6x-nopeuteen — talla skenaario testaa myos M3:n hiilipolun kuormassa. Tama on tarkoituksellista pelidesignia (pehmea cap), ei jumi.",
+  "_doc": "G2: 10 bottia yhtaaikaa toissa ilman jumeja. Rakentaa 8 lisabottia (6 miner + 2 hauler -> 10 yhteensa) inventaarion IRON_ORE:sta (M2 build_bot), designoi leveahkon alueen ja ajaa bottisimulaatiota. Todistaa: (1) lauma kasvoi 10:een, (2) KAIKKI botit liikkuivat >30px spawnista (ei deadlockia/jumia), (3) designoitu alue kuluu mittakaavassa 10 botilla (frontier + BLOCKED-reaktivointi skaalautuu). Headless (gpu_ready=false) + cpu_ca=true kuten mvp_core_loop. M2: seed-inventaario 1000 IRON_ORE kattaa 8 botin kiintean reseptin (100 px/botti = yht. 800 px). M3/M4: 10 botin lauma ylittaa yhden base-slotin latauskapasiteetin -> ilman hiilta tyo pysahtyy ja kulutus jaa matalaksi. feed_coal buustaa laturin 6x-nopeuteen — talla skenaario testaa myos M3:n hiilipolun kuormassa. HUOM: louhintanopeus puolitettiin (TIER_MINE_RATE 40/70/110) -> sama alue vie ~2x tyoaikaa, joten frame-budjetti (3x5000) ja hiiliboosti (160 px) skaalattu vastaavasti jotta >=60% kulutus sailyy. Tama on tarkoituksellista pelidesignia (pehmea cap), ei jumi.",
   "steps": [
     { "cmd": "set_money", "amount": 100000 },
     { "cmd": "set_inventory", "mat": 12, "px": 1000 },
     { "cmd": "build_bot", "role": 0, "count": 6 },
     { "cmd": "build_bot", "role": 1, "count": 2 },
     { "cmd": "assert_fleet", "min": 10, "max": 10, "label": "10 bottia laumassa (2 alku + 8 rakennettua)" },
-    { "cmd": "feed_coal", "px": 80 },
+    { "cmd": "feed_coal", "px": 160 },
 
     { "cmd": "designate_rect", "side": "left", "gap": 24, "width": 128, "margin": 12, "depth": 64 },
     { "cmd": "dump_bots" },
 
-    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "run_frames", "n": 5000 },
     { "cmd": "dump_bots" },
-    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "run_frames", "n": 5000 },
     { "cmd": "dump_bots" },
-    { "cmd": "run_frames", "n": 3000 },
+    { "cmd": "run_frames", "n": 5000 },
     { "cmd": "dump_bots" },
 
     { "cmd": "assert_fleet", "min": 10, "max": 10, "label": "lauma pysyi 10:ssa (ei kadonneita botteja)" },

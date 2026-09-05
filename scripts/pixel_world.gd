@@ -45,6 +45,16 @@ const TILES_X := SIM_WIDTH / TILE_SIZE     # 104
 const TILES_Y := SIM_HEIGHT / TILE_SIZE    # 60
 const TILE_COUNT := TILES_X * TILES_Y      # 6240
 
+# ── P5-render-croppaus ───────────────────────────────────────────────────────
+# Renderöi vain tutkittu pinnan kaista, ei koko syvyyttä H. WorldViewport ja warp-
+# annulus rajataan syvimpään tutkittuun riviin (fog-rintama, LightField) + marginaali,
+# kvantisoituna STEPiin (viewport-realloc vain rajalla, ei joka frame). Kaikki tämän
+# alle jäävä syvyys piirtyy warpissa ydinmöhkäleenä (musta) — se on fog-mustaa muutenkin.
+# Kustannus skaalautuu SITEN kuin oikeasti kaivat syvemmälle, ei koko maailman koon mukaan.
+const RENDER_DEPTH_MARGIN := 48   # px rintaman alle (ettei valon fade-reuna leikkaudu)
+const RENDER_DEPTH_STEP := 64     # kvantisointi — resize vain kun ylittää STEP-rajan
+const RENDER_DEPTH_MIN := 128     # renderöity vähimmäissyvyys (pinta + alkukaivu)
+
 # CPU-puolen grid (maalaamista varten)
 var grid: PackedByteArray
 var color_seed: PackedByteArray
@@ -463,6 +473,9 @@ var terrain_rect: TextureRect
 var planet_view: TextureRect
 var planet_camera: PlanetCamera
 var planet_warp_mat: ShaderMaterial
+# P5-render-croppaus: nykyinen renderöity syvyys (px). Kasvaa fog-rintaman mukana
+# _update_render_depth():ssä; ohjaa WorldViewportin korkeutta ja warp-annuluksen r_inneriä.
+var _render_depth: int = RENDER_DEPTH_MIN
 # P6: laskeutumisintron kapseli piirretään ruutu-avaruudessa PlanetView'n päälle
 # (warp-shader näyttää r>r_surface aina taivaana -> grid-avaruuden kapseli ei näkyisi
 # avaruudessa). Node2D ei ole SubViewportissa, joten sen piirto on suoraa ruutupiirtoa.
@@ -538,7 +551,9 @@ func _ready() -> void:
 	# frame myös ilman katsojaa (headless-savutesti ja ikkunallinen toimivat samoin).
 	world_viewport = SubViewport.new()
 	world_viewport.name = "WorldViewport"
-	world_viewport.size = Vector2i(W, SIM_HEIGHT)
+	# P5-croppaus: alkukorkeus = renderöity kaista (ei koko H). Kasvaa fog-rintaman mukana.
+	_render_depth = clampi(RENDER_DEPTH_MIN, RENDER_DEPTH_MIN, SIM_HEIGHT)
+	world_viewport.size = Vector2i(W, _render_depth)
 	world_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	world_viewport.transparent_bg = false
 	world_viewport.disable_3d = true
@@ -667,7 +682,10 @@ func _setup_planet_view() -> void:
 	var vp_size := get_viewport_rect().size
 	planet_camera = PlanetCamera.new()
 	planet_camera.world_w = float(W)
-	planet_camera.world_h = float(SIM_HEIGHT)
+	# P5-croppaus: world_h = renderöity syvyys (ei koko H). Ohjaa sekä warpin r_inneriä
+	# (annuluksen sisäreuna) ETTÄ hiiri<->grid-osumatestiä johdonmukaisesti. Kasvaa
+	# _update_render_depth():ssä fog-rintaman mukana.
+	planet_camera.world_h = float(_render_depth)
 	planet_camera.screen_size = vp_size
 	planet_camera.angle = 0.0
 	planet_camera.radius_center = 0.0
@@ -677,7 +695,10 @@ func _setup_planet_view() -> void:
 	planet_warp_mat = ShaderMaterial.new()
 	planet_warp_mat.shader = warp_shader
 	planet_warp_mat.set_shader_parameter("world_tex", world_viewport.get_texture())
-	planet_warp_mat.set_shader_parameter("core_color", Color(0.16, 0.13, 0.11))
+	# Ydinmöhkäle + croppauksen alle jäävä syvyys = musta, jotta se sulautuu saumatta
+	# tutkimattomaan fog-mustaan (pixel_render: tutkimaton = color*0 = musta). Näin
+	# croppausraja ei näy renkaana ja planeetan uumen on musta (fog of war).
+	planet_warp_mat.set_shader_parameter("core_color", Color(0.0, 0.0, 0.0))
 	planet_warp_mat.set_shader_parameter("sky_color", Color(0.02, 0.02, 0.05))
 	planet_camera.apply_to_shader(planet_warp_mat)
 
@@ -1192,6 +1213,9 @@ func _process(delta: float) -> void:
 	# (headless-testit eivät renderöi). Explored-muisti kertyy botti/kaivaus-etenemästä.
 	if gpu_ready and light_field != null and frame_count % 3 == 0:
 		light_field.update(grid, _collect_light_emitters())
+		# P5-croppaus: sovita renderöity syvyys tuoreeseen fog-rintamaan (vain kun light
+		# päivittyi — sama ~20 Hz tahti; render_depth muuttuu vain STEP-rajalla).
+		_update_render_depth()
 
 	var _t0_ul := Time.get_ticks_usec()
 	_upload_render()
@@ -1608,6 +1632,34 @@ func _update_screenshake(delta: float) -> void:
 	shader_mat.set_shader_parameter("impact_intensity", impact_intensity)
 	shader_mat.set_shader_parameter("impact_uv", impact_uv)
 	shader_mat.set_shader_parameter("impact_type", impact_type_val)
+
+
+# P5-render-croppaus: sovita WorldViewportin korkeus (ja warp-annuluksen syvyys) fog-
+# rintamaan. Renderöi vain kaista [0, _render_depth]; syvempi = ydinmöhkäle (musta).
+# Kvantisoidaan STEPiin ja päivitetään vain kun arvo oikeasti muuttuu → SubViewportin
+# render-target realloc tapahtuu harvoin (kun kaivat STEP px syvemmälle), ei joka frame.
+# world_h asetetaan tässä atomisesti viewport-koon kanssa; _update_camera:n
+# apply_to_shader lukee sen seuraavassa framessa (uudet syvät rivit ovat mustia siihen asti).
+func _update_render_depth() -> void:
+	if light_field == null or world_viewport == null:
+		return
+	var target := light_field.explored_depth_px() + RENDER_DEPTH_MARGIN
+	# Kvantisoi ylöspäin STEPiin ja rajaa [MIN, H].
+	target = int(ceil(float(target) / float(RENDER_DEPTH_STEP))) * RENDER_DEPTH_STEP
+	target = clampi(target, RENDER_DEPTH_MIN, SIM_HEIGHT)
+	if target == _render_depth:
+		return
+	_render_depth = target
+	world_viewport.size = Vector2i(W, _render_depth)
+	if planet_camera != null:
+		planet_camera.world_h = float(_render_depth)
+	# Sido komposiittitekstuuri uudelleen resizen jälkeen (Godot voi luoda ViewportTexturen
+	# render-targetin uusiksi koon muuttuessa). Halpaa — tapahtuu vain STEP-rajalla.
+	var vtex := world_viewport.get_texture()
+	if planet_warp_mat != null:
+		planet_warp_mat.set_shader_parameter("world_tex", vtex)
+	if planet_view != null:
+		planet_view.texture = vtex
 
 
 # === KAMERA / ZOOM ===

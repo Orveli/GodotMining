@@ -1,0 +1,6 @@
+[mcp_servers.pixellab]
+command = "npx"
+args = ["pixellab-mcp"]
+
+[mcp_servers.pixellab.env]
+PIXELLAB_SECRET = "88fb1dda-78a9-401e-9fa0-3d1b3e7f9776"

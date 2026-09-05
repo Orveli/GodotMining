@@ -122,22 +122,16 @@ func spend_materials(recipe: Dictionary) -> bool           # tarkistaa + vahenta
   Raha säilyy unlockeja, tier-upgradeja (`upgrade_bot`) ja jalostuskoneiden (furnace/crusher/conveyor)
   ostoa varten — **rahatalous SÄILYY, inventaario tulee sen ETEEN.**
 
-### 2.4 Tuning-vakiot (lähtöarvot — mitoitettu mine_rate=80 px/s, carry_cap=40 px vasten)
+### 2.4 Tuning-vakiot (lähtöarvot — alk. mitoitettu mine_rate=80 px/s, carry_cap=40 px vasten)
 
-**Bottihinta-progressio (M2):** `next_bot_cost(n)` missä n = jo rakennettujen bottien määrä
-(aloitus-2 EI laske). Resepti on pelkkää IRON_ORE:a.
+> **Päivitys (heinä 2026):** louhintanopeus puolitettiin — `TIER_MINE_RATE` on nyt **40/70/110 px/s**
+> (Mk1/Mk2/Mk3, oli 80/140/220). Alla oleva akku/lataus-mitoitus on alkuperäinen; hitaampi louhinta
+> vie ~2× työaikaa (tasapainotettu antamalla rautaa runsaammin, ks. alla).
 
-| n (rakennettu) | IRON_ORE px | Huom |
-|---|---|---|
-| 0 (3. botti) | 10 | < 1 hauler-lasti (40 px) → eka replikaatio < 1 min |
-| 1 | 14 | |
-| 2 | 19 | jono-ongelma syntyy ~tässä (4. botti kentällä) |
-| 3 | 26 | |
-| 4 | 35 | |
-| 5 | 47 | |
-
-Kaava: `cost_px = int(ceil(10.0 * pow(1.35, n)))`. Kasvu loiva jotta lauma skaalautuu, mutta
-kalliimpi kuin rahamalli — pitää replikaation resurssisidonnaisena.
+**Bottihinta (M2):** `next_bot_cost()` = **kiinteä 50 IRON_ORE / botti** (`BotManager.BOT_COST_IRON`).
+Aiempi nouseva resepti `ceil(10.0 * pow(1.35, n))` on korvattu — jokainen rakennettava botti maksaa
+aina 50 rautaa. `_bought_count` päivittyy yhä `build_bot()`:ssa tilastoja varten. Kiinteä hinta pysyy
+saavutettavana koska rautaa on nyt runsaammin (iron-suonet boostattu, ks. `fog_and_veins_spec.md`).
 
 **Akku + lataus (M3):** akkuyksikkö = "työsekunti".
 
@@ -266,10 +260,10 @@ hehku kun varaa on.
 
 ```gdscript
 # bot_manager.gd
-# Seuraavan botin resepti: { MAT_IRON_ORE: int }. _bought_count kasvattaa hintaa.
+# Botin resepti: kiinteä { MAT_IRON_ORE: 50 } (ei enää nouseva _bought_count-kaava).
+const BOT_COST_IRON := 50
 func next_bot_cost() -> Dictionary:
-    var px := int(ceil(10.0 * pow(1.35, float(_bought_count))))
-    return { MAT_IRON_ORE: px }
+    return { MAT_IRON_ORE: BOT_COST_IRON }
 
 # Onko varaa rakentaa (world.inventory kattaa reseptin)?
 func can_build_bot() -> bool:
@@ -291,7 +285,7 @@ func build_bot(role: int) -> bool:
 **Poista** `next_bot_price()` ja `buy_bot()` (money). Päivitä kaikki kutsujat: `ui.gd` (`_bot_price`
 → näyttää reseptin px-määrän; `_buy_bot` → `build_bot`), ScenarioRunner.
 
-**UI-muutokset:** bot-trayn osto-item ja/tai base-popover näyttää reseptin ("10 rautaa") ja **hehkuu
+**UI-muutokset:** bot-trayn osto-item ja/tai base-popover näyttää reseptin ("50 rautaa") ja **hehkuu
 (amber-glow) kun `can_build_bot()` on tosi.** `_can_afford`-rahalogiikka vaihtuu `can_build_bot()`:iin.
 Jos ei varaa → toast "Ei tarpeeksi rautaa (tarvitaan N)".
 

@@ -35,12 +35,16 @@ Normalisoitu maanalainen syvyys 0=pinta → 1=pohja (`max_dp` -perustan mukaan).
 | Aine | ID | depth_min | depth_max | vein_count | vein_len | thickness |
 |---|---|---|---|---|---|---|
 | Hiili COAL | 16 | 0.00 | 0.35 | 12 | 40–70 | 2–3 |
-| Rauta IRON_ORE | 12 | 0.10 | 0.55 | 10 | 35–60 | 2–3 |
+| Rauta IRON_ORE | 12 | 0.10 | 0.55 | 24 | 55–95 | 3–4.5 |
 | Kupari COPPER | 20 | 0.35 | 0.75 | 7 | 30–50 | 2 |
 | Kulta GOLD_ORE | 13 | 0.55 | 0.90 | 5 | 25–40 | 1–2 |
 | Rare earth RARE_EARTH | 21 | 0.75 | 1.00 | 3 | 20–35 | 1–2 |
 
 Sijoita arvokkain ensin (ei ylikirjoita). Määrät static-muuttujiksi (kuten nykyiset `*_count`) debug_menu-tuen vuoksi.
+
+> **Rauta boostattu** (heinä 2026): rauta on bottien rakennusmateriaali ja botin hinta on nyt
+> kiinteä 50 px, joten rautaa tarvitaan paljon enemmän. `iron_count` 10→24, `vein_len` 35–60→55–95,
+> `thickness` 2–3→3–4.5 (ks. `world_gen.gd`). Muut malmit ennallaan.
 
 ### 1.4 Vaiheen 1 testaus
 Aja `worldgen_test.gd` headless (Godot 4.6 polku: Desktop/Godot/, katso muisti). Varmista: ei kaatumista, uudet materiaalit generoituvat, tyhjä% järkevä, suonet syvyysvyöhykkeillään. Iteroi tuning autonomisesti.

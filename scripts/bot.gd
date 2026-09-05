@@ -20,7 +20,8 @@ enum BotState { IDLE, MOVE, WORK, CARRY_MOVE, DUMP, SEEK_CHARGE, CHARGING }
 # (~1.75x / 2.75x — sama suhteellinen kasvu-idea kuin GDD:n 25->50->90). Carry ja move_speed
 # tulevat suoraan GDD:sta (40/90/180 ja 40/70/110); Mk1 = nykyinen balanssi.
 const TIER_CARRY: Array[int] = [40, 90, 180]
-const TIER_MINE_RATE: Array[float] = [80.0, 140.0, 220.0]
+# Louhintanopeus puolitettu 50 % aiemmasta (oli [80,140,220]) — tuntui liian nopealta.
+const TIER_MINE_RATE: Array[float] = [40.0, 70.0, 110.0]
 const TIER_MOVE_SPEED: Array[float] = [40.0, 70.0, 110.0]
 const MAX_TIER := 3        # Mk3 on korkein
 
@@ -28,7 +29,7 @@ const MAX_TIER := 3        # Mk3 on korkein
 # Nama vastaavat TIER_*[0]:aa; kayta bot-instanssin carry_cap()/mine_rate()/move_speed()
 # -metodeja aina kun tier-riippuvuus on tarpeen.
 const MOVE_SPEED := 40.0   # px/s (Mk1)
-const MINE_RATE := 80.0    # px/s (Mk1; 16x16-solu = 256 px -> tayden kivisolun louhinta ~3.2 s)
+const MINE_RATE := 40.0    # px/s (Mk1; puolitettu — 16x16-solu = 256 px -> tayden kivisolun louhinta ~6.4 s)
 const CARRY_CAP := 40      # px  (Mk1)
 
 # --- Akku (M3) ---

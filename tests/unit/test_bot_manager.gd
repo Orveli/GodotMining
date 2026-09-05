@@ -191,7 +191,7 @@ func _test_miner_mines_stone_cell() -> void:
 
 	var iters := 0
 	while b.state == Bot.BotState.WORK and iters < 500:
-		bm._work_mine(b, 0.1)  # 80 px/s * 0.1 = 8 px/tikki
+		bm._work_mine(b, 0.1)  # 40 px/s * 0.1 = 4 px/tikki
 		iters += 1
 
 	var gravel := _count_mat_in_cell(w, dx, dy, MAT_GRAVEL)
@@ -224,9 +224,9 @@ func _test_miner_progresses_on_granular() -> void:
 	w.desig.set_cell(dx, dy, D_MINING)
 	b.state = Bot.BotState.WORK
 
-	# Yksi tikki (0.2 s -> budjetti 16 px @ MINE_RATE=80): cursor etenee heti -> ei stall-riippuvuutta.
+	# Yksi tikki (0.2 s -> budjetti 8 px @ MINE_RATE=40): cursor etenee heti -> ei stall-riippuvuutta.
 	bm._work_mine(b, 0.2)
-	_check(b.mine_cursor >= 16, "granulaarilla edistyminen alkaa heti (cursor=%d >= 16)" % b.mine_cursor)
+	_check(b.mine_cursor >= 8, "granulaarilla edistyminen alkaa heti (cursor=%d >= 8)" % b.mine_cursor)
 
 	var iters := 0
 	while b.state == Bot.BotState.WORK and iters < 500:
@@ -318,28 +318,28 @@ func _test_blocked_reactivates_when_neighbor_opens() -> void:
 
 # --- A1/M2: Rakennus & nouseva resepti ---------------------------------------
 
-# next_bot_cost(): { IRON_ORE: ceil(10 * 1.35^n) }, n = rakennetut (aloitus-2 ei laske).
+# next_bot_cost(): kiintea { IRON_ORE: 100 } (BotManager.BOT_COST_IRON) — ei enaa nouseva resepti.
 # build_bot(): tarkistaa inventaarion IRON_ORE:n, kuluttaa reseptin, spawnaa world.base.spawn_pos():iin.
 const MAT_IRON_ORE_T := 12
 func _test_buy_bot_price_and_spawn() -> void:
 	var w := _make_world()
 	var bm := BotManager.new()
 	bm.setup(w)
-	# Alkutila: 2 aloitusbottia EIVAT ole rakennettuja -> ensimmainen resepti on silti 10 rautaa.
+	# Kiintea hinta: jokainen rakennettava botti maksaa aina 100 rautaa.
 	bm.add_bot(Bot.Role.MINER, Vector2(10, 10))
 	bm.add_bot(Bot.Role.HAULER, Vector2(20, 10))
-	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 10, "ensimmaisen rakennettavan botin hinta on 10 rautaa (aloitusbotit eivat kasvata), sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 100, "botin hinta on kiintea 100 rautaa, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
 
 	# Ei varaa -> rakennus epaonnistuu, inventaario ja bottimaara ennallaan.
-	w.inventory[MAT_IRON_ORE_T] = 9
+	w.inventory[MAT_IRON_ORE_T] = 99
 	var before_count := bm.bot_count()
-	_check(bm.can_build_bot() == false, "can_build_bot() false kun rautaa ei riita")
+	_check(bm.can_build_bot() == false, "can_build_bot() false kun rautaa ei riita (99 < 100)")
 	_check(bm.build_bot(Bot.Role.MINER) == false, "build_bot palauttaa false kun rautaa ei riita")
 	_check(bm.bot_count() == before_count, "epaonnistunut rakennus ei spawnaa bottia")
-	_check(int(w.inventory.get(MAT_IRON_ORE_T, 0)) == 9, "epaonnistunut rakennus ei kuluta rautaa")
+	_check(int(w.inventory.get(MAT_IRON_ORE_T, 0)) == 99, "epaonnistunut rakennus ei kuluta rautaa")
 
 	# Riittava rauta -> rakennus onnistuu, rauta kuluu, botti ilmestyy basen spawn_pos:iin.
-	w.inventory[MAT_IRON_ORE_T] = 10
+	w.inventory[MAT_IRON_ORE_T] = 100
 	_check(bm.can_build_bot() == true, "can_build_bot() true kun rautaa riittaa")
 	_check(bm.build_bot(Bot.Role.MINER) == true, "build_bot onnistuu kun rautaa riittaa")
 	_check(int(w.inventory.get(MAT_IRON_ORE_T, 0)) == 0, "rakennus kulutti raudan tasan reseptin verran")
@@ -347,12 +347,11 @@ func _test_buy_bot_price_and_spawn() -> void:
 	var spawned: Bot = bm.bots[bm.bots.size() - 1]
 	_check(spawned.pos.is_equal_approx(w.base.spawn_pos()), "uusi botti spawnasi basen spawn_pos:iin")
 
-	# Nouseva resepti: 2. rakennettu botti (n=1) -> ceil(10*1.35) = 14.
-	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 14, "toisen rakennetun botin hinta nousee 14:aan, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
-	w.inventory[MAT_IRON_ORE_T] = 14
-	_check(bm.build_bot(Bot.Role.HAULER) == true, "toinen rakennus onnistuu 14 raudalla")
-	# 3. rakennettu botti (n=2) -> ceil(10*1.35^2) = 19.
-	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 19, "kolmannen rakennetun botin hinta nousee 19:aan, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
+	# Kiintea hinta: seuraavatkin botit maksavat yha 100 (ei nouseva resepti).
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 100, "toinenkin botti maksaa kiintean 100, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
+	w.inventory[MAT_IRON_ORE_T] = 100
+	_check(bm.build_bot(Bot.Role.HAULER) == true, "toinen rakennus onnistuu 100 raudalla")
+	_check(int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)) == 100, "kolmaskin botti maksaa kiintean 100, sai %d" % int(bm.next_bot_cost().get(MAT_IRON_ORE_T, 0)))
 
 
 # --- A1: Roolinvaihto kesken tyon --------------------------------------------
@@ -402,8 +401,8 @@ func _test_upgrade_bot_tiers() -> void:
 	bm.setup(w)
 	var b := bm.add_bot(Bot.Role.MINER, Vector2(10, 10))
 	_check(b.tier == 1, "botti syntyy Mk1:na")
-	_check(b.carry_cap() == 40 and b.mine_rate() == 80.0 and b.move_speed() == 40.0,
-		"Mk1-arvot: carry=40 mine=80 speed=40, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
+	_check(b.carry_cap() == 40 and b.mine_rate() == 40.0 and b.move_speed() == 40.0,
+		"Mk1-arvot: carry=40 mine=40 speed=40, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
 	_check(bm.upgrade_price(b.id) == 400, "Mk1->Mk2 hinta on 400")
 
 	# Ei varaa -> upgrade epaonnistuu, tier ennallaan.
@@ -416,16 +415,16 @@ func _test_upgrade_bot_tiers() -> void:
 	_check(bm.upgrade_bot(b.id) == true, "Mk1->Mk2 onnistuu 400:lla")
 	_check(w.money == 0, "upgrade vahensi rahan tasan hinnan verran")
 	_check(b.tier == 2, "botti on nyt Mk2")
-	_check(b.carry_cap() == 90 and b.mine_rate() == 140.0 and b.move_speed() == 70.0,
-		"Mk2-arvot: carry=90 mine=140 speed=70, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
+	_check(b.carry_cap() == 90 and b.mine_rate() == 70.0 and b.move_speed() == 70.0,
+		"Mk2-arvot: carry=90 mine=70 speed=70, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
 
 	# Mk2->Mk3 hinta 900.
 	_check(bm.upgrade_price(b.id) == 900, "Mk2->Mk3 hinta on 900")
 	w.money = 900
 	_check(bm.upgrade_bot(b.id) == true, "Mk2->Mk3 onnistuu 900:lla")
 	_check(b.tier == 3, "botti on nyt Mk3")
-	_check(b.carry_cap() == 180 and b.mine_rate() == 220.0 and b.move_speed() == 110.0,
-		"Mk3-arvot: carry=180 mine=220 speed=110, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
+	_check(b.carry_cap() == 180 and b.mine_rate() == 110.0 and b.move_speed() == 110.0,
+		"Mk3-arvot: carry=180 mine=110 speed=110, sai carry=%d mine=%.0f speed=%.0f" % [b.carry_cap(), b.mine_rate(), b.move_speed()])
 
 	# Mk3 on katto -> ei enaa upgradea.
 	_check(bm.upgrade_price(b.id) == 0, "Mk3:lla ei ole enaa upgrade-hintaa (0)")

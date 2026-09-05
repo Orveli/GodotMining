@@ -55,7 +55,7 @@ static func _wrap_x(x: int, w: int) -> int:
 # Kertymien lukumäärä — enemmän ja tasaisemmin jaettu
 # (coal/iron/gold: nyt suonien lukumäärä _place_vein_set():lle, ei enää blobeja)
 static var coal_count:  int = 12
-static var iron_count:  int = 10
+static var iron_count:  int = 24   # Rauta = bottien rakennusmateriaali -> paljon enemman suonia
 static var gold_count:  int = 5
 static var oil_count:   int = 5
 static var water_count: int = 5
@@ -99,10 +99,10 @@ static var coal_vein_len_min:  int = 40
 static var coal_vein_len_max:  int = 70
 static var coal_thickness_min: float = 2.0
 static var coal_thickness_max: float = 3.0
-static var iron_vein_len_min:  int = 35
-static var iron_vein_len_max:  int = 60
-static var iron_thickness_min: float = 2.0
-static var iron_thickness_max: float = 3.0
+static var iron_vein_len_min:  int = 55   # Isommat rautasuonet (oli 35–60)
+static var iron_vein_len_max:  int = 95
+static var iron_thickness_min: float = 3.0   # Paksummat rautasuonet (oli 2.0–3.0)
+static var iron_thickness_max: float = 4.5
 static var copper_vein_len_min:  int = 30
 static var copper_vein_len_max:  int = 50
 static var copper_thickness_min: float = 2.0

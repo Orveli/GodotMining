@@ -44,6 +44,11 @@ var light: PackedByteArray
 # Pysyvä tutkimusmuisti 0..1 (LW*LH). Ei koskaan pienene paitsi clear_explored()-kutsussa.
 var explored: PackedFloat32Array
 
+# Syvin DS-rivi (cy) jossa on tutkittu solu, tai -1 jos mitään ei ole vielä tutkittu.
+# Monotoninen (kasvaa vain) paitsi clear_explored()/setup() nollaa. Render-croppaus
+# (pixel_world) lukee tämän kautta explored_depth_px():n → renderöi vain pinnan kaista.
+var deepest_explored_cy: int = -1
+
 # Render-shaderille annettava tekstuuri (filter_linear samplausta varten).
 var texture: ImageTexture
 
@@ -70,6 +75,7 @@ func setup(sim_w: int, sim_h: int) -> void:
 	light.fill(0)
 	explored.resize(cell_count)
 	explored.fill(0.0)
+	deepest_explored_cy = -1
 	_light_f.resize(cell_count)
 	_light_f.fill(0.0)
 	_blur_f.resize(cell_count)
@@ -96,6 +102,15 @@ func get_texture() -> ImageTexture:
 # Nollaa pysyvän tutkimusmuistin — käytetään maailman regeneroinnin yhteydessä.
 func clear_explored() -> void:
 	explored.fill(0.0)
+	deepest_explored_cy = -1
+
+
+# Syvimmän tutkitun rivin alareuna sim-pikseleinä (0 jos mitään ei ole tutkittu).
+# pixel_world.gd:n render-croppaus käyttää tätä renderöitävän kaistan syvyytenä.
+func explored_depth_px() -> int:
+	if deepest_explored_cy < 0:
+		return 0
+	return mini((deepest_explored_cy + 1) * DS, sim_height)
 
 
 # Pääpäivitys. grid = materiaali-id per sim-pikseli (PackedByteArray, koko sim_w*sim_h).
@@ -237,8 +252,13 @@ func _blur_3x3() -> void:
 # --- Askel 5: päivitä pysyvä tutkimusmuisti ---
 func _update_explored_memory() -> void:
 	for i in _light_f.size():
-		if _light_f[i] > EXPLORED_THRESHOLD:
+		# Vain VASTA tutkituksi muuttuvat solut (explored 0 -> 1): näin i/lw-jako ajetaan
+		# vain rintaman etureunassa (harvat solut/frame), ei koko puskurille joka frame.
+		if _light_f[i] > EXPLORED_THRESHOLD and explored[i] == 0.0:
 			explored[i] = 1.0
+			var cy := i / lw
+			if cy > deepest_explored_cy:
+				deepest_explored_cy = cy
 
 
 # --- Askel 6: kirjoita lopullinen 0..255-puskuri Image/ImageTexture-siirtona ---

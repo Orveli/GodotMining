@@ -200,7 +200,7 @@ var _onboarding_bot_base: int = 0
 const ONBOARDING_TEXTS: Array[String] = [
 	"Vedä hiirellä kaivuualue rautamalmin päälle (oikealla)",
 	"Miner louhii, Hauler kantaa baseen — rauta karttuu",
-	"10 rautaa riittää: avaa Botit [TAB] ja rakenna botti",
+	"50 rautaa riittää: avaa Botit [TAB] ja rakenna botti",
 ]
 
 # ── Toast (välitavoitteet) ─────────────────────────────────────────────────
